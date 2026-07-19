@@ -1,0 +1,28 @@
+{
+  "name": "kimaki-whisper",
+  "version": "0.1.0",
+  "description": "Local voice-note transcription sidecar for Kimaki — free, private, zero upstream changes. Registers /whisper-* Discord commands and serves transcription on your machine.",
+  "type": "module",
+  "license": "MIT",
+  "bin": { "kimaki-whisper": "dist/cli.js" },
+  "files": ["dist", "README.md"],
+  "scripts": {
+    "build": "tsc",
+    "dev": "tsx src/cli.ts",
+    "typecheck": "tsc --noEmit"
+  },
+  "engines": { "node": ">=20" },
+  "dependencies": {
+    "discord.js": "^14.16.0",
+    "prism-media": "^1.3.5",
+    "opusscript": "^0.0.8"
+  },
+  "optionalDependencies": {
+    "@discordjs/opus": "^0.10.0"
+  },
+  "devDependencies": {
+    "@types/node": "^22",
+    "tsx": "^4",
+    "typescript": "^5"
+  }
+}
