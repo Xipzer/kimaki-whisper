@@ -521,7 +521,7 @@ function persistHistory(): void {
   try { fs.writeFileSync(path.join(workspaceDir(), 'history.json'), JSON.stringify(history.slice(-24))) } catch {}
 }
 
-async function think(userText: string): Promise<string> {
+export async function think(userText: string): Promise<string> {
   const url = brainUrl()
   if (!url) return "My reasoning engine isn't configured yet."
 
@@ -790,8 +790,11 @@ let connection: VoiceConnection | null = null
 let player: AudioPlayer | null = null
 let busy = false
 
+export const spokenTranscript: string[] = []
 let speakChain: Promise<void> = Promise.resolve()
 async function speak(text: string): Promise<void> {
+  spokenTranscript.push(text)
+  if (spokenTranscript.length > 50) spokenTranscript.splice(0, 20)
   const run = async (): Promise<void> => {
     if (!connection || !player) return
     if (isSilenced() && Date.now() > silenceGrace) { log('wendy: speak suppressed (silenced)'); return }
