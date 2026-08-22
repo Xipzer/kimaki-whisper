@@ -876,7 +876,7 @@ setInterval(() => {
 }, 30000).unref()
 
 // ── FEATURE A: watchlist — passive notifications on thread replies ──
-type Watch = { id: string; label: string; lastLen: number; expires: number; seen?: boolean; idle?: number; more?: boolean }
+type Watch = { id: string; label: string; fp: string; baselined: boolean; expires: number; seen?: boolean; idle?: number; more?: boolean }
 const watchlist: Watch[] = []
 const pendingAnnouncements: string[] = []
 const digestQueue: string[] = []
@@ -917,26 +917,37 @@ setInterval(() => {
     if (pendingAnnouncements.length > 8) pendingAnnouncements.splice(0, pendingAnnouncements.length - 8)
   }
 }, 5 * 60 * 1000).unref()
+function fingerprint(tail: string): string { return tail.slice(-3000) }
 function watchSession(id: string, label: string): void {
   label = labelFor(id, label)
   if (watchlist.some((w) => w.id === id)) return
-  watchlist.push({ id, label, lastLen: -1, expires: Date.now() + 45 * 60 * 1000 })
+  const w: Watch = { id, label, fp: '', baselined: false, expires: Date.now() + 45 * 60 * 1000 }
+  watchlist.push(w)
   log(`wendy: watching ${label} (${id})`)
+  // Baseline NOW — replies landing after this instant are deltas. Baselining on
+  // the first poll (~45s later) silently swallowed fast replies.
+  void runKimaki(['session', 'read', id], 45000, 500_000, true).then((tail) => {
+    if (!tail.startsWith('ERROR')) w.fp = fingerprint(tail)
+    w.baselined = true
+  })
 }
 async function pollWatchlist(): Promise<void> {
   for (let i = watchlist.length - 1; i >= 0; i--) {
     const w = watchlist[i]
     if (Date.now() > w.expires) { watchlist.splice(i, 1); continue }
+    if (!w.baselined) continue
     const tail = await runKimaki(['session', 'read', w.id], 45000, 500_000, true)
     if (tail.startsWith('ERROR')) continue
-    if (w.lastLen === -1) { w.lastLen = tail.length; continue }
-    if (tail.length > w.lastLen + 50) {
+    const nfp = fingerprint(tail)
+    if (nfp !== w.fp) {
       const first = !w.seen
-      w.seen = true; w.idle = 0; w.lastLen = tail.length
+      w.seen = true; w.idle = 0; w.fp = nfp
+      diag('watch_delta', { id: w.id, label: w.label, first })
       if (first) announce(await summarizeForVoice(w.label, recentMessages(tail, 3)), 'interrupt')
       else w.more = true
-    } else if (w.seen && (w.idle = (w.idle ?? 0) + 1) >= 3) {
+    } else if (w.seen && (w.idle = (w.idle ?? 0) + 1) >= 2) {
       watchlist.splice(i, 1)
+      diag('watch_done', { id: w.id, label: w.label, hadMore: !!w.more })
       if (w.more) announce(await summarizeForVoice(w.label + ' (finished)', recentMessages(tail, 3)), 'interrupt')
     }
   }
@@ -992,6 +1003,8 @@ let capturing = false
 let pendingUtterance: string | null = null
 let inputSeq = 0
 let busyAckGiven = false
+let turnStartedAt = 0
+let lastBusyAck = 0
 let lastConvoActivity = 0
 const convoEvents: string[] = []
 // Deliver background results only when the conversation has space:
@@ -1015,14 +1028,16 @@ async function runTurn(text: string): Promise<void> {
     pendingUtterance = pendingUtterance ? `${pendingUtterance} — ${text}`.slice(-1500) : text
     log(`wendy: busy — queued "${text.slice(0, 50)}"`)
     diag('queued_while_busy', { text })
-    if (!busyAckGiven && !isSilenced()) {
+    if (!busyAckGiven && !isSilenced() && Date.now() - turnStartedAt > 10000 && Date.now() - lastBusyAck > 90000) {
       busyAckGiven = true
+      lastBusyAck = Date.now()
       void speak("One sec — I heard you, just finishing something.")
     }
     return
   }
   busy = true
   busyAckGiven = false
+  turnStartedAt = Date.now()
   lastConvoActivity = Date.now()
   const watchdog = setTimeout(() => {
     log('wendy WATCHDOG: utterance pipeline exceeded 4min — force-releasing')
