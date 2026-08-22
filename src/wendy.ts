@@ -24,7 +24,7 @@ import {
 import type { Client, VoiceState, VoiceBasedChannel } from 'discord.js'
 import prism from 'prism-media'
 import { Readable } from 'node:stream'
-import { execFile } from 'node:child_process'
+import { execFile, spawn } from 'node:child_process'
 import { loadConfig, log } from './config.js'
 
 // ── config accessors ─────────────────────────────────────────────
@@ -220,7 +220,7 @@ const TOOLS = [
       parameters: {
         type: 'object',
         properties: {
-          chars: { type: 'number', description: 'How much recent transcript to read, from the end (default 4000, max 30000). Use larger values to dig deeper into history when recent context references earlier events.' }, session_id: { type: 'string' } },
+          chars: { type: 'number', description: 'Omit for the default: the last few messages, aggregated and cleaned. Set a value (up to 30000) to read that much raw recent transcript when you need to dig deeper into history.' }, session_id: { type: 'string' } },
         required: ['session_id'],
       },
     },
@@ -291,6 +291,14 @@ const TOOLS = [
   {
     type: 'function',
     function: {
+      name: 'index_stats',
+      description: 'Exact stats of your thread index: total threads, projects, last refresh. ALWAYS use this when asked how many threads/projects you know — never estimate from lookup results.',
+      parameters: { type: 'object', properties: {} },
+    },
+  },
+  {
+    type: 'function',
+    function: {
       name: 'say',
       description: 'Speak a short sentence to the owner RIGHT NOW while you keep working ("one sec, checking that thread"). Use this whenever a task needs multiple steps so the owner is never left in silence. After say, CONTINUE with your tools — your final answer comes at the end.',
       parameters: {
@@ -348,11 +356,42 @@ const TOOLS = [
 
 function runKimaki(args: string[], timeoutMs = 30000, maxChars = 6000, fromEnd = false): Promise<string> {
   return new Promise((resolve) => {
-    execFile('kimaki', args, { timeout: timeoutMs, maxBuffer: 8 * 1024 * 1024, killSignal: 'SIGKILL' }, (err, stdout, stderr) => {
-      if (err) resolve(`ERROR: ${String(err.message).slice(0, 300)}`)
-      else resolve(fromEnd ? (stdout || stderr || '').slice(-maxChars) : (stdout || stderr || '').slice(0, maxChars))
+    const child = spawn('kimaki', args, { stdio: ['ignore', 'pipe', 'pipe'] })
+    let out = ''
+    const keep = Math.max(maxChars * 3, 200_000)
+    const absorb = (c: Buffer) => {
+      out += c.toString()
+      if (fromEnd && out.length > keep * 2) out = out.slice(-keep)
+      else if (!fromEnd && out.length > keep * 2) { out = out.slice(0, keep); child.kill('SIGKILL') }
+    }
+    child.stdout.on('data', absorb)
+    child.stderr.on('data', absorb)
+    const timer = setTimeout(() => child.kill('SIGKILL'), timeoutMs)
+    child.on('error', (e) => { clearTimeout(timer); resolve(`ERROR: ${String(e.message).slice(0, 300)}`) })
+    child.on('close', (code) => {
+      clearTimeout(timer)
+      if (code !== 0 && !out.trim()) { resolve(`ERROR: kimaki exited ${code}`); return }
+      resolve(fromEnd ? out.slice(-maxChars) : out.slice(0, maxChars))
     })
   })
+}
+
+// ── structure-aware recency: last N real messages, tool noise stripped ──
+function recentMessages(md: string, n = 4): string {
+  const parts = md.split(/^### (?=👤|🤖)/m).filter((p) => p.trim())
+  const cleaned = parts.map((p) => {
+    const body = p
+      .replace(/^\*\*Started using [^\n]+\n?/gm, '')
+      .replace(/^> 🛠️[^\n]*\n?/gm, '')
+      .replace(/^\*Completed in [^\n]+\n?/gm, '')
+      .trim()
+    return body
+  }).filter((p) => {
+    const afterHeader = p.replace(/^(👤 User|🤖 Assistant[^\n]*)\n?/, '').replace(/\s+/g, '')
+    return afterHeader.length > 5
+  })
+  const recent = cleaned.slice(-n)
+  return recent.length ? recent.map((p) => '### ' + p.slice(0, 2000)).join('\n\n') : md.slice(-3000)
 }
 
 async function executeTool(name: string, args: Record<string, unknown>): Promise<string> {
@@ -405,9 +444,11 @@ async function executeTool(name: string, args: Record<string, unknown>): Promise
     return out.slice(-500) || 'dispatched'
   }
   if (name === 'read_session') {
-    const depth = Math.min(Math.max(Number(args.chars) || 4000, 500), 30000)
+    const deep = Number(args.chars) || 0
     const out = await runKimaki(['session', 'read', String(args.session_id ?? '')], 60000, 500_000, true)
-    return out.slice(-depth) || 'empty session'
+    if (out.startsWith('ERROR')) return out
+    if (deep) return out.slice(-Math.min(Math.max(deep, 500), 30000)) || 'empty session'
+    return recentMessages(out, 4) || 'empty session'
   }
   if (name === 'bash') {
     const timeoutSec = Math.min(Number(args.timeout_sec) || 60, 300)
@@ -446,6 +487,10 @@ async function executeTool(name: string, args: Record<string, unknown>): Promise
       ...(['interrupt', 'digest', 'onjoin'].includes(String(args.tier)) ? { tier: String(args.tier) as NotifyTier } : {}),
     })
     return `saved route "${args.name}"`
+  }
+  if (name === 'index_stats') {
+    const age = lastIndexRefresh ? Math.round((Date.now() - lastIndexRefresh) / 60000) : -1
+    return `${threadIndex.length} threads across ${indexProjectCount || 'unknown'} projects${age >= 0 ? `, refreshed ${age} min ago` : ' (loaded from disk, refresh pending)'}`
   }
   if (name === 'say') {
     await speak(String(args.text ?? ''))
@@ -619,6 +664,8 @@ let lastBrainWake = 0
 // ── auto-refreshed index of ALL sessions across ALL projects ──────
 type ThreadIndexEntry = { id: string; title: string; dir: string; updated?: number }
 let threadIndex: ThreadIndexEntry[] = []
+let lastIndexRefresh = 0
+let indexProjectCount = 0
 // ── Wendy's soft-rename map: session id → short spoken nickname ──
 const nicknamesPath = () => path.join(workspaceDir(), 'nicknames.json')
 let nicknames: Record<string, string> = {}
@@ -655,6 +702,7 @@ async function refreshThreadIndexInner(): Promise<void> {
     }
   }
   log(`wendy: index walk done — ${next.length} sessions`)
+  lastIndexRefresh = Date.now(); indexProjectCount = projects.length
   if (next.length && threadIndex.length) {
     const prev = new Map(threadIndex.map((e) => [e.id, e.updated ?? 0]))
     const changed = next.filter((e) => prev.has(e.id) && (e.updated ?? 0) > (prev.get(e.id) ?? 0) + 1000 && !watchlist.some((w) => w.id === e.id))
@@ -662,7 +710,7 @@ async function refreshThreadIndexInner(): Promise<void> {
     for (const e of changed.slice(0, 3)) {
       const label = labelFor(e.id, e.title)
       const tail = await runKimaki(['session', 'read', e.id], 45000, 500_000, true)
-      announce(tail.startsWith('ERROR') ? `${label} had activity.` : await summarizeForVoice(label, tail.slice(-2500)), tierFor(e.id))
+      announce(tail.startsWith('ERROR') ? `${label} had activity.` : await summarizeForVoice(label, recentMessages(tail, 3)), tierFor(e.id))
     }
     for (const e of changed.slice(3, 5)) announce(`${labelFor(e.id, e.title)} also moved.`, tierFor(e.id))
     if (changed.length > 5) announce(`Plus ${changed.length - 5} more threads had activity.`, 'digest')
@@ -764,11 +812,11 @@ async function pollWatchlist(): Promise<void> {
     if (tail.length > w.lastLen + 50) {
       const first = !w.seen
       w.seen = true; w.idle = 0; w.lastLen = tail.length
-      if (first) announce(await summarizeForVoice(w.label, tail.slice(-2500)), 'interrupt')
+      if (first) announce(await summarizeForVoice(w.label, recentMessages(tail, 3)), 'interrupt')
       else w.more = true
     } else if (w.seen && (w.idle = (w.idle ?? 0) + 1) >= 3) {
       watchlist.splice(i, 1)
-      if (w.more) announce(await summarizeForVoice(w.label + ' (finished)', tail.slice(-2500)), 'interrupt')
+      if (w.more) announce(await summarizeForVoice(w.label + ' (finished)', recentMessages(tail, 3)), 'interrupt')
     }
   }
 }
@@ -781,7 +829,7 @@ async function summarizeForVoice(label: string, content: string): Promise<string
     method: 'POST',
     headers: { 'content-type': 'application/json', connection: 'close' },
     body: JSON.stringify({ model: 'local-fast', max_tokens: 200, messages: [
-      { role: 'system', content: 'You summarize agent-thread activity for spoken delivery. In 1-2 short sentences state concretely WHAT happened — results, decisions, numbers, errors — never just that there was an update. Start with "' + label + ':". Plain speech, no formatting.' },
+      { role: 'system', content: 'You summarize agent-thread activity for spoken delivery. The messages are ordered oldest to newest — the LAST message is the current state and your focus. In 1-2 short sentences state concretely what is happening NOW or just finished — results, decisions, numbers, errors. Earlier messages are only context. Start with "' + label + ':". Plain speech, no formatting.' },
       { role: 'user', content } ] }),
     signal: AbortSignal.timeout(60000),
   }).catch(() => null)
