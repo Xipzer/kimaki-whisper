@@ -87,7 +87,7 @@ You are a switchboard, not an oracle. The owner's real knowledge and state live 
    a. A curated KNOWN ROUTE always beats index matches.
    b. Prefer the most recently active candidate — but if the top candidates live in DIFFERENT projects, do not guess: read_session the tail of the best one to verify it is actually about the owner's request before sending anything consequential.
    c. Still genuinely ambiguous → ask ONE short spoken question naming the top two ("the basestonk buyback thread, or the bridge fork?").
-5. Learn as you go: after ANY disambiguation — resolved by peek or by asking — immediately save_route the alias, and write scope boundaries into the note ("basestonk launchpad = the V4 launcher; bridge fork lives in launchpad-bridge-platform"). Never make the owner clarify the same thing twice.
+5. Learn as you go: after ANY disambiguation — resolved by peek or by asking — immediately save_route the alias, and write scope boundaries into the note ("basestonk launchpad = the V4 launcher; bridge fork lives in launchpad-bridge-platform"). Never make the owner clarify the same thing twice. Thread titles are verbose — when you first talk about a thread, coin a short nickname with nickname_thread and use it consistently from then on ("the launcher thread", "nutrition"). If the owner calls a thread something, that becomes its nickname.
 6. Silence mode: if the owner explicitly tells you to be quiet/silent/muted for a while, call go_silent with the requested duration (default 30 min if unspecified) and confirm in a few words. STRICT RULES: never activate silence on your own judgment, never suggest it, never ask the owner whether to enable it — it exists purely at the owner's request. They end it early by saying "Wendy, come back".
 7. Notifications: dispatched work is watched and announced live (start + finish). Thread activity and new commits across all projects flow in automatically as batched digests. The owner can tune priority per route with set_notify_tier: interrupt (speak immediately), digest (batched), onjoin (only when they join voice).
 Only pure chitchat, clarifications, and questions about your own routing get answered directly.
@@ -288,6 +288,21 @@ const TOOLS = [
   {
     type: 'function',
     function: {
+      name: 'nickname_thread',
+      description: 'Give a thread a short spoken nickname (your own memory — does not rename the real thread). Use at your discretion whenever a title is long or awkward to say; use the nickname consistently afterwards. Owner can assign or change nicknames too.',
+      parameters: {
+        type: 'object',
+        properties: {
+          session_id: { type: 'string', description: 'ses_… id' },
+          nickname: { type: 'string', description: 'Short natural spoken name, e.g. "the launcher thread"' },
+        },
+        required: ['session_id', 'nickname'],
+      },
+    },
+  },
+  {
+    type: 'function',
+    function: {
       name: 'go_silent',
       description: 'Silence yourself completely for N minutes: no speaking, no announcements, incoming speech is discarded before reaching your reasoning. ONLY call this when the owner explicitly asks you to be quiet/silent/muted. NEVER activate it on your own judgment and NEVER suggest or offer it. The owner can end it early by saying "Wendy, come back" (or unmute/wake/speak/talk).',
       parameters: {
@@ -347,7 +362,7 @@ async function executeTool(name: string, args: Record<string, unknown>): Promise
     return hits.length
       ? hits.map((h) => {
           const age = h.updated ? Math.round((Date.now() - h.updated) / 86400000) : null
-          return `${h.title} — session ${h.id} (project: ${h.dir.split('/').pop()}${age !== null ? `, active ${age === 0 ? 'today' : `${age}d ago`}` : ''})`
+          return `${nicknames[h.id] ? `[${nicknames[h.id]}] ` : ''}${h.title} — session ${h.id} (project: ${h.dir.split('/').pop()}${age !== null ? `, active ${age === 0 ? 'today' : `${age}d ago`}` : ''})`
         }).join('\n')
       : 'no matches in index — try search_sessions for a deep search'
   }
@@ -415,6 +430,13 @@ async function executeTool(name: string, args: Record<string, unknown>): Promise
       ...(['interrupt', 'digest', 'onjoin'].includes(String(args.tier)) ? { tier: String(args.tier) as NotifyTier } : {}),
     })
     return `saved route "${args.name}"`
+  }
+  if (name === 'nickname_thread') {
+    const id = String(args.session_id ?? ''); const nick = String(args.nickname ?? '').trim()
+    if (!id || !nick) return 'ERROR: need session_id and nickname'
+    nicknames[id] = nick
+    try { fs.writeFileSync(nicknamesPath(), JSON.stringify(nicknames, null, 2)) } catch {}
+    return `noted — will call it "${nick}" from now on`
   }
   if (name === 'go_silent') {
     const mins = Math.min(Math.max(Number(args.minutes) || 30, 1), 480)
@@ -567,6 +589,11 @@ let lastBrainWake = 0
 // ── auto-refreshed index of ALL sessions across ALL projects ──────
 type ThreadIndexEntry = { id: string; title: string; dir: string; updated?: number }
 let threadIndex: ThreadIndexEntry[] = []
+// ── Wendy's soft-rename map: session id → short spoken nickname ──
+const nicknamesPath = () => path.join(workspaceDir(), 'nicknames.json')
+let nicknames: Record<string, string> = {}
+try { nicknames = JSON.parse(fs.readFileSync(nicknamesPath(), 'utf-8')) } catch {}
+function labelFor(id: string, title: string): string { return nicknames[id] ?? title }
 function extractJsonArray(raw: string): unknown[] {
   // kimaki CLI wraps --json output in log lines; carve out the outermost array.
   const start = raw.indexOf('[')
@@ -602,7 +629,12 @@ async function refreshThreadIndexInner(): Promise<void> {
     const prev = new Map(threadIndex.map((e) => [e.id, e.updated ?? 0]))
     const changed = next.filter((e) => prev.has(e.id) && (e.updated ?? 0) > (prev.get(e.id) ?? 0) + 1000 && !watchlist.some((w) => w.id === e.id))
     const fresh = next.filter((e) => !prev.has(e.id))
-    for (const e of changed.slice(0, 5)) announce(`${e.title} moved in ${path.basename(e.dir)}.`, tierFor(e.id))
+    for (const e of changed.slice(0, 3)) {
+      const label = labelFor(e.id, e.title)
+      const tail = await runKimaki(['session', 'read', e.id], 45000)
+      announce(tail.startsWith('ERROR') ? `${label} had activity.` : await summarizeForVoice(label, tail.slice(-2500)), tierFor(e.id))
+    }
+    for (const e of changed.slice(3, 5)) announce(`${labelFor(e.id, e.title)} also moved.`, tierFor(e.id))
     if (changed.length > 5) announce(`Plus ${changed.length - 5} more threads had activity.`, 'digest')
     for (const e of fresh.slice(0, 3)) announce(`New thread in ${path.basename(e.dir)}: ${e.title}.`, 'digest')
     if (changed.length || fresh.length) log(`wendy: change feed — ${changed.length} changed, ${fresh.length} new`)
@@ -638,7 +670,7 @@ setTimeout(() => void refreshThreadIndex(), 20000).unref()
 function lookupThreads(query: string): ThreadIndexEntry[] {
   const terms = query.toLowerCase().split(/\s+/).filter(Boolean)
   return threadIndex
-    .map((e) => ({ e, score: terms.filter((t) => e.title.toLowerCase().includes(t) || e.dir.toLowerCase().includes(t)).length }))
+    .map((e) => ({ e, score: terms.filter((t) => e.title.toLowerCase().includes(t) || e.dir.toLowerCase().includes(t) || (nicknames[e.id]?.toLowerCase().includes(t) ?? false)).length }))
     .filter((x) => x.score > 0)
     .sort((a, b) => b.score - a.score || (b.e.updated ?? 0) - (a.e.updated ?? 0))
     .slice(0, 8)
@@ -687,6 +719,7 @@ setInterval(() => {
   }
 }, 5 * 60 * 1000).unref()
 function watchSession(id: string, label: string): void {
+  label = labelFor(id, label)
   if (watchlist.some((w) => w.id === id)) return
   watchlist.push({ id, label, lastLen: -1, expires: Date.now() + 45 * 60 * 1000 })
   log(`wendy: watching ${label} (${id})`)
@@ -718,7 +751,7 @@ async function summarizeForVoice(label: string, content: string): Promise<string
     method: 'POST',
     headers: { 'content-type': 'application/json', connection: 'close' },
     body: JSON.stringify({ model: 'local-fast', max_tokens: 200, messages: [
-      { role: 'system', content: 'Summarize this agent update for SPOKEN delivery in 1-2 short sentences, starting with "Update from ' + label + ':". Plain speech, no formatting.' },
+      { role: 'system', content: 'You summarize agent-thread activity for spoken delivery. In 1-2 short sentences state concretely WHAT happened — results, decisions, numbers, errors — never just that there was an update. Start with "' + label + ':". Plain speech, no formatting.' },
       { role: 'user', content } ] }),
     signal: AbortSignal.timeout(60000),
   }).catch(() => null)
