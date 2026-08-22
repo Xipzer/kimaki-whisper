@@ -1,4 +1,4 @@
-// JARVIS mode — a conversational voice concierge in a Discord voice channel.
+// Wendy mode — a conversational voice concierge in a Discord voice channel.
 //
 // The owner joins any VC; the sidecar follows, listens, and holds a natural
 // spoken conversation. It does no work itself: real tasks are delegated to the
@@ -50,7 +50,7 @@ function routesPath(): string {
   return path.join(configDir(), 'routes.json')
 }
 
-/** JARVIS's own den: scratchpad, notes, memory.md, disposable thinking files. */
+/** Wendy's own den: scratchpad, notes, memory.md, disposable thinking files. */
 export function workspaceDir(): string {
   const d = path.join(configDir(), 'workspace')
   fs.mkdirSync(path.join(d, 'notes'), { recursive: true })
@@ -71,7 +71,7 @@ function saveRoute(name: string, route: Route): void {
   fs.writeFileSync(routesPath(), JSON.stringify(r, null, 2))
 }
 
-const SYSTEM_PROMPT = `You are JARVIS, the owner's spoken-voice switchboard to their AI agent organisation, over Discord voice.
+const SYSTEM_PROMPT = `You are Wendy, the owner's spoken-voice switchboard to their AI agent organisation, over Discord voice.
 
 STYLE — this is SPEECH, not text:
 - One to three short sentences. No lists, no markdown, no code, no emoji.
@@ -293,7 +293,7 @@ function runKimaki(args: string[], timeoutMs = 30000, maxChars = 6000): Promise<
 }
 
 async function executeTool(name: string, args: Record<string, unknown>): Promise<string> {
-  log(`jarvis tool: ${name}(${JSON.stringify(args).slice(0, 120)})`)
+  log(`wendy tool: ${name}(${JSON.stringify(args).slice(0, 120)})`)
   if (name === 'list_projects') {
     return runKimaki(['project', 'list', '--json'])
   }
@@ -459,7 +459,7 @@ async function think(userText: string): Promise<string> {
         signal: AbortSignal.timeout(120000),
       }).catch((e) => new Error(String((e as Error)?.cause ?? e)))
       if (!(res instanceof Error) && res.ok) break
-      log(`jarvis brain attempt ${attempt + 1} failed: ${res instanceof Error ? res.message : `HTTP ${res.status} ${(await res.text().catch(() => '')).slice(0, 200)}`}`)
+      log(`wendy brain attempt ${attempt + 1} failed: ${res instanceof Error ? res.message : `HTTP ${res.status} ${(await res.text().catch(() => '')).slice(0, 200)}`}`)
       await new Promise((r) => setTimeout(r, 1500))
     }
     if (res instanceof Error || !res.ok) {
@@ -467,7 +467,7 @@ async function think(userText: string): Promise<string> {
         lastBrainWake = Date.now()
         const wake = loadConfig().brainWakeCommand
         if (!wake) return 'My reasoning engine is unreachable and I have no wake command configured.'
-        log('jarvis: brain unreachable — running configured wake command')
+        log('wendy: brain unreachable — running configured wake command')
         execFile('bash', ['-c', wake], { timeout: 60000, killSignal: 'SIGKILL' }, () => {})
         return 'My reasoning engine was asleep — waking it now. Give me about thirty seconds and ask again.'
       }
@@ -533,26 +533,26 @@ async function refreshThreadIndex(): Promise<void> {
   try { await refreshThreadIndexInner() } finally { refreshing = false }
 }
 async function refreshThreadIndexInner(): Promise<void> {
-  log('jarvis: thread index refresh starting')
+  log('wendy: thread index refresh starting')
   const projRaw = await runKimaki(['project', 'list', '--json'], 45000, 2_000_000)
   const projects = extractJsonArray(projRaw) as Array<{ directory?: string }>
-  log(`jarvis: index walk — ${projects.length} projects (raw ${projRaw.length}b${projRaw.startsWith('ERROR') ? ', ' + projRaw.slice(0, 80) : ''})`)
+  log(`wendy: index walk — ${projects.length} projects (raw ${projRaw.length}b${projRaw.startsWith('ERROR') ? ', ' + projRaw.slice(0, 80) : ''})`)
   const next: ThreadIndexEntry[] = []
   for (const p of projects) {
     if (!p.directory) continue
     const raw = await runKimaki(['session', 'list', '--project', p.directory, '--json'], 45000, 2_000_000)
-    if (raw.startsWith('ERROR')) log(`jarvis: index walk ${p.directory.split('/').pop()}: ${raw.slice(0, 90)}`)
+    if (raw.startsWith('ERROR')) log(`wendy: index walk ${p.directory.split('/').pop()}: ${raw.slice(0, 90)}`)
     for (const sess of extractJsonArray(raw) as Array<{ id?: string; title?: string; updated?: string | number; time?: { updated?: number } }>) {
       if (!sess.id || !sess.title) continue
       const upd = Number(sess.time?.updated ?? (typeof sess.updated === 'string' ? Date.parse(sess.updated) : sess.updated)) || 0
       next.push({ id: sess.id, title: sess.title, dir: p.directory, updated: upd })
     }
   }
-  log(`jarvis: index walk done — ${next.length} sessions`)
+  log(`wendy: index walk done — ${next.length} sessions`)
   if (next.length) {
     threadIndex = next
     try { fs.writeFileSync(path.join(workspaceDir(), 'thread-index.json'), JSON.stringify(next)) } catch {}
-    log(`jarvis: thread index refreshed — ${next.length} sessions across ${projects.length} projects`)
+    log(`wendy: thread index refreshed — ${next.length} sessions across ${projects.length} projects`)
   }
 }
 try { threadIndex = JSON.parse(fs.readFileSync(path.join(workspaceDir(), 'thread-index.json'), 'utf-8')) } catch {}
@@ -576,7 +576,7 @@ const pendingAnnouncements: string[] = []
 function watchSession(id: string, label: string): void {
   if (watchlist.some((w) => w.id === id)) return
   watchlist.push({ id, label, lastLen: -1, expires: Date.now() + 45 * 60 * 1000 })
-  log(`jarvis: watching ${label} (${id})`)
+  log(`wendy: watching ${label} (${id})`)
 }
 async function pollWatchlist(): Promise<void> {
   for (let i = watchlist.length - 1; i >= 0; i--) {
@@ -618,7 +618,7 @@ let busy = false
 async function speak(text: string): Promise<void> {
   if (!connection || !player) return
   const wav = await tts(text)
-  if (!wav) { log('jarvis: TTS failed'); return }
+  if (!wav) { log('wendy: TTS failed'); return }
   const resource = createAudioResource(Readable.from(wav), { inputType: StreamType.Arbitrary })
   player.play(resource)
 }
@@ -642,7 +642,7 @@ function listenTo(channel: VoiceBasedChannel, userId: string): void {
         if (busy) return
         busy = true
         const watchdog = setTimeout(() => {
-          log('jarvis WATCHDOG: utterance pipeline exceeded 4min — force-releasing')
+          log('wendy WATCHDOG: utterance pipeline exceeded 4min — force-releasing')
           busy = false
         }, 240000)
         try {
@@ -651,12 +651,12 @@ function listenTo(channel: VoiceBasedChannel, userId: string): void {
           // Whisper hallucinates stock phrases on noise/breath; drop them for short clips.
           const NOISE = /^(thanks?( you| for watching)?|you|bye|\.|uh|um)[.!\s]*$/i
           if (pcm.length < 2 * 96000 && NOISE.test(text.trim())) {
-            log(`jarvis: dropped noise artifact "${text.trim()}"`)
+            log(`wendy: dropped noise artifact "${text.trim()}"`)
             return
           }
-          log(`jarvis heard: "${text.slice(0, 80)}"`)
+          log(`wendy heard: "${text.slice(0, 80)}"`)
           const reply = await think(text)
-          log(`jarvis says: "${reply.slice(0, 80)}"`)
+          log(`wendy says: "${reply.slice(0, 80)}"`)
           await speak(reply)
         } finally {
           clearTimeout(watchdog)
@@ -670,7 +670,7 @@ function listenTo(channel: VoiceBasedChannel, userId: string): void {
 
 async function joinAndServe(channel: VoiceBasedChannel, userId: string): Promise<void> {
   leave()
-  log(`jarvis: joining #${channel.name}`)
+  log(`wendy: joining #${channel.name}`)
   connection = joinVoiceChannel({
     channelId: channel.id,
     guildId: channel.guild.id,
@@ -678,12 +678,12 @@ async function joinAndServe(channel: VoiceBasedChannel, userId: string): Promise
     selfDeaf: false,
   })
   player = createAudioPlayer()
-  player.on('error', (e) => log('jarvis playback error:', e.message))
+  player.on('error', (e) => log('wendy playback error:', e.message))
   connection.subscribe(player)
   const ok = await entersState(connection, VoiceConnectionStatus.Ready, 15000).catch(() => null)
-  if (!ok) { log('jarvis: voice connection failed'); leave(); return }
+  if (!ok) { log('wendy: voice connection failed'); leave(); return }
   const conn = connection
-  conn.on('error', (e) => log('jarvis voice error:', e.message))
+  conn.on('error', (e) => log('wendy voice error:', e.message))
   conn.on(VoiceConnectionStatus.Disconnected, () => {
     void (async () => {
       // Discord moved us / UDP blip: it auto-resumes if we reach Signalling or
@@ -693,7 +693,7 @@ async function joinAndServe(channel: VoiceBasedChannel, userId: string): Promise
         entersState(conn, VoiceConnectionStatus.Connecting, 5000),
       ]).catch(() => null)
       if (!resumed) {
-        log('jarvis: voice dropped — rejoining')
+        log('wendy: voice dropped — rejoining')
         void joinAndServe(channel, userId)
       }
     })()
@@ -710,10 +710,10 @@ function leave(): void {
   player = null
 }
 
-export function initJarvis(client: Client): void {
+export function initWendy(client: Client): void {
   const owner = ownerId()
   if (!owner || !brainUrl()) {
-    log('jarvis: disabled (set ownerId + brainUrl in config to enable)')
+    log('wendy: disabled (set ownerId + brainUrl in config to enable)')
     return
   }
   client.on('voiceStateUpdate', (oldState: VoiceState, newState: VoiceState) => {
@@ -721,9 +721,9 @@ export function initJarvis(client: Client): void {
     if (newState.channel && newState.channelId !== oldState.channelId) {
       void joinAndServe(newState.channel, owner)
     } else if (!newState.channel && connection) {
-      log('jarvis: owner left, standing down')
+      log('wendy: owner left, standing down')
       leave()
     }
   })
-  log(`jarvis: armed — will follow owner ${owner} into voice channels`)
+  log(`wendy: armed — will follow owner ${owner} into voice channels`)
 }

@@ -65,7 +65,7 @@ async function main(): Promise<void> {
   }
 
   // default: run the sidecar
-  log('jarvis-build: hardened-v2')
+  log('wendy-build: hardened-v2')
   const token = await resolveBotToken()
   if (!token) {
     log('no bot token found. Provide it once:')

@@ -17,7 +17,7 @@ import { spawn } from 'node:child_process'
 import { loadConfig, saveConfig, DEFAULT_PORT, log } from './config.js'
 import { MODEL_TIERS, tierById, recommendTier, installRuntime, getPipeline } from './transcribe/local-onnx.js'
 import { transcribeAudioBytes, startServer, isServerRunning, stopServer } from './server.js'
-import { initJarvis } from './jarvis.js'
+import { initWendy } from './wendy.js'
 
 function prefix(): string {
   return loadConfig().commandPrefix ?? 'whisper'
@@ -163,7 +163,7 @@ export async function startDiscord(token: string): Promise<void> {
   })
 
   client.on('messageCreate', (m) => void handleRetranscribe(m))
-  initJarvis(client)
+  initWendy(client)
 
   await client.login(token)
   const appId = client.application?.id ?? (await client.application?.fetch())?.id

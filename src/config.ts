@@ -15,9 +15,9 @@ export interface SidecarConfig {
   port?: number
   /** Command-name prefix override (default "whisper"). Lets tests avoid clashing with a bot that already handles /whisper-*. */
   commandPrefix?: string
-  /** JARVIS voice mode: OpenAI-compatible LLM endpoint for the concierge brain (e.g. llama.cpp on a LAN GPU box). */
+  /** Wendy voice mode: OpenAI-compatible LLM endpoint for the concierge brain (e.g. llama.cpp on a LAN GPU box). */
   brainUrl?: string
-  /** JARVIS voice mode: Discord user id to follow into voice channels. */
+  /** Wendy voice mode: Discord user id to follow into voice channels. */
   ownerId?: string
   /** speaches base URL (STT + Kokoro TTS). Default http://localhost:8000 */
   speachesUrl?: string

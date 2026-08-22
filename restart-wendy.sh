@@ -1,20 +1,20 @@
 #!/usr/bin/env bash
-# Atomic, SUPERVISED singleton restart for the JARVIS sidecar.
+# Atomic, SUPERVISED singleton restart for the Wendy sidecar.
 # - kills every existing instance (pattern + port holder)
 # - runs a supervisor loop: respawns on crash (any exit), backs off 3s,
 #   but stops permanently on exit 2 (= duplicate-instance guard) so two
 #   supervisors can never fight over the port.
-# - durable log at ~/.kimaki-whisper/jarvis.log (survives /tmp wipes),
+# - durable log at ~/.kimaki-whisper/wendy.log (survives /tmp wipes),
 #   rotated at 5 MB.
 cd "$(dirname "$0")"
-LOG="$HOME/.kimaki-whisper/jarvis.log"
-PIDFILE="$HOME/.kimaki-whisper/jarvis.pid"
-SUPFILE="$HOME/.kimaki-whisper/jarvis-supervisor.pid"
+LOG="$HOME/.kimaki-whisper/wendy.log"
+PIDFILE="$HOME/.kimaki-whisper/wendy.pid"
+SUPFILE="$HOME/.kimaki-whisper/wendy-supervisor.pid"
 mkdir -p "$HOME/.kimaki-whisper"
 
 # kill prior SUPERVISOR first (or it respawns mid-restart and races us)
 [ -f "$SUPFILE" ] && kill -9 "$(cat "$SUPFILE")" 2>/dev/null
-for p in $(pgrep -f 'restart-jarvis.sh'); do [ "$p" != "$$" ] && kill -9 "$p" 2>/dev/null; done  # orphan supervisors, excluding self
+for p in $(pgrep -f 'restart-wendy.sh'); do [ "$p" != "$$" ] && kill -9 "$p" 2>/dev/null; done  # orphan supervisors, excluding self
 pkill -9 -f 'kimaki-whisper/dist/cli.js' 2>/dev/null
 for i in 1 2 3 4 5; do
   P=$(ss -ltnp 2>/dev/null | grep ':7071' | grep -oE 'pid=[0-9]+' | cut -d= -f2 | head -1)
@@ -48,4 +48,4 @@ export PATH="$HOME/.local/bin:$HOME/.kimaki/bin:$PATH"
 ) &
 disown
 sleep 10
-echo "── restart-jarvis: child=$(cat "$PIDFILE" 2>/dev/null) log=$LOG" >> "$LOG"
+echo "── restart-wendy: child=$(cat "$PIDFILE" 2>/dev/null) log=$LOG" >> "$LOG"
