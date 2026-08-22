@@ -83,7 +83,7 @@ STYLE — this is SPEECH, not text:
 PRIME DIRECTIVE — ROUTE, DON'T ANSWER:
 You are a switchboard, not an oracle. The owner's real knowledge and state live inside long-running agent threads (some are codebases; many are not — nutrition logs, finances, research, anything). When the owner mentions a project, a topic with an existing thread, or anything those agents own:
 1. Find the destination: KNOWN ROUTES below first, then lookup_thread (instant index of every thread), then search_sessions as deep fallback.
-2. Proxy the owner's request there with ask_thread — quick answers (≤10s) come back directly; anything longer returns immediately and the result arrives later as a [BACKGROUND UPDATE]. You WORK IN PARALLEL: fire multiple asks/dispatches in one turn if the owner wants several things — never make them wait on one before starting another. When a [BACKGROUND UPDATE] arrives, it means the conversation had a pause: mention it naturally ("by the way, the launcher thread came back — ..."), connect it to what was asked, and keep it short. Keep tool prompts under 80 words.
+2. Proxy the owner's request there with ask_thread — quick answers (≤10s) come back directly; anything longer returns immediately and the result arrives later as a [BACKGROUND UPDATE]. You WORK IN PARALLEL: fire multiple asks/dispatches in one turn if the owner wants several things — never make them wait on one before starting another. When a [BACKGROUND UPDATE] arrives, it means the conversation had a pause: mention it naturally ("by the way, the launcher thread came back — ..."), connect it to what was asked, and keep it short. Keep tool prompts under 80 words. After dispatching long work the owner cares about, proactively schedule_check as a safety net (watchers expire after ~45 min) — the owner has ADHD and will NOT remember to ask; that's your job. Also use it whenever they say "remind me".
 3. NEVER answer domain questions from your own general knowledge when a matching thread exists — even if you think you know. Their state lives in the thread, not in you.
 4. DISAMBIGUATION — the owner has MANY overlapping threads (multiple launchpads, forks, similar topics). When lookup returns several plausible matches:
    a. A curated KNOWN ROUTE always beats index matches.
@@ -287,6 +287,22 @@ const TOOLS = [
           tier: { type: 'string', enum: ['interrupt', 'digest', 'onjoin'], description: 'Notification priority for this route (default digest)' },
         },
         required: ['name', 'id', 'kind', 'note'],
+      },
+    },
+  },
+  {
+    type: 'function',
+    function: {
+      name: 'schedule_check',
+      description: 'Set a future follow-up: in N minutes, either re-check a session (reads it fresh and reports its state) or deliver a plain reminder. Survives restarts; delivered at a natural conversation pause. Use when the owner says "remind me" / "check on it later", and proactively as a safety net after dispatching long work the owner cares about.',
+      parameters: {
+        type: 'object',
+        properties: {
+          minutes: { type: 'number', description: 'How many minutes from now (1-1440)' },
+          note: { type: 'string', description: 'What this is about, in owner-friendly words' },
+          session_id: { type: 'string', description: 'ses_… to re-check at that time (omit for a plain reminder)' },
+        },
+        required: ['minutes', 'note'],
       },
     },
   },
@@ -511,6 +527,14 @@ async function executeTool(name: string, args: Record<string, unknown>): Promise
       ...(['interrupt', 'digest', 'onjoin'].includes(String(args.tier)) ? { tier: String(args.tier) as NotifyTier } : {}),
     })
     return `saved route "${args.name}"`
+  }
+  if (name === 'schedule_check') {
+    if (schedules.length >= 20) return 'ERROR: too many pending schedules (20 max) — check schedules.json via bash'
+    const mins = Math.min(Math.max(Number(args.minutes) || 30, 1), 1440)
+    const sid = String(args.session_id ?? '').trim()
+    schedules.push({ at: Date.now() + mins * 60_000, kind: sid ? 'check' : 'remind', ...(sid ? { sessionId: sid } : {}), note: String(args.note ?? '').slice(0, 200) })
+    saveSchedules()
+    return `scheduled — will ${sid ? 'check that thread' : 'remind the owner'} in ${mins} minutes`
   }
   if (name === 'index_stats') {
     const age = lastIndexRefresh ? Math.round((Date.now() - lastIndexRefresh) / 60000) : -1
@@ -788,6 +812,34 @@ function lookupThreads(query: string): ThreadIndexEntry[] {
     .slice(0, 8)
     .map((x) => x.e)
 }
+
+// ── scheduled checks: persistent timers, delivered via conversation-space ──
+type Sched = { at: number; kind: 'check' | 'remind'; sessionId?: string; note: string }
+const schedPath = () => path.join(workspaceDir(), 'schedules.json')
+let schedules: Sched[] = []
+try { schedules = JSON.parse(fs.readFileSync(schedPath(), 'utf-8')) } catch {}
+function saveSchedules(): void { try { fs.writeFileSync(schedPath(), JSON.stringify(schedules, null, 2)) } catch {} }
+setInterval(() => {
+  const now = Date.now()
+  const due = schedules.filter((x) => x.at <= now)
+  if (!due.length) return
+  schedules = schedules.filter((x) => x.at > now)
+  saveSchedules()
+  void (async () => {
+    for (const d of due) {
+      log(`wendy: scheduled ${d.kind} due — ${d.note}`)
+      if (d.kind === 'check' && d.sessionId) {
+        const out = await runKimaki(['session', 'read', d.sessionId], 60000, 500_000, true)
+        const summary = out.startsWith('ERROR')
+          ? `I couldn't read that thread just now.`
+          : await summarizeForVoice(labelFor(d.sessionId, d.note || 'that thread'), recentMessages(out, 3))
+        announce(`Scheduled check${d.note ? ` on ${d.note}` : ''}: ${summary}`, 'interrupt')
+      } else {
+        announce(`Reminder: ${d.note}`, 'interrupt')
+      }
+    }
+  })()
+}, 30000).unref()
 
 // ── FEATURE A: watchlist — passive notifications on thread replies ──
 type Watch = { id: string; label: string; lastLen: number; expires: number; seen?: boolean; idle?: number; more?: boolean }
