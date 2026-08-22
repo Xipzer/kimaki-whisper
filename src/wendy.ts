@@ -45,7 +45,8 @@ import path from 'node:path'
 import { configDir } from './config.js'
 
 // ── persistent route registry: name → session/thread/channel ─────
-type Route = { id: string; kind: 'session' | 'thread' | 'channel'; note: string }
+type NotifyTier = 'interrupt' | 'digest' | 'onjoin'
+type Route = { id: string; kind: 'session' | 'thread' | 'channel'; note: string; tier?: NotifyTier }
 function routesPath(): string {
   return path.join(configDir(), 'routes.json')
 }
@@ -87,6 +88,7 @@ You are a switchboard, not an oracle. The owner's real knowledge and state live 
    b. Prefer the most recently active candidate — but if the top candidates live in DIFFERENT projects, do not guess: read_session the tail of the best one to verify it is actually about the owner's request before sending anything consequential.
    c. Still genuinely ambiguous → ask ONE short spoken question naming the top two ("the basestonk buyback thread, or the bridge fork?").
 5. Learn as you go: after ANY disambiguation — resolved by peek or by asking — immediately save_route the alias, and write scope boundaries into the note ("basestonk launchpad = the V4 launcher; bridge fork lives in launchpad-bridge-platform"). Never make the owner clarify the same thing twice.
+6. Notifications: dispatched work is watched and announced live (start + finish). Thread activity and new commits across all projects flow in automatically as batched digests. The owner can tune priority per route with set_notify_tier: interrupt (speak immediately), digest (batched), onjoin (only when they join voice).
 Only pure chitchat, clarifications, and questions about your own routing get answered directly.
 
 YOUR OWN CAPABILITIES (use freely, but they never override the prime directive):
@@ -276,8 +278,24 @@ const TOOLS = [
           id: { type: 'string', description: 'ses_… / thread id / channel id' },
           kind: { type: 'string', enum: ['session', 'thread', 'channel'] },
           note: { type: 'string', description: 'What lives there' },
+          tier: { type: 'string', enum: ['interrupt', 'digest', 'onjoin'], description: 'Notification priority for this route (default digest)' },
         },
         required: ['name', 'id', 'kind', 'note'],
+      },
+    },
+  },
+  {
+    type: 'function',
+    function: {
+      name: 'set_notify_tier',
+      description: 'Set notification priority for a saved route: interrupt = speak immediately, digest = batched every few minutes, onjoin = only when owner joins voice.',
+      parameters: {
+        type: 'object',
+        properties: {
+          name: { type: 'string', description: 'Existing route alias' },
+          tier: { type: 'string', enum: ['interrupt', 'digest', 'onjoin'] },
+        },
+        required: ['name', 'tier'],
       },
     },
   },
@@ -379,8 +397,17 @@ async function executeTool(name: string, args: Record<string, unknown>): Promise
       id: String(args.id ?? ''),
       kind: (['session', 'thread', 'channel'].includes(String(args.kind)) ? String(args.kind) : 'session') as Route['kind'],
       note: String(args.note ?? ''),
+      ...(['interrupt', 'digest', 'onjoin'].includes(String(args.tier)) ? { tier: String(args.tier) as NotifyTier } : {}),
     })
     return `saved route "${args.name}"`
+  }
+  if (name === 'set_notify_tier') {
+    const routes = loadRoutes()
+    const key = String(args.name ?? '').toLowerCase()
+    if (!routes[key]) return `ERROR: no route named "${key}"`
+    routes[key].tier = String(args.tier) as NotifyTier
+    fs.writeFileSync(routesPath(), JSON.stringify(routes, null, 2))
+    return `route "${key}" set to ${args.tier}`
   }
   return `ERROR: unknown tool ${name}`
 }
@@ -549,11 +576,38 @@ async function refreshThreadIndexInner(): Promise<void> {
     }
   }
   log(`wendy: index walk done — ${next.length} sessions`)
+  if (next.length && threadIndex.length) {
+    const prev = new Map(threadIndex.map((e) => [e.id, e.updated ?? 0]))
+    const changed = next.filter((e) => prev.has(e.id) && (e.updated ?? 0) > (prev.get(e.id) ?? 0) + 1000 && !watchlist.some((w) => w.id === e.id))
+    const fresh = next.filter((e) => !prev.has(e.id))
+    for (const e of changed.slice(0, 5)) announce(`${e.title} moved in ${path.basename(e.dir)}.`, tierFor(e.id))
+    if (changed.length > 5) announce(`Plus ${changed.length - 5} more threads had activity.`, 'digest')
+    for (const e of fresh.slice(0, 3)) announce(`New thread in ${path.basename(e.dir)}: ${e.title}.`, 'digest')
+    if (changed.length || fresh.length) log(`wendy: change feed — ${changed.length} changed, ${fresh.length} new`)
+  }
+  await probeGitHeads(projects.map((p) => p.directory).filter((d): d is string => !!d))
   if (next.length) {
     threadIndex = next
     try { fs.writeFileSync(path.join(workspaceDir(), 'thread-index.json'), JSON.stringify(next)) } catch {}
     log(`wendy: thread index refreshed — ${next.length} sessions across ${projects.length} projects`)
   }
+}
+const gitHeadsPath = path.join(workspaceDir(), 'git-heads.json')
+let gitHeads: Record<string, string> = {}
+try { gitHeads = JSON.parse(fs.readFileSync(gitHeadsPath, 'utf-8')) } catch {}
+async function probeGitHeads(dirs: string[]): Promise<void> {
+  const firstRun = !Object.keys(gitHeads).length
+  for (const dir of dirs) {
+    const out = await new Promise<string>((resolve) => {
+      execFile('git', ['-C', dir, 'log', '-1', '--format=%H|%s'], { timeout: 8000 }, (e, so) => resolve(e ? '' : so.trim()))
+    })
+    if (!out) continue
+    const [hash, subject] = out.split('|')
+    if (!firstRun && gitHeads[dir] && gitHeads[dir] !== hash)
+      announce(`New commit in ${path.basename(dir)}: ${subject}.`, 'digest')
+    gitHeads[dir] = hash
+  }
+  try { fs.writeFileSync(gitHeadsPath, JSON.stringify(gitHeads)) } catch {}
 }
 try { threadIndex = JSON.parse(fs.readFileSync(path.join(workspaceDir(), 'thread-index.json'), 'utf-8')) } catch {}
 setInterval(() => void refreshThreadIndex(), 10 * 60 * 1000).unref()
@@ -570,9 +624,32 @@ function lookupThreads(query: string): ThreadIndexEntry[] {
 }
 
 // ── FEATURE A: watchlist — passive notifications on thread replies ──
-type Watch = { id: string; label: string; lastLen: number; expires: number }
+type Watch = { id: string; label: string; lastLen: number; expires: number; seen?: boolean; idle?: number; more?: boolean }
 const watchlist: Watch[] = []
 const pendingAnnouncements: string[] = []
+const digestQueue: string[] = []
+function tierFor(sessionId: string): NotifyTier {
+  for (const r of Object.values(loadRoutes())) if (r.id === sessionId) return r.tier ?? 'digest'
+  return 'digest'
+}
+function announce(text: string, tier: NotifyTier): void {
+  if (tier === 'interrupt' && connection && !busy) { void speak(text); return }
+  if (tier === 'onjoin' || !connection) {
+    pendingAnnouncements.push(text)
+    if (pendingAnnouncements.length > 8) pendingAnnouncements.splice(0, pendingAnnouncements.length - 8)
+    return
+  }
+  digestQueue.push(text)
+}
+setInterval(() => {
+  if (!digestQueue.length) return
+  const items = digestQueue.splice(0, 6)
+  if (connection && !busy) void speak(`Quick digest: ${items.join(' ')}`)
+  else {
+    pendingAnnouncements.push(...items)
+    if (pendingAnnouncements.length > 8) pendingAnnouncements.splice(0, pendingAnnouncements.length - 8)
+  }
+}, 5 * 60 * 1000).unref()
 function watchSession(id: string, label: string): void {
   if (watchlist.some((w) => w.id === id)) return
   watchlist.push({ id, label, lastLen: -1, expires: Date.now() + 45 * 60 * 1000 })
@@ -586,11 +663,13 @@ async function pollWatchlist(): Promise<void> {
     if (tail.startsWith('ERROR')) continue
     if (w.lastLen === -1) { w.lastLen = tail.length; continue }
     if (tail.length > w.lastLen + 50) {
-      w.lastLen = tail.length
-      const summary = await summarizeForVoice(w.label, tail.slice(-2500))
+      const first = !w.seen
+      w.seen = true; w.idle = 0; w.lastLen = tail.length
+      if (first) announce(await summarizeForVoice(w.label, tail.slice(-2500)), 'interrupt')
+      else w.more = true
+    } else if (w.seen && (w.idle = (w.idle ?? 0) + 1) >= 3) {
       watchlist.splice(i, 1)
-      if (connection) void speak(summary)
-      else pendingAnnouncements.push(summary)
+      if (w.more) announce(await summarizeForVoice(w.label + ' (finished)', tail.slice(-2500)), 'interrupt')
     }
   }
 }
