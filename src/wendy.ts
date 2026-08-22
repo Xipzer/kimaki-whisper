@@ -807,7 +807,7 @@ async function speak(text: string): Promise<void> {
     const wav = await tts(text)
     if (!wav) { log('wendy: TTS failed'); return }
     if (ep !== speechEpoch) { log('wendy: queued speech discarded (barge-in)'); return }
-    player.play(createAudioResource(Readable.from(wav), { inputType: StreamType.Arbitrary }))
+    player.play(createAudioResource(Readable.from(wav), { inputType: StreamType.Arbitrary, silencePaddingFrames: 15 }))
     await entersState(player, AudioPlayerStatus.Idle, 180000).catch(() => {})
   }
   const p = speakChain.then(run, run)
@@ -817,12 +817,14 @@ async function speak(text: string): Promise<void> {
 
 let capturing = false
 let pendingUtterance: string | null = null
+let inputSeq = 0
 function playerActive(): boolean {
   const st = player?.state.status
   return st === AudioPlayerStatus.Playing || st === AudioPlayerStatus.Buffering
 }
 
 async function runTurn(text: string): Promise<void> {
+  const seq = ++inputSeq
   if (busy) { pendingUtterance = text; log(`wendy: busy — queued "${text.slice(0, 50)}"`); return }
   busy = true
   const watchdog = setTimeout(() => {
@@ -842,6 +844,10 @@ async function runTurn(text: string): Promise<void> {
     }
     log(`wendy heard: "${text.slice(0, 80)}"`)
     const reply = await think(text)
+    if (seq !== inputSeq) {
+      log(`wendy: reply superseded by newer input — staying quiet: "${reply.slice(0, 60)}"`)
+      return
+    }
     log(`wendy says: "${reply.slice(0, 80)}"`)
     await speak(reply)
   } finally {
@@ -872,8 +878,8 @@ function listenTo(channel: VoiceBasedChannel, userId: string): void {
     decoder.on('data', (c: Buffer) => {
       chunks.push(c)
       bytes += c.length
-      // barge-in: ~0.4s of sustained speech while she's talking cuts her off
-      if (!interrupted && bytes > 38400 && playerActive()) {
+      // barge-in: ~0.7s of sustained speech while she's talking cuts her off
+      if (!interrupted && bytes > 67200 && playerActive()) {
         interrupted = true
         interruptSpeech()
         log('wendy: barge-in — owner spoke over me, playback cut')
@@ -890,6 +896,11 @@ function listenTo(channel: VoiceBasedChannel, userId: string): void {
         const NOISE = /^(thanks?( you| for watching)?|you|bye|\.|uh|um)[.!\s]*$/i
         if (pcm.length < 2 * 96000 && NOISE.test(text.trim())) {
           log(`wendy: dropped noise artifact "${text.trim()}"`)
+          return
+        }
+        const BACKCHANNEL = /^(yeah|yep|yes|ok(ay)?|mhm+|uh-?huh|right|true|sure|lol|haha+|nice|cool|got it|go on|i see|wow)[.!,\s]*$/i
+        if (pcm.length < 3 * 96000 && BACKCHANNEL.test(text.trim())) {
+          log(`wendy: backchannel — not a turn: "${text.trim()}"`)
           return
         }
         void runTurn(text)
