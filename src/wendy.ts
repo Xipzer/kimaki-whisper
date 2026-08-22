@@ -88,7 +88,8 @@ You are a switchboard, not an oracle. The owner's real knowledge and state live 
    b. Prefer the most recently active candidate — but if the top candidates live in DIFFERENT projects, do not guess: read_session the tail of the best one to verify it is actually about the owner's request before sending anything consequential.
    c. Still genuinely ambiguous → ask ONE short spoken question naming the top two ("the basestonk buyback thread, or the bridge fork?").
 5. Learn as you go: after ANY disambiguation — resolved by peek or by asking — immediately save_route the alias, and write scope boundaries into the note ("basestonk launchpad = the V4 launcher; bridge fork lives in launchpad-bridge-platform"). Never make the owner clarify the same thing twice.
-6. Notifications: dispatched work is watched and announced live (start + finish). Thread activity and new commits across all projects flow in automatically as batched digests. The owner can tune priority per route with set_notify_tier: interrupt (speak immediately), digest (batched), onjoin (only when they join voice).
+6. Silence mode: if the owner explicitly tells you to be quiet/silent/muted for a while, call go_silent with the requested duration (default 30 min if unspecified) and confirm in a few words. STRICT RULES: never activate silence on your own judgment, never suggest it, never ask the owner whether to enable it — it exists purely at the owner's request. They end it early by saying "Wendy, come back".
+7. Notifications: dispatched work is watched and announced live (start + finish). Thread activity and new commits across all projects flow in automatically as batched digests. The owner can tune priority per route with set_notify_tier: interrupt (speak immediately), digest (batched), onjoin (only when they join voice).
 Only pure chitchat, clarifications, and questions about your own routing get answered directly.
 
 YOUR OWN CAPABILITIES (use freely, but they never override the prime directive):
@@ -287,6 +288,20 @@ const TOOLS = [
   {
     type: 'function',
     function: {
+      name: 'go_silent',
+      description: 'Silence yourself completely for N minutes: no speaking, no announcements, incoming speech is discarded before reaching your reasoning. ONLY call this when the owner explicitly asks you to be quiet/silent/muted. NEVER activate it on your own judgment and NEVER suggest or offer it. The owner can end it early by saying "Wendy, come back" (or unmute/wake/speak/talk).',
+      parameters: {
+        type: 'object',
+        properties: {
+          minutes: { type: 'number', description: 'Duration in minutes (default 30, max 480)' },
+        },
+        required: [],
+      },
+    },
+  },
+  {
+    type: 'function',
+    function: {
       name: 'set_notify_tier',
       description: 'Set notification priority for a saved route: interrupt = speak immediately, digest = batched every few minutes, onjoin = only when owner joins voice.',
       parameters: {
@@ -400,6 +415,13 @@ async function executeTool(name: string, args: Record<string, unknown>): Promise
       ...(['interrupt', 'digest', 'onjoin'].includes(String(args.tier)) ? { tier: String(args.tier) as NotifyTier } : {}),
     })
     return `saved route "${args.name}"`
+  }
+  if (name === 'go_silent') {
+    const mins = Math.min(Math.max(Number(args.minutes) || 30, 1), 480)
+    silencedUntil = Date.now() + mins * 60_000
+    silenceGrace = Date.now() + 20_000
+    log(`wendy: silenced for ${mins} min at owner's request`)
+    return `silenced for ${mins} minutes — confirm briefly, then go quiet`
   }
   if (name === 'set_notify_tier') {
     const routes = loadRoutes()
@@ -628,13 +650,27 @@ type Watch = { id: string; label: string; lastLen: number; expires: number; seen
 const watchlist: Watch[] = []
 const pendingAnnouncements: string[] = []
 const digestQueue: string[] = []
+// ── silence mode: OWNER-ONLY, explicitly requested, never self-activated ──
+let silencedUntil = 0
+let silenceGrace = 0   // brief window so the go_silent confirmation itself is audible
+function isSilenced(): boolean { return Date.now() < silencedUntil }
+setInterval(() => {
+  if (silencedUntil && Date.now() >= silencedUntil) {
+    silencedUntil = 0
+    log('wendy: silence period expired')
+    if (connection) {
+      const held = pendingAnnouncements.splice(0)
+      void speak(held.length ? `Quiet period over. While I was silent: ${held.join(' ')}` : 'Quiet period over.')
+    }
+  }
+}, 20000).unref()
 function tierFor(sessionId: string): NotifyTier {
   for (const r of Object.values(loadRoutes())) if (r.id === sessionId) return r.tier ?? 'digest'
   return 'digest'
 }
 function announce(text: string, tier: NotifyTier): void {
-  if (tier === 'interrupt' && connection && !busy) { void speak(text); return }
-  if (tier === 'onjoin' || !connection) {
+  if (tier === 'interrupt' && connection && !busy && !isSilenced()) { void speak(text); return }
+  if (tier === 'onjoin' || !connection || isSilenced()) {
     pendingAnnouncements.push(text)
     if (pendingAnnouncements.length > 8) pendingAnnouncements.splice(0, pendingAnnouncements.length - 8)
     return
@@ -644,7 +680,7 @@ function announce(text: string, tier: NotifyTier): void {
 setInterval(() => {
   if (!digestQueue.length) return
   const items = digestQueue.splice(0, 6)
-  if (connection && !busy) void speak(`Quick digest: ${items.join(' ')}`)
+  if (connection && !busy && !isSilenced()) void speak(`Quick digest: ${items.join(' ')}`)
   else {
     pendingAnnouncements.push(...items)
     if (pendingAnnouncements.length > 8) pendingAnnouncements.splice(0, pendingAnnouncements.length - 8)
@@ -696,6 +732,7 @@ let busy = false
 
 async function speak(text: string): Promise<void> {
   if (!connection || !player) return
+  if (isSilenced() && Date.now() > silenceGrace) { log('wendy: speak suppressed (silenced)'); return }
   const wav = await tts(text)
   if (!wav) { log('wendy: TTS failed'); return }
   const resource = createAudioResource(Readable.from(wav), { inputType: StreamType.Arbitrary })
@@ -731,6 +768,16 @@ function listenTo(channel: VoiceBasedChannel, userId: string): void {
           const NOISE = /^(thanks?( you| for watching)?|you|bye|\.|uh|um)[.!\s]*$/i
           if (pcm.length < 2 * 96000 && NOISE.test(text.trim())) {
             log(`wendy: dropped noise artifact "${text.trim()}"`)
+            return
+          }
+          if (isSilenced()) {
+            const t = text.toLowerCase()
+            if (t.includes('wendy') && /(unmute|wake|speak|talk|come back)/.test(t)) {
+              silencedUntil = 0
+              log('wendy: unmuted by owner voice command')
+              const held = pendingAnnouncements.splice(0)
+              await speak(held.length ? `I'm back. While I was silent: ${held.join(' ')}` : `I'm back.`)
+            } else log(`wendy: silenced — dropped "${text.slice(0, 60)}"`)
             return
           }
           log(`wendy heard: "${text.slice(0, 80)}"`)
