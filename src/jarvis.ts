@@ -283,11 +283,11 @@ const TOOLS = [
   },
 ] as const
 
-function runKimaki(args: string[], timeoutMs = 30000): Promise<string> {
+function runKimaki(args: string[], timeoutMs = 30000, maxChars = 6000): Promise<string> {
   return new Promise((resolve) => {
     execFile('kimaki', args, { timeout: timeoutMs, maxBuffer: 4 * 1024 * 1024, killSignal: 'SIGKILL' }, (err, stdout, stderr) => {
       if (err) resolve(`ERROR: ${String(err.message).slice(0, 300)}`)
-      else resolve((stdout || stderr || '').slice(0, 6000))
+      else resolve((stdout || stderr || '').slice(0, maxChars))
     })
   })
 }
@@ -518,23 +518,37 @@ let lastBrainWake = 0
 // ── auto-refreshed index of ALL sessions across ALL projects ──────
 type ThreadIndexEntry = { id: string; title: string; dir: string; updated?: number }
 let threadIndex: ThreadIndexEntry[] = []
+function extractJsonArray(raw: string): unknown[] {
+  // kimaki CLI wraps --json output in log lines; carve out the outermost array.
+  const start = raw.indexOf('[')
+  const end = raw.lastIndexOf(']')
+  if (start === -1 || end <= start) return []
+  try { return JSON.parse(raw.slice(start, end + 1)) as unknown[] } catch { return [] }
+}
+
+let refreshing = false
 async function refreshThreadIndex(): Promise<void> {
-  const projRaw = await runKimaki(['project', 'list', '--json'], 30000)
-  const projects = ((): Array<{ directory?: string }> => {
-    try { return JSON.parse(projRaw) } catch { return [] }
-  })()
+  if (refreshing) return
+  refreshing = true
+  try { await refreshThreadIndexInner() } finally { refreshing = false }
+}
+async function refreshThreadIndexInner(): Promise<void> {
+  log('jarvis: thread index refresh starting')
+  const projRaw = await runKimaki(['project', 'list', '--json'], 45000, 2_000_000)
+  const projects = extractJsonArray(projRaw) as Array<{ directory?: string }>
+  log(`jarvis: index walk — ${projects.length} projects (raw ${projRaw.length}b${projRaw.startsWith('ERROR') ? ', ' + projRaw.slice(0, 80) : ''})`)
   const next: ThreadIndexEntry[] = []
   for (const p of projects) {
     if (!p.directory) continue
-    const raw = await runKimaki(['session', 'list', '--project', p.directory, '--json'], 30000)
-    try {
-      for (const sess of JSON.parse(raw) as Array<{ id?: string; title?: string; updated?: string | number; time?: { updated?: number } }>) {
-        if (!sess.id || !sess.title) continue
-        const upd = Number(sess.time?.updated ?? (typeof sess.updated === 'string' ? Date.parse(sess.updated) : sess.updated)) || 0
-        next.push({ id: sess.id, title: sess.title, dir: p.directory, updated: upd })
-      }
-    } catch {}
+    const raw = await runKimaki(['session', 'list', '--project', p.directory, '--json'], 45000, 2_000_000)
+    if (raw.startsWith('ERROR')) log(`jarvis: index walk ${p.directory.split('/').pop()}: ${raw.slice(0, 90)}`)
+    for (const sess of extractJsonArray(raw) as Array<{ id?: string; title?: string; updated?: string | number; time?: { updated?: number } }>) {
+      if (!sess.id || !sess.title) continue
+      const upd = Number(sess.time?.updated ?? (typeof sess.updated === 'string' ? Date.parse(sess.updated) : sess.updated)) || 0
+      next.push({ id: sess.id, title: sess.title, dir: p.directory, updated: upd })
+    }
   }
+  log(`jarvis: index walk done — ${next.length} sessions`)
   if (next.length) {
     threadIndex = next
     try { fs.writeFileSync(path.join(workspaceDir(), 'thread-index.json'), JSON.stringify(next)) } catch {}
