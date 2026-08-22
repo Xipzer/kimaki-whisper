@@ -9,8 +9,12 @@
 cd "$(dirname "$0")"
 LOG="$HOME/.kimaki-whisper/jarvis.log"
 PIDFILE="$HOME/.kimaki-whisper/jarvis.pid"
+SUPFILE="$HOME/.kimaki-whisper/jarvis-supervisor.pid"
 mkdir -p "$HOME/.kimaki-whisper"
 
+# kill prior SUPERVISOR first (or it respawns mid-restart and races us)
+[ -f "$SUPFILE" ] && kill -9 "$(cat "$SUPFILE")" 2>/dev/null
+for p in $(pgrep -f 'restart-jarvis.sh'); do [ "$p" != "$$" ] && kill -9 "$p" 2>/dev/null; done  # orphan supervisors, excluding self
 pkill -9 -f 'kimaki-whisper/dist/cli.js' 2>/dev/null
 for i in 1 2 3 4 5; do
   P=$(ss -ltnp 2>/dev/null | grep ':7071' | grep -oE 'pid=[0-9]+' | cut -d= -f2 | head -1)
@@ -27,6 +31,7 @@ fi
 
 export PATH="$HOME/.local/bin:$HOME/.kimaki/bin:$PATH"
 (
+  echo $BASHPID > "$SUPFILE"
   while :; do
     node dist/cli.js >> "$LOG" 2>&1 &
     CHILD=$!

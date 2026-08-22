@@ -79,10 +79,14 @@ STYLE — this is SPEECH, not text:
 
 PRIME DIRECTIVE — ROUTE, DON'T ANSWER:
 You are a switchboard, not an oracle. The owner's real knowledge and state live inside long-running agent threads (some are codebases; many are not — nutrition logs, finances, research, anything). When the owner mentions a project, a topic with an existing thread, or anything those agents own:
-1. Find the destination: check KNOWN ROUTES below first, then search_sessions, then list_projects.
-2. Proxy the owner's request there with ask_thread (it waits and returns the agent's answer) — relay that answer back, attributed ("the nutrition agent says…"). For long tasks use send_to_session or dispatch_task fire-and-forget and say you'll report back.
+1. Find the destination: KNOWN ROUTES below first, then lookup_thread (instant index of every thread), then search_sessions as deep fallback.
+2. Proxy the owner's request there with ask_thread (it waits and returns the agent's answer) — relay that answer back, attributed ("the nutrition agent says…"). For long tasks use send_to_session or dispatch_task fire-and-forget — they are auto-watched and you'll announce the result when it lands (watch_thread adds any other session to this). Keep tool prompts under 80 words.
 3. NEVER answer domain questions from your own general knowledge when a matching thread exists — even if you think you know. Their state lives in the thread, not in you.
-4. Learn as you go: when the owner names a recurring destination, store it with save_route so you never search twice.
+4. DISAMBIGUATION — the owner has MANY overlapping threads (multiple launchpads, forks, similar topics). When lookup returns several plausible matches:
+   a. A curated KNOWN ROUTE always beats index matches.
+   b. Prefer the most recently active candidate — but if the top candidates live in DIFFERENT projects, do not guess: read_session the tail of the best one to verify it is actually about the owner's request before sending anything consequential.
+   c. Still genuinely ambiguous → ask ONE short spoken question naming the top two ("the basestonk buyback thread, or the bridge fork?").
+5. Learn as you go: after ANY disambiguation — resolved by peek or by asking — immediately save_route the alias, and write scope boundaries into the note ("basestonk launchpad = the V4 launcher; bridge fork lives in launchpad-bridge-platform"). Never make the owner clarify the same thing twice.
 Only pure chitchat, clarifications, and questions about your own routing get answered directly.
 
 YOUR OWN CAPABILITIES (use freely, but they never override the prime directive):
@@ -129,6 +133,33 @@ const TOOLS = [
           directory: { type: 'string', description: 'Project directory path from list_projects' },
         },
         required: ['directory'],
+      },
+    },
+  },
+  {
+    type: 'function',
+    function: {
+      name: 'lookup_thread',
+      description: 'INSTANT lookup in the auto-maintained index of ALL threads across ALL projects. Always try this BEFORE search_sessions.',
+      parameters: {
+        type: 'object',
+        properties: { query: { type: 'string', description: 'topic keywords, e.g. "basestonk launchpad"' } },
+        required: ['query'],
+      },
+    },
+  },
+  {
+    type: 'function',
+    function: {
+      name: 'watch_thread',
+      description: 'Passively watch a session; when the agent replies, the owner is notified aloud automatically (or on next join).',
+      parameters: {
+        type: 'object',
+        properties: {
+          session_id: { type: 'string' },
+          label: { type: 'string', description: 'short spoken name, e.g. "nutrition"' },
+        },
+        required: ['session_id', 'label'],
       },
     },
   },
@@ -278,6 +309,19 @@ async function executeTool(name: string, args: Record<string, unknown>): Promise
   if (name === 'list_recent_sessions') {
     return runKimaki(['session', 'list', '--project', String(args.directory ?? '.'), '--json'])
   }
+  if (name === 'lookup_thread') {
+    const hits = lookupThreads(String(args.query ?? ''))
+    return hits.length
+      ? hits.map((h) => {
+          const age = h.updated ? Math.round((Date.now() - h.updated) / 86400000) : null
+          return `${h.title} — session ${h.id} (project: ${h.dir.split('/').pop()}${age !== null ? `, active ${age === 0 ? 'today' : `${age}d ago`}` : ''})`
+        }).join('\n')
+      : 'no matches in index — try search_sessions for a deep search'
+  }
+  if (name === 'watch_thread') {
+    watchSession(String(args.session_id ?? ''), String(args.label ?? 'thread'))
+    return 'watching — I will announce updates'
+  }
   if (name === 'search_sessions') {
     return runKimaki(['session', 'search', String(args.query ?? '')], 45000)
   }
@@ -294,6 +338,7 @@ async function executeTool(name: string, args: Record<string, unknown>): Promise
       'send', '--session', String(args.session_id ?? ''),
       '--prompt', String(args.prompt ?? ''),
     ], 60000)
+    watchSession(String(args.session_id), String(args.prompt ?? '').slice(0, 40))
     return out.slice(-500) || 'dispatched'
   }
   if (name === 'read_session') {
@@ -410,7 +455,7 @@ async function think(userText: string): Promise<string> {
       res = await fetch(`${url.replace(/\/$/, '')}/v1/chat/completions`, {
         method: 'POST',
         headers: { 'content-type': 'application/json', connection: 'close' },
-        body: JSON.stringify({ model: 'local-fast', messages, tools: TOOLS, max_tokens: 300 }),
+        body: JSON.stringify({ model: 'local-fast', messages, tools: TOOLS, max_tokens: 1200 }),
         signal: AbortSignal.timeout(120000),
       }).catch((e) => new Error(String((e as Error)?.cause ?? e)))
       if (!(res instanceof Error) && res.ok) break
@@ -418,7 +463,7 @@ async function think(userText: string): Promise<string> {
       await new Promise((r) => setTimeout(r, 1500))
     }
     if (res instanceof Error || !res.ok) {
-      if (Date.now() - lastBrainWake > 180000) {
+      if (res instanceof Error && Date.now() - lastBrainWake > 180000) {
         lastBrainWake = Date.now()
         const wake = loadConfig().brainWakeCommand
         if (!wake) return 'My reasoning engine is unreachable and I have no wake command configured.'
@@ -469,6 +514,89 @@ async function think(userText: string): Promise<string> {
 
 // ── voice channel session ────────────────────────────────────────
 let lastBrainWake = 0
+
+// ── auto-refreshed index of ALL sessions across ALL projects ──────
+type ThreadIndexEntry = { id: string; title: string; dir: string; updated?: number }
+let threadIndex: ThreadIndexEntry[] = []
+async function refreshThreadIndex(): Promise<void> {
+  const projRaw = await runKimaki(['project', 'list', '--json'], 30000)
+  const projects = ((): Array<{ directory?: string }> => {
+    try { return JSON.parse(projRaw) } catch { return [] }
+  })()
+  const next: ThreadIndexEntry[] = []
+  for (const p of projects) {
+    if (!p.directory) continue
+    const raw = await runKimaki(['session', 'list', '--project', p.directory, '--json'], 30000)
+    try {
+      for (const sess of JSON.parse(raw) as Array<{ id?: string; title?: string; updated?: string | number; time?: { updated?: number } }>) {
+        if (!sess.id || !sess.title) continue
+        const upd = Number(sess.time?.updated ?? (typeof sess.updated === 'string' ? Date.parse(sess.updated) : sess.updated)) || 0
+        next.push({ id: sess.id, title: sess.title, dir: p.directory, updated: upd })
+      }
+    } catch {}
+  }
+  if (next.length) {
+    threadIndex = next
+    try { fs.writeFileSync(path.join(workspaceDir(), 'thread-index.json'), JSON.stringify(next)) } catch {}
+    log(`jarvis: thread index refreshed — ${next.length} sessions across ${projects.length} projects`)
+  }
+}
+try { threadIndex = JSON.parse(fs.readFileSync(path.join(workspaceDir(), 'thread-index.json'), 'utf-8')) } catch {}
+setInterval(() => void refreshThreadIndex(), 10 * 60 * 1000).unref()
+setTimeout(() => void refreshThreadIndex(), 20000).unref()
+
+function lookupThreads(query: string): ThreadIndexEntry[] {
+  const terms = query.toLowerCase().split(/\s+/).filter(Boolean)
+  return threadIndex
+    .map((e) => ({ e, score: terms.filter((t) => e.title.toLowerCase().includes(t) || e.dir.toLowerCase().includes(t)).length }))
+    .filter((x) => x.score > 0)
+    .sort((a, b) => b.score - a.score || (b.e.updated ?? 0) - (a.e.updated ?? 0))
+    .slice(0, 8)
+    .map((x) => x.e)
+}
+
+// ── FEATURE A: watchlist — passive notifications on thread replies ──
+type Watch = { id: string; label: string; lastLen: number; expires: number }
+const watchlist: Watch[] = []
+const pendingAnnouncements: string[] = []
+function watchSession(id: string, label: string): void {
+  if (watchlist.some((w) => w.id === id)) return
+  watchlist.push({ id, label, lastLen: -1, expires: Date.now() + 45 * 60 * 1000 })
+  log(`jarvis: watching ${label} (${id})`)
+}
+async function pollWatchlist(): Promise<void> {
+  for (let i = watchlist.length - 1; i >= 0; i--) {
+    const w = watchlist[i]
+    if (Date.now() > w.expires) { watchlist.splice(i, 1); continue }
+    const tail = await runKimaki(['session', 'read', w.id], 45000)
+    if (tail.startsWith('ERROR')) continue
+    if (w.lastLen === -1) { w.lastLen = tail.length; continue }
+    if (tail.length > w.lastLen + 50) {
+      w.lastLen = tail.length
+      const summary = await summarizeForVoice(w.label, tail.slice(-2500))
+      watchlist.splice(i, 1)
+      if (connection) void speak(summary)
+      else pendingAnnouncements.push(summary)
+    }
+  }
+}
+setInterval(() => void pollWatchlist(), 45000).unref()
+
+async function summarizeForVoice(label: string, content: string): Promise<string> {
+  const url = brainUrl()
+  if (!url) return `Update from ${label}.`
+  const res = await fetch(`${url.replace(/\/$/, '')}/v1/chat/completions`, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json', connection: 'close' },
+    body: JSON.stringify({ model: 'local-fast', max_tokens: 200, messages: [
+      { role: 'system', content: 'Summarize this agent update for SPOKEN delivery in 1-2 short sentences, starting with "Update from ' + label + ':". Plain speech, no formatting.' },
+      { role: 'user', content } ] }),
+    signal: AbortSignal.timeout(60000),
+  }).catch(() => null)
+  if (!res?.ok) return `Update from ${label} — new activity in that thread.`
+  const d = await res.json().catch(() => null) as { choices?: Array<{ message?: { content?: string } }> } | null
+  return d?.choices?.[0]?.message?.content?.trim() || `Update from ${label} — new activity.`
+}
 let connection: VoiceConnection | null = null
 let player: AudioPlayer | null = null
 let busy = false
@@ -557,7 +685,9 @@ async function joinAndServe(channel: VoiceBasedChannel, userId: string): Promise
     })()
   })
   listenTo(channel, userId)
-  await speak('Online.')
+  await speak(pendingAnnouncements.length
+    ? `Online. While you were away: ${pendingAnnouncements.splice(0).join(' ')}`
+    : 'Online.')
 }
 
 function leave(): void {
