@@ -15,6 +15,7 @@ import {
   createAudioResource,
   EndBehaviorType,
   VoiceConnectionStatus,
+  AudioPlayerStatus,
   entersState,
   StreamType,
   type VoiceConnection,
@@ -87,7 +88,7 @@ You are a switchboard, not an oracle. The owner's real knowledge and state live 
    a. A curated KNOWN ROUTE always beats index matches.
    b. Prefer the most recently active candidate — but if the top candidates live in DIFFERENT projects, do not guess: read_session the tail of the best one to verify it is actually about the owner's request before sending anything consequential.
    c. Still genuinely ambiguous → ask ONE short spoken question naming the top two ("the basestonk buyback thread, or the bridge fork?").
-5. Learn as you go: after ANY disambiguation — resolved by peek or by asking — immediately save_route the alias, and write scope boundaries into the note ("basestonk launchpad = the V4 launcher; bridge fork lives in launchpad-bridge-platform"). Never make the owner clarify the same thing twice. Thread titles are verbose — when you first talk about a thread, coin a short nickname with nickname_thread and use it consistently from then on ("the launcher thread", "nutrition"). If the owner calls a thread something, that becomes its nickname.
+5. Learn as you go: after ANY disambiguation — resolved by peek or by asking — immediately save_route the alias, and write scope boundaries into the note ("basestonk launchpad = the V4 launcher; bridge fork lives in launchpad-bridge-platform"). Never make the owner clarify the same thing twice. NEVER end your turn on a promise: if you say you'll check or do something, you MUST actually do it in this same turn — use say to narrate while you work ("one sec, checking"), run the tools, then report the real result. A promise with no action is a failure. Thread titles are verbose — when you first talk about a thread, coin a short nickname with nickname_thread and use it consistently from then on ("the launcher thread", "nutrition"). If the owner calls a thread something, that becomes its nickname.
 6. Silence mode: if the owner explicitly tells you to be quiet/silent/muted for a while, call go_silent with the requested duration (default 30 min if unspecified) and confirm in a few words. STRICT RULES: never activate silence on your own judgment, never suggest it, never ask the owner whether to enable it — it exists purely at the owner's request. They end it early by saying "Wendy, come back".
 7. Notifications: dispatched work is watched and announced live (start + finish). Thread activity and new commits across all projects flow in automatically as batched digests. The owner can tune priority per route with set_notify_tier: interrupt (speak immediately), digest (batched), onjoin (only when they join voice).
 Only pure chitchat, clarifications, and questions about your own routing get answered directly.
@@ -288,6 +289,18 @@ const TOOLS = [
   {
     type: 'function',
     function: {
+      name: 'say',
+      description: 'Speak a short sentence to the owner RIGHT NOW while you keep working ("one sec, checking that thread"). Use this whenever a task needs multiple steps so the owner is never left in silence. After say, CONTINUE with your tools — your final answer comes at the end.',
+      parameters: {
+        type: 'object',
+        properties: { text: { type: 'string', description: '1-2 short spoken sentences' } },
+        required: ['text'],
+      },
+    },
+  },
+  {
+    type: 'function',
+    function: {
       name: 'nickname_thread',
       description: 'Give a thread a short spoken nickname (your own memory — does not rename the real thread). Use at your discretion whenever a title is long or awkward to say; use the nickname consistently afterwards. Owner can assign or change nicknames too.',
       parameters: {
@@ -431,6 +444,10 @@ async function executeTool(name: string, args: Record<string, unknown>): Promise
     })
     return `saved route "${args.name}"`
   }
+  if (name === 'say') {
+    await speak(String(args.text ?? ''))
+    return 'spoken — now continue the actual work and report the result'
+  }
   if (name === 'nickname_thread') {
     const id = String(args.session_id ?? ''); const nick = String(args.nickname ?? '').trim()
     if (!id || !nick) return 'ERROR: need session_id and nickname'
@@ -518,6 +535,7 @@ async function think(userText: string): Promise<string> {
     : ''
   const messages: Msg[] = [{ role: 'system', content: SYSTEM_PROMPT + routesBlock }, ...history]
 
+  let nudged = false
   for (let hop = 0; hop < 6; hop++) {
     // One retry after a short pause: idle keep-alive sockets to llama.cpp get
     // closed server-side and the first reuse fails instantly with a reset.
@@ -576,6 +594,15 @@ async function think(userText: string): Promise<string> {
     }
 
     const text = (msg.content ?? '').trim() || 'Done.'
+    const PROMISE = /\b(let me|i'?ll (check|go|look|dig|find|pull|grab|get)|one (sec|second|moment)|hold on|checking now|give me a (sec|second|moment|minute)|right back|be right back)\b/i
+    if (!nudged && hop < 5 && PROMISE.test(text)) {
+      nudged = true
+      log('wendy: promise detected in final reply — forcing follow-through')
+      void speak(text)
+      messages.push({ role: 'assistant', content: text })
+      messages.push({ role: 'user', content: '(system: you just promised to check something but your turn was about to END with no action taken. Do it NOW with your tools, then report what you actually found. Never end a turn on a promise.)' })
+      continue
+    }
     history.push({ role: 'assistant', content: text })
     persistHistory()
     return text
@@ -763,13 +790,19 @@ let connection: VoiceConnection | null = null
 let player: AudioPlayer | null = null
 let busy = false
 
+let speakChain: Promise<void> = Promise.resolve()
 async function speak(text: string): Promise<void> {
-  if (!connection || !player) return
-  if (isSilenced() && Date.now() > silenceGrace) { log('wendy: speak suppressed (silenced)'); return }
-  const wav = await tts(text)
-  if (!wav) { log('wendy: TTS failed'); return }
-  const resource = createAudioResource(Readable.from(wav), { inputType: StreamType.Arbitrary })
-  player.play(resource)
+  const run = async (): Promise<void> => {
+    if (!connection || !player) return
+    if (isSilenced() && Date.now() > silenceGrace) { log('wendy: speak suppressed (silenced)'); return }
+    const wav = await tts(text)
+    if (!wav) { log('wendy: TTS failed'); return }
+    player.play(createAudioResource(Readable.from(wav), { inputType: StreamType.Arbitrary }))
+    await entersState(player, AudioPlayerStatus.Idle, 180000).catch(() => {})
+  }
+  const p = speakChain.then(run, run)
+  speakChain = p.catch(() => {})
+  await p
 }
 
 function listenTo(channel: VoiceBasedChannel, userId: string): void {
