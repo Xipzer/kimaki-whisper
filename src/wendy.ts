@@ -53,6 +53,28 @@ function routesPath(): string {
   return path.join(configDir(), 'routes.json')
 }
 
+// ── diagnostics: full structured event stream (JSONL, daily files) ──
+function diagDir(): string {
+  const d = path.join(configDir(), 'diagnostics')
+  fs.mkdirSync(d, { recursive: true })
+  return d
+}
+export function diag(ev: string, data: Record<string, unknown> = {}): void {
+  try {
+    const day = new Date().toISOString().slice(0, 10)
+    fs.appendFileSync(path.join(diagDir(), `${day}.jsonl`), JSON.stringify({ ts: Date.now(), ev, ...data }) + '\n')
+  } catch {}
+}
+// prune >14d once per boot
+try {
+  const cutoff = Date.now() - 14 * 86400000
+  for (const f of fs.readdirSync(diagDir())) {
+    const st = fs.statSync(path.join(diagDir(), f))
+    if (st.mtimeMs < cutoff) fs.unlinkSync(path.join(diagDir(), f))
+  }
+} catch {}
+diag('boot', { pid: process.pid })
+
 /** Wendy's own den: scratchpad, notes, memory.md, disposable thinking files. */
 export function workspaceDir(): string {
   const d = path.join(configDir(), 'workspace')
@@ -424,6 +446,12 @@ function recentMessages(md: string, n = 4): string {
 
 async function executeTool(name: string, args: Record<string, unknown>): Promise<string> {
   log(`wendy tool: ${name}(${JSON.stringify(args).slice(0, 120)})`)
+  const t0 = Date.now()
+  const result = await executeToolInner(name, args)
+  diag('tool', { name, args, ms: Date.now() - t0, result: result.slice(0, 2000) })
+  return result
+}
+async function executeToolInner(name: string, args: Record<string, unknown>): Promise<string> {
   if (name === 'list_projects') {
     return runKimaki(['project', 'list', '--json'])
   }
@@ -634,6 +662,7 @@ export async function think(userText: string): Promise<string> {
   let nudged = false
   const MAX_HOPS = 14
   for (let hop = 0; hop < MAX_HOPS; hop++) {
+    const hopT0 = Date.now()
     const lastLap = hop === MAX_HOPS - 1
     if (lastLap) messages.push({ role: 'user', content: '(system: tool budget exhausted — no more tool calls available. Give the owner your best answer RIGHT NOW from what you already found. If something is still unfinished, say exactly what and offer to follow up.)' })
     // One retry after a short pause: idle keep-alive sockets to llama.cpp get
@@ -666,6 +695,7 @@ export async function think(userText: string): Promise<string> {
       choices?: Array<{ message: Msg & { tool_calls?: Array<{ id: string; function: { name: string; arguments: string } }> } }>
     } | null
     const msg = d?.choices?.[0]?.message
+    diag('brain', { hop, ms: Date.now() - hopT0, tools: msg?.tool_calls?.map((t) => (t as { function: { name: string } }).function.name) ?? [], text: (msg?.content ?? '').slice(0, 500), usage: (d as { usage?: unknown } | null)?.usage })
     if (!msg) return 'I got an empty response from my reasoning engine.'
 
     if (msg.tool_calls?.length) {
@@ -831,6 +861,7 @@ setInterval(() => {
   void (async () => {
     for (const d of due) {
       log(`wendy: scheduled ${d.kind} due — ${d.note}`)
+      diag('schedule_fire', { kind: d.kind, note: d.note })
       if (d.kind === 'check' && d.sessionId) {
         const out = await runKimaki(['session', 'read', d.sessionId], 60000, 500_000, true)
         const summary = out.startsWith('ERROR')
@@ -868,6 +899,7 @@ function tierFor(sessionId: string): NotifyTier {
   return 'digest'
 }
 function announce(text: string, tier: NotifyTier): void {
+  diag('announce', { tier, text: text.slice(0, 300), inVc: !!connection })
   if (tier === 'interrupt' && connection) { convoEvents.push(text); return }
   if (tier === 'onjoin' || !connection || isSilenced()) {
     pendingAnnouncements.push(text)
@@ -938,11 +970,12 @@ function interruptSpeech(): void {
 }
 let speakChain: Promise<void> = Promise.resolve()
 async function speak(text: string): Promise<void> {
+  diag('speak', { text })
   spokenTranscript.push(text)
   if (spokenTranscript.length > 50) spokenTranscript.splice(0, 20)
   const run = async (): Promise<void> => {
     if (!connection || !player) return
-    if (isSilenced() && Date.now() > silenceGrace) { log('wendy: speak suppressed (silenced)'); return }
+    if (isSilenced() && Date.now() > silenceGrace) { log('wendy: speak suppressed (silenced)'); diag('speak_suppressed', { text: text.slice(0, 200), why: 'silenced' }); return }
     const ep = speechEpoch
     const wav = await tts(text)
     if (!wav) { log('wendy: TTS failed'); return }
@@ -968,6 +1001,7 @@ setInterval(() => {
   if (Date.now() - lastConvoActivity < 10000) return
   const events = convoEvents.splice(0, 4)
   log(`wendy: conversation idle — delivering ${events.length} background event(s)`)
+  diag('bg_delivery', { count: events.length })
   void runTurn(`[BACKGROUND UPDATE — this is NOT the owner speaking. Results from parallel work just arrived:]\n${events.join('\n')}\n[Tell the owner briefly and naturally, like a colleague mentioning news at a pause. Prioritize if several.]`)
 }, 5000).unref()
 function playerActive(): boolean {
@@ -980,6 +1014,7 @@ async function runTurn(text: string): Promise<void> {
   if (busy) {
     pendingUtterance = pendingUtterance ? `${pendingUtterance} — ${text}`.slice(-1500) : text
     log(`wendy: busy — queued "${text.slice(0, 50)}"`)
+    diag('queued_while_busy', { text })
     if (!busyAckGiven && !isSilenced()) {
       busyAckGiven = true
       void speak("One sec — I heard you, just finishing something.")
@@ -1005,7 +1040,10 @@ async function runTurn(text: string): Promise<void> {
       return
     }
     log(`wendy heard: "${text.slice(0, 80)}"`)
+    diag('owner_said', { text })
+    const turnT0 = Date.now()
     const reply = await think(text)
+    diag('turn_done', { ms: Date.now() - turnT0, reply: reply.slice(0, 800), superseded: seq !== inputSeq })
     if (seq !== inputSeq) {
       log(`wendy: reply superseded by newer input — staying quiet: "${reply.slice(0, 60)}"`)
       return
@@ -1046,6 +1084,7 @@ function listenTo(channel: VoiceBasedChannel, userId: string): void {
         interrupted = true
         interruptSpeech()
         log('wendy: barge-in — owner spoke over me, playback cut')
+        diag('barge_in', {})
       }
     })
     decoder.on('end', () => {
@@ -1059,11 +1098,13 @@ function listenTo(channel: VoiceBasedChannel, userId: string): void {
         const NOISE = /^(thanks?( you| for watching)?|you|bye|\.|uh|um)[.!\s]*$/i
         if (pcm.length < 2 * 96000 && NOISE.test(text.trim())) {
           log(`wendy: dropped noise artifact "${text.trim()}"`)
+          diag('dropped', { text: text.trim(), why: 'noise' })
           return
         }
         const BACKCHANNEL = /^(yeah|yep|yes|ok(ay)?|mhm+|uh-?huh|right|true|sure|lol|haha+|nice|cool|got it|go on|i see|wow)[.!,\s]*$/i
         if (pcm.length < 3 * 96000 && BACKCHANNEL.test(text.trim())) {
           log(`wendy: backchannel — not a turn: "${text.trim()}"`)
+          diag('dropped', { text: text.trim(), why: 'backchannel' })
           return
         }
         void runTurn(text)
