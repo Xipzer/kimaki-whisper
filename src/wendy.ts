@@ -83,7 +83,7 @@ STYLE — this is SPEECH, not text:
 PRIME DIRECTIVE — ROUTE, DON'T ANSWER:
 You are a switchboard, not an oracle. The owner's real knowledge and state live inside long-running agent threads (some are codebases; many are not — nutrition logs, finances, research, anything). When the owner mentions a project, a topic with an existing thread, or anything those agents own:
 1. Find the destination: KNOWN ROUTES below first, then lookup_thread (instant index of every thread), then search_sessions as deep fallback.
-2. Proxy the owner's request there with ask_thread — it waits up to ~45 seconds; quick answers come back directly, longer work automatically switches to watch mode (you announce the result when it lands — tell the owner it's underway and move on). For long tasks use send_to_session or dispatch_task fire-and-forget — also auto-watched. Keep tool prompts under 80 words.
+2. Proxy the owner's request there with ask_thread — quick answers (≤10s) come back directly; anything longer returns immediately and the result arrives later as a [BACKGROUND UPDATE]. You WORK IN PARALLEL: fire multiple asks/dispatches in one turn if the owner wants several things — never make them wait on one before starting another. When a [BACKGROUND UPDATE] arrives, it means the conversation had a pause: mention it naturally ("by the way, the launcher thread came back — ..."), connect it to what was asked, and keep it short. Keep tool prompts under 80 words.
 3. NEVER answer domain questions from your own general knowledge when a matching thread exists — even if you think you know. Their state lives in the thread, not in you.
 4. DISAMBIGUATION — the owner has MANY overlapping threads (multiple launchpads, forks, similar topics). When lookup returns several plausible matches:
    a. A curated KNOWN ROUTE always beats index matches.
@@ -451,10 +451,10 @@ async function executeTool(name: string, args: Record<string, unknown>): Promise
     const out = await runKimaki([
       'send', '--session', askId,
       '--prompt', String(args.prompt ?? ''), '--wait',
-    ], 45000, 500_000, true)
-    if (Date.now() - t0 >= 44000) {
+    ], 12000, 500_000, true)
+    if (Date.now() - t0 >= 11000) {
       watchSession(askId, String(args.prompt ?? '').slice(0, 40))
-      return 'the agent is still working on it — the thread is now auto-watched and you will announce the result when it lands. Tell the owner it is underway and STOP waiting; stay responsive.'
+      return 'still working — result will arrive as a [BACKGROUND UPDATE] when ready. Tell the owner it is underway; you are free to keep talking or fire off more tasks in parallel.'
     }
     return out.slice(-4000) || 'no reply captured'
   }
@@ -813,7 +813,7 @@ function tierFor(sessionId: string): NotifyTier {
   return 'digest'
 }
 function announce(text: string, tier: NotifyTier): void {
-  if (tier === 'interrupt' && connection && !busy && !isSilenced()) { void speak(text); return }
+  if (tier === 'interrupt' && connection) { convoEvents.push(text); return }
   if (tier === 'onjoin' || !connection || isSilenced()) {
     pendingAnnouncements.push(text)
     if (pendingAnnouncements.length > 8) pendingAnnouncements.splice(0, pendingAnnouncements.length - 8)
@@ -904,6 +904,17 @@ let capturing = false
 let pendingUtterance: string | null = null
 let inputSeq = 0
 let busyAckGiven = false
+let lastConvoActivity = 0
+const convoEvents: string[] = []
+// Deliver background results only when the conversation has space:
+// nobody talking, nothing playing, no turn running, >10s since last exchange.
+setInterval(() => {
+  if (!convoEvents.length || !connection || busy || capturing || isSilenced() || playerActive()) return
+  if (Date.now() - lastConvoActivity < 10000) return
+  const events = convoEvents.splice(0, 4)
+  log(`wendy: conversation idle — delivering ${events.length} background event(s)`)
+  void runTurn(`[BACKGROUND UPDATE — this is NOT the owner speaking. Results from parallel work just arrived:]\n${events.join('\n')}\n[Tell the owner briefly and naturally, like a colleague mentioning news at a pause. Prioritize if several.]`)
+}, 5000).unref()
 function playerActive(): boolean {
   const st = player?.state.status
   return st === AudioPlayerStatus.Playing || st === AudioPlayerStatus.Buffering
@@ -922,6 +933,7 @@ async function runTurn(text: string): Promise<void> {
   }
   busy = true
   busyAckGiven = false
+  lastConvoActivity = Date.now()
   const watchdog = setTimeout(() => {
     log('wendy WATCHDOG: utterance pipeline exceeded 4min — force-releasing')
     busy = false
@@ -948,6 +960,7 @@ async function runTurn(text: string): Promise<void> {
   } finally {
     clearTimeout(watchdog)
     busy = false
+    lastConvoActivity = Date.now()
     if (pendingUtterance) {
       const t = pendingUtterance
       pendingUtterance = null
