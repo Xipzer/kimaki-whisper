@@ -114,7 +114,7 @@ You are a switchboard, not an oracle. The owner's real knowledge and state live 
 5. Learn as you go: after ANY disambiguation — resolved by peek or by asking — immediately save_route the alias, and write scope boundaries into the note ("basestonk launchpad = the V4 launcher; bridge fork lives in launchpad-bridge-platform"). Never make the owner clarify the same thing twice.
 THREAD SELECTION for status questions: when several threads match, the one marked ACTIVE NOW (or most recently active) is almost always the one the owner means — recency beats title similarity. Threads marked [subagent offshoot] are spawned side-tasks of a parent thread; never pick them for a status update unless the owner asked about that specific piece of work. If two non-subagent threads are both ACTIVE NOW, read the top one and say which you picked.
 Status updates MUST reflect the LATEST state of a thread, never old activity presented as current. CRITICAL: fresh tool output ALWAYS overrides your own earlier statements — threads move fast, so what you said minutes ago is already stale. Re-derive every status from the transcript you just read, never from conversational memory. If the fresh read contradicts what you said before, lead with the correction ("actually, it's moved on — now…"). Protocol: read_session gives you the most recent transcript end. If the recent content references decisions, bugs, or plans you don't understand, dig deeper — call read_session again with a larger chars value (up to 30000), or read the related threads it mentions — until you can explain what is happening NOW and why. Only then report, and lead with the newest development. NEVER end your turn on a promise: if you say you'll check or do something, you MUST actually do it in this same turn — use say to narrate while you work ("one sec, checking"), run the tools, then report the real result. A promise with no action is a failure. Thread titles are verbose — when you first talk about a thread, coin a short nickname with nickname_thread and use it consistently from then on ("the launcher thread", "nutrition"). If the owner calls a thread something, that becomes its nickname.
-6. Silence mode: if the owner explicitly tells you to be quiet/silent/muted for a while, call go_silent with the requested duration (default 30 min if unspecified) and confirm in a few words. STRICT RULES: never activate silence on your own judgment, never suggest it, never ask the owner whether to enable it — it exists purely at the owner's request. They end it early by saying "Wendy, come back".
+6. Silence mode: if the owner explicitly tells you to be quiet/silent/muted for a while, call go_silent with the requested duration (default 30 min if unspecified) and confirm in a few words. STRICT RULES: never activate silence on your own judgment, never suggest it, never ask the owner whether to enable it — it exists purely at the owner's request. They end it early by saying your name — a bare "Wendy" is enough.
 7. Notifications: dispatched work is watched and announced live (start + finish). Thread activity and new commits across all projects flow in automatically as batched digests. The owner can tune priority per route with set_notify_tier: interrupt (speak immediately), digest (batched), onjoin (only when they join voice).
 Only pure chitchat, clarifications, and questions about your own routing get answered directly.
 
@@ -367,7 +367,7 @@ const TOOLS = [
     type: 'function',
     function: {
       name: 'go_silent',
-      description: 'Silence yourself completely for N minutes: no speaking, no announcements, incoming speech is discarded before reaching your reasoning. ONLY call this when the owner explicitly asks you to be quiet/silent/muted. NEVER activate it on your own judgment and NEVER suggest or offer it. The owner can end it early by saying "Wendy, come back" (or unmute/wake/speak/talk).',
+      description: 'Silence yourself completely for N minutes: no speaking, no announcements, incoming speech is discarded before reaching your reasoning. ONLY call this when the owner explicitly asks you to be quiet/silent/muted. NEVER activate it on your own judgment and NEVER suggest or offer it. The owner can end it early just by saying your name.',
       parameters: {
         type: 'object',
         properties: {
@@ -1031,7 +1031,7 @@ async function runTurn(text: string): Promise<void> {
   try {
     if (isSilenced()) {
       const t = text.toLowerCase()
-      if (t.includes('wendy') && /(unmute|wake|speak|talk|come back)/.test(t)) {
+      if (/\bw[ei]+nd[iy]e?\b/.test(t)) {
         silencedUntil = 0
         log('wendy: unmuted by owner voice command')
         const held = pendingAnnouncements.splice(0)
@@ -1091,18 +1091,19 @@ function listenTo(channel: VoiceBasedChannel, userId: string): void {
       capturing = false
       void (async () => {
         const pcm = Buffer.concat(chunks)
-        if (pcm.length < 48000) return // <0.5s — breath/noise, ignore
+        const minBytes = isSilenced() ? 24000 : 48000 // silenced: 0.25s so a bare "Wendy" wake-word gets through
+        if (pcm.length < minBytes) { diag('dropped', { why: 'too_short', bytes: pcm.length }); return }
         const text = await stt(pcm48kMonoToWav(pcm))
         if (!text || text.length < 2) return
         // Whisper hallucinates stock phrases on noise/breath; drop them for short clips.
         const NOISE = /^(thanks?( you| for watching)?|you|bye|\.|uh|um)[.!\s]*$/i
-        if (pcm.length < 2 * 96000 && NOISE.test(text.trim())) {
+        if (!isSilenced() && pcm.length < 2 * 96000 && NOISE.test(text.trim())) {
           log(`wendy: dropped noise artifact "${text.trim()}"`)
           diag('dropped', { text: text.trim(), why: 'noise' })
           return
         }
         const BACKCHANNEL = /^(yeah|yep|yes|ok(ay)?|mhm+|uh-?huh|right|true|sure|lol|haha+|nice|cool|got it|go on|i see|wow)[.!,\s]*$/i
-        if (pcm.length < 3 * 96000 && BACKCHANNEL.test(text.trim())) {
+        if (!isSilenced() && pcm.length < 3 * 96000 && BACKCHANNEL.test(text.trim())) {
           log(`wendy: backchannel — not a turn: "${text.trim()}"`)
           diag('dropped', { text: text.trim(), why: 'backchannel' })
           return
