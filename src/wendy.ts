@@ -632,7 +632,10 @@ export async function think(userText: string): Promise<string> {
   const messages: Msg[] = [{ role: 'system', content: SYSTEM_PROMPT + routesBlock }, ...history]
 
   let nudged = false
-  for (let hop = 0; hop < 6; hop++) {
+  const MAX_HOPS = 14
+  for (let hop = 0; hop < MAX_HOPS; hop++) {
+    const lastLap = hop === MAX_HOPS - 1
+    if (lastLap) messages.push({ role: 'user', content: '(system: tool budget exhausted — no more tool calls available. Give the owner your best answer RIGHT NOW from what you already found. If something is still unfinished, say exactly what and offer to follow up.)' })
     // One retry after a short pause: idle keep-alive sockets to llama.cpp get
     // closed server-side and the first reuse fails instantly with a reset.
     let res: Response | Error = new Error('unreachable')
@@ -640,7 +643,7 @@ export async function think(userText: string): Promise<string> {
       res = await fetch(`${url.replace(/\/$/, '')}/v1/chat/completions`, {
         method: 'POST',
         headers: { 'content-type': 'application/json', connection: 'close' },
-        body: JSON.stringify({ model: 'local-fast', messages, tools: TOOLS, max_tokens: 1200 }),
+        body: JSON.stringify({ model: 'local-fast', messages, ...(lastLap ? {} : { tools: TOOLS }), max_tokens: 1200 }),
         signal: AbortSignal.timeout(120000),
       }).catch((e) => new Error(String((e as Error)?.cause ?? e)))
       if (!(res instanceof Error) && res.ok) break
@@ -691,7 +694,7 @@ export async function think(userText: string): Promise<string> {
 
     const text = (msg.content ?? '').trim() || 'Done.'
     const PROMISE = /\b(let me|i'?ll (check|go|look|dig|find|pull|grab|get)|one (sec|second|moment)|hold on|checking now|give me a (sec|second|moment|minute)|right back|be right back)\b/i
-    if (!nudged && hop < 5 && PROMISE.test(text)) {
+    if (!nudged && hop < MAX_HOPS - 2 && PROMISE.test(text)) {
       nudged = true
       log('wendy: promise detected in final reply — forcing follow-through')
       void speak(text)
@@ -703,7 +706,7 @@ export async function think(userText: string): Promise<string> {
     persistHistory()
     return text
   }
-  return "That took more steps than expected — I've queued what I could."
+  return "I ran out of room mid-task — ask me again and I'll pick it up from where I got to."
 }
 
 // ── voice channel session ────────────────────────────────────────
