@@ -113,6 +113,7 @@ You are a switchboard, not an oracle. The owner's real knowledge and state live 
    b. Prefer the most recently active candidate — but if the top candidates live in DIFFERENT projects, do not guess: read_session the tail of the best one to verify it is actually about the owner's request before sending anything consequential.
    c. Still genuinely ambiguous → ask ONE short spoken question naming the top two ("the basestonk buyback thread, or the bridge fork?").
 5. Learn as you go: after ANY disambiguation — resolved by peek or by asking — immediately save_route the alias, and write scope boundaries into the note ("basestonk launchpad = the V4 launcher; bridge fork lives in launchpad-bridge-platform"). Never make the owner clarify the same thing twice.
+SESSION IDS: after lookup_thread, copy the ses_ id character-for-character from THAT result — NEVER type an id from memory or from earlier turns; ids look similar and mixing them up means reading the wrong thread entirely. Every read echoes back which thread it came from — check it matches what the owner asked before reporting, and silently re-read with the right id if not.
 THREAD SELECTION for status questions: when several threads match, the one marked ACTIVE NOW (or most recently active) is almost always the one the owner means — recency beats title similarity. Threads marked [subagent offshoot] are spawned side-tasks of a parent thread; never pick them for a status update unless the owner asked about that specific piece of work. If two non-subagent threads are both ACTIVE NOW, read the top one and say which you picked.
 Status updates MUST reflect the LATEST state of a thread, never old activity presented as current. CRITICAL: fresh tool output ALWAYS overrides your own earlier statements — threads move fast, so what you said minutes ago is already stale. Re-derive every status from the transcript you just read, never from conversational memory. If the fresh read contradicts what you said before, lead with the correction ("actually, it's moved on — now…"). Protocol: read_session gives you the most recent transcript end. If the recent content references decisions, bugs, or plans you don't understand, dig deeper — call read_session again with a larger chars value (up to 30000), or read the related threads it mentions — until you can explain what is happening NOW and why. Only then report, and lead with the newest development. NEVER end your turn on a promise: if you say you'll check or do something, you MUST actually do it in this same turn — use say to narrate while you work ("one sec, checking"), run the tools, then report the real result. A promise with no action is a failure. Thread titles are verbose — when you first talk about a thread, coin a short nickname with nickname_thread and use it consistently from then on ("the launcher thread", "nutrition"). If the owner calls a thread something, that becomes its nickname.
 6. Silence mode: if the owner explicitly tells you to be quiet/silent/muted for a while, call go_silent with the requested duration (default 30 min if unspecified) and confirm in a few words. STRICT RULES: never activate silence on your own judgment, never suggest it, never ask the owner whether to enable it — it exists purely at the owner's request. They end it early by saying your name — a bare "Wendy" is enough.
@@ -310,6 +311,18 @@ const TOOLS = [
           tier: { type: 'string', enum: ['interrupt', 'digest', 'onjoin'], description: 'Notification priority for this route (default digest)' },
         },
         required: ['name', 'id', 'kind', 'note'],
+      },
+    },
+  },
+  {
+    type: 'function',
+    function: {
+      name: 'fetch_reply',
+      description: 'Get the LATEST reply (last assistant message) from a thread, near-verbatim. THE tool for "what did it reply / what did it say / fetch the response". Copy the ses_ id exactly from a lookup result in this same turn — never from memory.',
+      parameters: {
+        type: 'object',
+        properties: { session_id: { type: 'string', description: 'ses_… — copy exactly from lookup_thread output' } },
+        required: ['session_id'],
       },
     },
   },
@@ -515,7 +528,7 @@ async function executeToolInner(name: string, args: Record<string, unknown>): Pr
     const deep = Number(args.chars) || 0
     const out = await runKimaki(['session', 'read', String(args.session_id ?? '')], 60000, 500_000, true)
     if (out.startsWith('ERROR')) return out
-    const hdr = '[LIVE TRANSCRIPT — fetched seconds ago. This is the CURRENT state and OVERRIDES anything you said about this thread earlier in our conversation.]\n'
+    const hdr = `[LIVE TRANSCRIPT of "${threadIdent(String(args.session_id ?? ''))}" — fetched seconds ago, OVERRIDES anything said earlier. VERIFY this is the thread the owner meant before reporting.]\n`
     if (deep) return hdr + (out.replace(/\S{400,}/g, '[attachment]').slice(-Math.min(Math.max(deep, 500), 30000)) || 'empty session')
     return hdr + (recentMessages(out, 4) || 'empty session')
   }
@@ -556,6 +569,20 @@ async function executeToolInner(name: string, args: Record<string, unknown>): Pr
       ...(['interrupt', 'digest', 'onjoin'].includes(String(args.tier)) ? { tier: String(args.tier) as NotifyTier } : {}),
     })
     return `saved route "${args.name}"`
+  }
+  if (name === 'fetch_reply') {
+    const fid = String(args.session_id ?? '')
+    const out = await runKimaki(['session', 'read', fid], 60000, 500_000, true)
+    if (out.startsWith('ERROR')) return out
+    const clean = out.replace(/\S{400,}/g, '[attachment]')
+    const parts = clean.split(/^### (?=👤|🤖)/m).filter((p) => p.trim())
+    const assistants = parts.filter((p) => p.startsWith('🤖'))
+      .map((p) => p.replace(/^🤖 Assistant[^\n]*\n?/, '').replace(/^\*\*Started using [^\n]+\n?/gm, '').replace(/^> 🛠️[^\n]*\n?/gm, '').replace(/^\*Completed in [^\n]+\n?/gm, '').trim())
+      .filter((p) => p.length > 5)
+    const last = assistants[assistants.length - 1]
+    return last
+      ? `[latest reply in "${threadIdent(fid)}"]\n${last.slice(0, 4500)}`
+      : `no assistant reply found in "${threadIdent(fid)}"`
   }
   if (name === 'schedule_check') {
     if (schedules.length >= 20) return 'ERROR: too many pending schedules (20 max) — check schedules.json via bash'
@@ -753,6 +780,10 @@ const nicknamesPath = () => path.join(workspaceDir(), 'nicknames.json')
 let nicknames: Record<string, string> = {}
 try { nicknames = JSON.parse(fs.readFileSync(nicknamesPath(), 'utf-8')) } catch {}
 function labelFor(id: string, title: string): string { return nicknames[id] ?? title }
+function threadIdent(id: string): string {
+  const e = threadIndex.find((x) => x.id === id)
+  return e ? `${labelFor(id, e.title)} (${path.basename(e.dir)})` : id
+}
 function extractJsonArray(raw: string): unknown[] {
   // kimaki CLI wraps --json output in log lines (which contain brackets);
   // try each '[' candidate until one parses as an array.
