@@ -17,6 +17,7 @@ import { spawn } from 'node:child_process'
 import { loadConfig, saveConfig, DEFAULT_PORT, log } from './config.js'
 import { MODEL_TIERS, tierById, recommendTier, installRuntime, getPipeline } from './transcribe/local-onnx.js'
 import { transcribeAudioBytes, startServer, isServerRunning, stopServer } from './server.js'
+import { initJarvis } from './jarvis.js'
 
 function prefix(): string {
   return loadConfig().commandPrefix ?? 'whisper'
@@ -148,7 +149,7 @@ async function handleRetranscribe(message: Message): Promise<void> {
 
 export async function startDiscord(token: string): Promise<void> {
   const client = new Client({
-    intents: [GatewayIntentBits.Guilds, GatewayIntentBits.GuildMessages, GatewayIntentBits.MessageContent],
+    intents: [GatewayIntentBits.Guilds, GatewayIntentBits.GuildMessages, GatewayIntentBits.MessageContent, GatewayIntentBits.GuildVoiceStates],
     partials: [Partials.Message, Partials.Channel],
   })
 
@@ -162,6 +163,7 @@ export async function startDiscord(token: string): Promise<void> {
   })
 
   client.on('messageCreate', (m) => void handleRetranscribe(m))
+  initJarvis(client)
 
   await client.login(token)
   const appId = client.application?.id ?? (await client.application?.fetch())?.id

@@ -139,6 +139,13 @@ export function startServer(): number {
     })
   })
 
+  server.on('error', (e: NodeJS.ErrnoException) => {
+    if (e.code === 'EADDRINUSE') {
+      log(`FATAL: port ${port} already in use — another sidecar instance is running. Exiting.`)
+      process.exit(2)
+    }
+    throw e
+  })
   server.listen(port, '127.0.0.1')
   log(`transcription endpoint: http://127.0.0.1:${port}/v1  (point OPENAI_BASE_URL here)`)
   return port

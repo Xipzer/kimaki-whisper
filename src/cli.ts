@@ -65,6 +65,7 @@ async function main(): Promise<void> {
   }
 
   // default: run the sidecar
+  log('jarvis-build: hardened-v2')
   const token = await resolveBotToken()
   if (!token) {
     log('no bot token found. Provide it once:')
@@ -80,5 +81,11 @@ async function main(): Promise<void> {
   log('sidecar running. One-time Kimaki wiring (shell profile):')
   log(`  export OPENAI_API_KEY=local OPENAI_BASE_URL=http://127.0.0.1:${port}/v1`)
 }
+
+process.on('unhandledRejection', (e) => log('UNHANDLED REJECTION:', String(e)))
+process.on('uncaughtException', (e) => {
+  log('UNCAUGHT EXCEPTION:', String((e as Error)?.stack ?? e))
+  process.exit(3) // supervised: restart script respawns on 3
+})
 
 void main()
