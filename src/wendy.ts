@@ -361,13 +361,15 @@ function runKimaki(args: string[], timeoutMs = 30000, maxChars = 6000, fromEnd =
   // so route output through a temp file — file sinks flush completely.
   return new Promise((resolve) => {
     const tmp = path.join(os.tmpdir(), `wendy-${process.pid}-${Date.now()}-${Math.random().toString(36).slice(2)}.out`)
-    const child = spawn('bash', ['-c', `exec kimaki "$@" > '${tmp}' 2>&1`, 'kimaki', ...args], { stdio: 'ignore' })
+    const child = spawn('bash', ['-c', `exec kimaki "$@" > '${tmp}' 2> '${tmp}.err'`, 'kimaki', ...args], { stdio: 'ignore' })
     const finish = (): void => {
       try {
-        const st = fs.statSync(tmp)
+        let src = tmp
+        try { if (!fs.statSync(tmp).size && fs.statSync(tmp + '.err').size) src = tmp + '.err' } catch {}
+        const st = fs.statSync(src)
         const window = Math.min(st.size, Math.max(maxChars * 3, 400_000))
         const buf = Buffer.alloc(window)
-        const fd = fs.openSync(tmp, 'r')
+        const fd = fs.openSync(src, 'r')
         fs.readSync(fd, buf, 0, window, fromEnd ? st.size - window : 0)
         fs.closeSync(fd)
         const out = buf.toString()
@@ -376,10 +378,11 @@ function runKimaki(args: string[], timeoutMs = 30000, maxChars = 6000, fromEnd =
         resolve(`ERROR: ${String((e as Error).message).slice(0, 300)}`)
       } finally {
         try { fs.unlinkSync(tmp) } catch {}
+        try { fs.unlinkSync(tmp + '.err') } catch {}
       }
     }
     const timer = setTimeout(() => child.kill('SIGKILL'), timeoutMs)
-    child.on('error', (e) => { clearTimeout(timer); try { fs.unlinkSync(tmp) } catch {}; resolve(`ERROR: ${String(e.message).slice(0, 300)}`) })
+    child.on('error', (e) => { clearTimeout(timer); try { fs.unlinkSync(tmp) } catch {}; try { fs.unlinkSync(tmp + '.err') } catch {}; resolve(`ERROR: ${String(e.message).slice(0, 300)}`) })
     child.on('close', () => { clearTimeout(timer); finish() })
   })
 }
@@ -687,11 +690,21 @@ let nicknames: Record<string, string> = {}
 try { nicknames = JSON.parse(fs.readFileSync(nicknamesPath(), 'utf-8')) } catch {}
 function labelFor(id: string, title: string): string { return nicknames[id] ?? title }
 function extractJsonArray(raw: string): unknown[] {
-  // kimaki CLI wraps --json output in log lines; carve out the outermost array.
-  const start = raw.indexOf('[')
+  // kimaki CLI wraps --json output in log lines (which contain brackets);
+  // try each '[' candidate until one parses as an array.
   const end = raw.lastIndexOf(']')
-  if (start === -1 || end <= start) return []
-  try { return JSON.parse(raw.slice(start, end + 1)) as unknown[] } catch { return [] }
+  if (end === -1) return []
+  let from = 0
+  for (let i = 0; i < 50; i++) {
+    const start = raw.indexOf('[', from)
+    if (start === -1 || start >= end) return []
+    try {
+      const v = JSON.parse(raw.slice(start, end + 1))
+      if (Array.isArray(v)) return v
+    } catch {}
+    from = start + 1
+  }
+  return []
 }
 
 let refreshing = false
