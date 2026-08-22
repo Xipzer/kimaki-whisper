@@ -88,7 +88,8 @@ You are a switchboard, not an oracle. The owner's real knowledge and state live 
    a. A curated KNOWN ROUTE always beats index matches.
    b. Prefer the most recently active candidate — but if the top candidates live in DIFFERENT projects, do not guess: read_session the tail of the best one to verify it is actually about the owner's request before sending anything consequential.
    c. Still genuinely ambiguous → ask ONE short spoken question naming the top two ("the basestonk buyback thread, or the bridge fork?").
-5. Learn as you go: after ANY disambiguation — resolved by peek or by asking — immediately save_route the alias, and write scope boundaries into the note ("basestonk launchpad = the V4 launcher; bridge fork lives in launchpad-bridge-platform"). Never make the owner clarify the same thing twice. NEVER end your turn on a promise: if you say you'll check or do something, you MUST actually do it in this same turn — use say to narrate while you work ("one sec, checking"), run the tools, then report the real result. A promise with no action is a failure. Thread titles are verbose — when you first talk about a thread, coin a short nickname with nickname_thread and use it consistently from then on ("the launcher thread", "nutrition"). If the owner calls a thread something, that becomes its nickname.
+5. Learn as you go: after ANY disambiguation — resolved by peek or by asking — immediately save_route the alias, and write scope boundaries into the note ("basestonk launchpad = the V4 launcher; bridge fork lives in launchpad-bridge-platform"). Never make the owner clarify the same thing twice.
+Status updates MUST reflect the LATEST state of a thread, never old activity presented as current. Protocol: read_session gives you the most recent transcript end. If the recent content references decisions, bugs, or plans you don't understand, dig deeper — call read_session again with a larger chars value (up to 30000), or read the related threads it mentions — until you can explain what is happening NOW and why. Only then report, and lead with the newest development. NEVER end your turn on a promise: if you say you'll check or do something, you MUST actually do it in this same turn — use say to narrate while you work ("one sec, checking"), run the tools, then report the real result. A promise with no action is a failure. Thread titles are verbose — when you first talk about a thread, coin a short nickname with nickname_thread and use it consistently from then on ("the launcher thread", "nutrition"). If the owner calls a thread something, that becomes its nickname.
 6. Silence mode: if the owner explicitly tells you to be quiet/silent/muted for a while, call go_silent with the requested duration (default 30 min if unspecified) and confirm in a few words. STRICT RULES: never activate silence on your own judgment, never suggest it, never ask the owner whether to enable it — it exists purely at the owner's request. They end it early by saying "Wendy, come back".
 7. Notifications: dispatched work is watched and announced live (start + finish). Thread activity and new commits across all projects flow in automatically as batched digests. The owner can tune priority per route with set_notify_tier: interrupt (speak immediately), digest (batched), onjoin (only when they join voice).
 Only pure chitchat, clarifications, and questions about your own routing get answered directly.
@@ -218,7 +219,8 @@ const TOOLS = [
       description: 'Read the tail of an agent session\'s conversation — use to report results or catch up on what happened.',
       parameters: {
         type: 'object',
-        properties: { session_id: { type: 'string' } },
+        properties: {
+          chars: { type: 'number', description: 'How much recent transcript to read, from the end (default 4000, max 30000). Use larger values to dig deeper into history when recent context references earlier events.' }, session_id: { type: 'string' } },
         required: ['session_id'],
       },
     },
@@ -344,11 +346,11 @@ const TOOLS = [
   },
 ] as const
 
-function runKimaki(args: string[], timeoutMs = 30000, maxChars = 6000): Promise<string> {
+function runKimaki(args: string[], timeoutMs = 30000, maxChars = 6000, fromEnd = false): Promise<string> {
   return new Promise((resolve) => {
-    execFile('kimaki', args, { timeout: timeoutMs, maxBuffer: 4 * 1024 * 1024, killSignal: 'SIGKILL' }, (err, stdout, stderr) => {
+    execFile('kimaki', args, { timeout: timeoutMs, maxBuffer: 8 * 1024 * 1024, killSignal: 'SIGKILL' }, (err, stdout, stderr) => {
       if (err) resolve(`ERROR: ${String(err.message).slice(0, 300)}`)
-      else resolve((stdout || stderr || '').slice(0, maxChars))
+      else resolve(fromEnd ? (stdout || stderr || '').slice(-maxChars) : (stdout || stderr || '').slice(0, maxChars))
     })
   })
 }
@@ -391,7 +393,7 @@ async function executeTool(name: string, args: Record<string, unknown>): Promise
     const out = await runKimaki([
       'send', '--session', String(args.session_id ?? ''),
       '--prompt', String(args.prompt ?? ''), '--wait',
-    ], 150000)
+    ], 150000, 500_000, true)
     return out.slice(-4000) || 'no reply captured'
   }
   if (name === 'send_to_session') {
@@ -403,8 +405,9 @@ async function executeTool(name: string, args: Record<string, unknown>): Promise
     return out.slice(-500) || 'dispatched'
   }
   if (name === 'read_session') {
-    const out = await runKimaki(['session', 'read', String(args.session_id ?? '')], 60000)
-    return out.slice(-4000) || 'empty session'
+    const depth = Math.min(Math.max(Number(args.chars) || 4000, 500), 30000)
+    const out = await runKimaki(['session', 'read', String(args.session_id ?? '')], 60000, 500_000, true)
+    return out.slice(-depth) || 'empty session'
   }
   if (name === 'bash') {
     const timeoutSec = Math.min(Number(args.timeout_sec) || 60, 300)
@@ -658,7 +661,7 @@ async function refreshThreadIndexInner(): Promise<void> {
     const fresh = next.filter((e) => !prev.has(e.id))
     for (const e of changed.slice(0, 3)) {
       const label = labelFor(e.id, e.title)
-      const tail = await runKimaki(['session', 'read', e.id], 45000)
+      const tail = await runKimaki(['session', 'read', e.id], 45000, 500_000, true)
       announce(tail.startsWith('ERROR') ? `${label} had activity.` : await summarizeForVoice(label, tail.slice(-2500)), tierFor(e.id))
     }
     for (const e of changed.slice(3, 5)) announce(`${labelFor(e.id, e.title)} also moved.`, tierFor(e.id))
@@ -755,7 +758,7 @@ async function pollWatchlist(): Promise<void> {
   for (let i = watchlist.length - 1; i >= 0; i--) {
     const w = watchlist[i]
     if (Date.now() > w.expires) { watchlist.splice(i, 1); continue }
-    const tail = await runKimaki(['session', 'read', w.id], 45000)
+    const tail = await runKimaki(['session', 'read', w.id], 45000, 500_000, true)
     if (tail.startsWith('ERROR')) continue
     if (w.lastLen === -1) { w.lastLen = tail.length; continue }
     if (tail.length > w.lastLen + 50) {
