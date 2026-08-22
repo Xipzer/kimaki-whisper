@@ -791,6 +791,11 @@ let player: AudioPlayer | null = null
 let busy = false
 
 export const spokenTranscript: string[] = []
+let speechEpoch = 0
+function interruptSpeech(): void {
+  speechEpoch++
+  try { player?.stop(true) } catch {}
+}
 let speakChain: Promise<void> = Promise.resolve()
 async function speak(text: string): Promise<void> {
   spokenTranscript.push(text)
@@ -798,8 +803,10 @@ async function speak(text: string): Promise<void> {
   const run = async (): Promise<void> => {
     if (!connection || !player) return
     if (isSilenced() && Date.now() > silenceGrace) { log('wendy: speak suppressed (silenced)'); return }
+    const ep = speechEpoch
     const wav = await tts(text)
     if (!wav) { log('wendy: TTS failed'); return }
+    if (ep !== speechEpoch) { log('wendy: queued speech discarded (barge-in)'); return }
     player.play(createAudioResource(Readable.from(wav), { inputType: StreamType.Arbitrary }))
     await entersState(player, AudioPlayerStatus.Idle, 180000).catch(() => {})
   }
@@ -808,58 +815,87 @@ async function speak(text: string): Promise<void> {
   await p
 }
 
+let capturing = false
+let pendingUtterance: string | null = null
+function playerActive(): boolean {
+  const st = player?.state.status
+  return st === AudioPlayerStatus.Playing || st === AudioPlayerStatus.Buffering
+}
+
+async function runTurn(text: string): Promise<void> {
+  if (busy) { pendingUtterance = text; log(`wendy: busy — queued "${text.slice(0, 50)}"`); return }
+  busy = true
+  const watchdog = setTimeout(() => {
+    log('wendy WATCHDOG: utterance pipeline exceeded 4min — force-releasing')
+    busy = false
+  }, 240000)
+  try {
+    if (isSilenced()) {
+      const t = text.toLowerCase()
+      if (t.includes('wendy') && /(unmute|wake|speak|talk|come back)/.test(t)) {
+        silencedUntil = 0
+        log('wendy: unmuted by owner voice command')
+        const held = pendingAnnouncements.splice(0)
+        await speak(held.length ? `I'm back. While I was silent: ${held.join(' ')}` : `I'm back.`)
+      } else log(`wendy: silenced — dropped "${text.slice(0, 60)}"`)
+      return
+    }
+    log(`wendy heard: "${text.slice(0, 80)}"`)
+    const reply = await think(text)
+    log(`wendy says: "${reply.slice(0, 80)}"`)
+    await speak(reply)
+  } finally {
+    clearTimeout(watchdog)
+    busy = false
+    if (pendingUtterance) {
+      const t = pendingUtterance
+      pendingUtterance = null
+      void runTurn(t)
+    }
+  }
+}
+
 function listenTo(channel: VoiceBasedChannel, userId: string): void {
   if (!connection) return
   const receiver = connection.receiver
   receiver.speaking.on('start', (speakingUserId) => {
-    if (speakingUserId !== userId || busy) return
+    if (speakingUserId !== userId || capturing) return
+    capturing = true
     const opus = receiver.subscribe(speakingUserId, {
       end: { behavior: EndBehaviorType.AfterSilence, duration: 900 },
     })
     const decoder = new prism.opus.Decoder({ rate: 48000, channels: 1, frameSize: 960 })
     const chunks: Buffer[] = []
+    let bytes = 0
+    let interrupted = false
     opus.pipe(decoder)
-    decoder.on('data', (c: Buffer) => chunks.push(c))
+    decoder.on('data', (c: Buffer) => {
+      chunks.push(c)
+      bytes += c.length
+      // barge-in: ~0.4s of sustained speech while she's talking cuts her off
+      if (!interrupted && bytes > 38400 && playerActive()) {
+        interrupted = true
+        interruptSpeech()
+        log('wendy: barge-in — owner spoke over me, playback cut')
+      }
+    })
     decoder.on('end', () => {
+      capturing = false
       void (async () => {
         const pcm = Buffer.concat(chunks)
         if (pcm.length < 48000) return // <0.5s — breath/noise, ignore
-        if (busy) return
-        busy = true
-        const watchdog = setTimeout(() => {
-          log('wendy WATCHDOG: utterance pipeline exceeded 4min — force-releasing')
-          busy = false
-        }, 240000)
-        try {
-          const text = await stt(pcm48kMonoToWav(pcm))
-          if (!text || text.length < 2) return
-          // Whisper hallucinates stock phrases on noise/breath; drop them for short clips.
-          const NOISE = /^(thanks?( you| for watching)?|you|bye|\.|uh|um)[.!\s]*$/i
-          if (pcm.length < 2 * 96000 && NOISE.test(text.trim())) {
-            log(`wendy: dropped noise artifact "${text.trim()}"`)
-            return
-          }
-          if (isSilenced()) {
-            const t = text.toLowerCase()
-            if (t.includes('wendy') && /(unmute|wake|speak|talk|come back)/.test(t)) {
-              silencedUntil = 0
-              log('wendy: unmuted by owner voice command')
-              const held = pendingAnnouncements.splice(0)
-              await speak(held.length ? `I'm back. While I was silent: ${held.join(' ')}` : `I'm back.`)
-            } else log(`wendy: silenced — dropped "${text.slice(0, 60)}"`)
-            return
-          }
-          log(`wendy heard: "${text.slice(0, 80)}"`)
-          const reply = await think(text)
-          log(`wendy says: "${reply.slice(0, 80)}"`)
-          await speak(reply)
-        } finally {
-          clearTimeout(watchdog)
-          busy = false
+        const text = await stt(pcm48kMonoToWav(pcm))
+        if (!text || text.length < 2) return
+        // Whisper hallucinates stock phrases on noise/breath; drop them for short clips.
+        const NOISE = /^(thanks?( you| for watching)?|you|bye|\.|uh|um)[.!\s]*$/i
+        if (pcm.length < 2 * 96000 && NOISE.test(text.trim())) {
+          log(`wendy: dropped noise artifact "${text.trim()}"`)
+          return
         }
+        void runTurn(text)
       })()
     })
-    decoder.on('error', () => {})
+    decoder.on('error', () => { capturing = false })
   })
 }
 
