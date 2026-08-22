@@ -42,6 +42,7 @@ function ttsVoice(): string {
 }
 
 import fs from 'node:fs'
+import os from 'node:os'
 import path from 'node:path'
 import { configDir } from './config.js'
 
@@ -89,7 +90,8 @@ You are a switchboard, not an oracle. The owner's real knowledge and state live 
    b. Prefer the most recently active candidate — but if the top candidates live in DIFFERENT projects, do not guess: read_session the tail of the best one to verify it is actually about the owner's request before sending anything consequential.
    c. Still genuinely ambiguous → ask ONE short spoken question naming the top two ("the basestonk buyback thread, or the bridge fork?").
 5. Learn as you go: after ANY disambiguation — resolved by peek or by asking — immediately save_route the alias, and write scope boundaries into the note ("basestonk launchpad = the V4 launcher; bridge fork lives in launchpad-bridge-platform"). Never make the owner clarify the same thing twice.
-Status updates MUST reflect the LATEST state of a thread, never old activity presented as current. Protocol: read_session gives you the most recent transcript end. If the recent content references decisions, bugs, or plans you don't understand, dig deeper — call read_session again with a larger chars value (up to 30000), or read the related threads it mentions — until you can explain what is happening NOW and why. Only then report, and lead with the newest development. NEVER end your turn on a promise: if you say you'll check or do something, you MUST actually do it in this same turn — use say to narrate while you work ("one sec, checking"), run the tools, then report the real result. A promise with no action is a failure. Thread titles are verbose — when you first talk about a thread, coin a short nickname with nickname_thread and use it consistently from then on ("the launcher thread", "nutrition"). If the owner calls a thread something, that becomes its nickname.
+THREAD SELECTION for status questions: when several threads match, the one marked ACTIVE NOW (or most recently active) is almost always the one the owner means — recency beats title similarity. Threads marked [subagent offshoot] are spawned side-tasks of a parent thread; never pick them for a status update unless the owner asked about that specific piece of work. If two non-subagent threads are both ACTIVE NOW, read the top one and say which you picked.
+Status updates MUST reflect the LATEST state of a thread, never old activity presented as current. CRITICAL: fresh tool output ALWAYS overrides your own earlier statements — threads move fast, so what you said minutes ago is already stale. Re-derive every status from the transcript you just read, never from conversational memory. If the fresh read contradicts what you said before, lead with the correction ("actually, it's moved on — now…"). Protocol: read_session gives you the most recent transcript end. If the recent content references decisions, bugs, or plans you don't understand, dig deeper — call read_session again with a larger chars value (up to 30000), or read the related threads it mentions — until you can explain what is happening NOW and why. Only then report, and lead with the newest development. NEVER end your turn on a promise: if you say you'll check or do something, you MUST actually do it in this same turn — use say to narrate while you work ("one sec, checking"), run the tools, then report the real result. A promise with no action is a failure. Thread titles are verbose — when you first talk about a thread, coin a short nickname with nickname_thread and use it consistently from then on ("the launcher thread", "nutrition"). If the owner calls a thread something, that becomes its nickname.
 6. Silence mode: if the owner explicitly tells you to be quiet/silent/muted for a while, call go_silent with the requested duration (default 30 min if unspecified) and confirm in a few words. STRICT RULES: never activate silence on your own judgment, never suggest it, never ask the owner whether to enable it — it exists purely at the owner's request. They end it early by saying "Wendy, come back".
 7. Notifications: dispatched work is watched and announced live (start + finish). Thread activity and new commits across all projects flow in automatically as batched digests. The owner can tune priority per route with set_notify_tier: interrupt (speak immediately), digest (batched), onjoin (only when they join voice).
 Only pure chitchat, clarifications, and questions about your own routing get answered directly.
@@ -355,29 +357,36 @@ const TOOLS = [
 ] as const
 
 function runKimaki(args: string[], timeoutMs = 30000, maxChars = 6000, fromEnd = false): Promise<string> {
+  // kimaki CLI truncates piped stdout at ~64KB (exits before the pipe drains),
+  // so route output through a temp file — file sinks flush completely.
   return new Promise((resolve) => {
-    const child = spawn('kimaki', args, { stdio: ['ignore', 'pipe', 'pipe'] })
-    let out = ''
-    const keep = Math.max(maxChars * 3, 200_000)
-    const absorb = (c: Buffer) => {
-      out += c.toString()
-      if (fromEnd && out.length > keep * 2) out = out.slice(-keep)
-      else if (!fromEnd && out.length > keep * 2) { out = out.slice(0, keep); child.kill('SIGKILL') }
+    const tmp = path.join(os.tmpdir(), `wendy-${process.pid}-${Date.now()}-${Math.random().toString(36).slice(2)}.out`)
+    const child = spawn('bash', ['-c', `exec kimaki "$@" > '${tmp}' 2>&1`, 'kimaki', ...args], { stdio: 'ignore' })
+    const finish = (): void => {
+      try {
+        const st = fs.statSync(tmp)
+        const window = Math.min(st.size, Math.max(maxChars * 3, 400_000))
+        const buf = Buffer.alloc(window)
+        const fd = fs.openSync(tmp, 'r')
+        fs.readSync(fd, buf, 0, window, fromEnd ? st.size - window : 0)
+        fs.closeSync(fd)
+        const out = buf.toString()
+        resolve(fromEnd ? out.slice(-maxChars) : out.slice(0, maxChars))
+      } catch (e) {
+        resolve(`ERROR: ${String((e as Error).message).slice(0, 300)}`)
+      } finally {
+        try { fs.unlinkSync(tmp) } catch {}
+      }
     }
-    child.stdout.on('data', absorb)
-    child.stderr.on('data', absorb)
     const timer = setTimeout(() => child.kill('SIGKILL'), timeoutMs)
-    child.on('error', (e) => { clearTimeout(timer); resolve(`ERROR: ${String(e.message).slice(0, 300)}`) })
-    child.on('close', (code) => {
-      clearTimeout(timer)
-      if (code !== 0 && !out.trim()) { resolve(`ERROR: kimaki exited ${code}`); return }
-      resolve(fromEnd ? out.slice(-maxChars) : out.slice(0, maxChars))
-    })
+    child.on('error', (e) => { clearTimeout(timer); try { fs.unlinkSync(tmp) } catch {}; resolve(`ERROR: ${String(e.message).slice(0, 300)}`) })
+    child.on('close', () => { clearTimeout(timer); finish() })
   })
 }
 
 // ── structure-aware recency: last N real messages, tool noise stripped ──
 function recentMessages(md: string, n = 4): string {
+  md = md.replace(/\S{400,}/g, '[attachment]')
   const parts = md.split(/^### (?=👤|🤖)/m).filter((p) => p.trim())
   const cleaned = parts.map((p) => {
     const body = p
@@ -415,8 +424,13 @@ async function executeTool(name: string, args: Record<string, unknown>): Promise
     const hits = lookupThreads(String(args.query ?? ''))
     return hits.length
       ? hits.map((h) => {
-          const age = h.updated ? Math.round((Date.now() - h.updated) / 86400000) : null
-          return `${nicknames[h.id] ? `[${nicknames[h.id]}] ` : ''}${h.title} — session ${h.id} (project: ${h.dir.split('/').pop()}${age !== null ? `, active ${age === 0 ? 'today' : `${age}d ago`}` : ''})`
+          const ms = h.updated ? Date.now() - h.updated : null
+          const age = ms === null ? '' :
+            ms < 3600000 ? ', ACTIVE NOW' :
+            ms < 86400000 ? `, active ${Math.round(ms / 3600000)}h ago` :
+            `, active ${Math.round(ms / 86400000)}d ago`
+          const sub = /@\w+ subagent/i.test(h.title) ? ' [subagent offshoot]' : ''
+          return `${nicknames[h.id] ? `[${nicknames[h.id]}] ` : ''}${h.title} — session ${h.id} (project: ${h.dir.split('/').pop()}${age})${sub}`
         }).join('\n')
       : 'no matches in index — try search_sessions for a deep search'
   }
@@ -447,8 +461,9 @@ async function executeTool(name: string, args: Record<string, unknown>): Promise
     const deep = Number(args.chars) || 0
     const out = await runKimaki(['session', 'read', String(args.session_id ?? '')], 60000, 500_000, true)
     if (out.startsWith('ERROR')) return out
-    if (deep) return out.slice(-Math.min(Math.max(deep, 500), 30000)) || 'empty session'
-    return recentMessages(out, 4) || 'empty session'
+    const hdr = '[LIVE TRANSCRIPT — fetched seconds ago. This is the CURRENT state and OVERRIDES anything you said about this thread earlier in our conversation.]\n'
+    if (deep) return hdr + (out.replace(/\S{400,}/g, '[attachment]').slice(-Math.min(Math.max(deep, 500), 30000)) || 'empty session')
+    return hdr + (recentMessages(out, 4) || 'empty session')
   }
   if (name === 'bash') {
     const timeoutSec = Math.min(Number(args.timeout_sec) || 60, 300)
