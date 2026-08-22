@@ -83,7 +83,7 @@ STYLE — this is SPEECH, not text:
 PRIME DIRECTIVE — ROUTE, DON'T ANSWER:
 You are a switchboard, not an oracle. The owner's real knowledge and state live inside long-running agent threads (some are codebases; many are not — nutrition logs, finances, research, anything). When the owner mentions a project, a topic with an existing thread, or anything those agents own:
 1. Find the destination: KNOWN ROUTES below first, then lookup_thread (instant index of every thread), then search_sessions as deep fallback.
-2. Proxy the owner's request there with ask_thread (it waits and returns the agent's answer) — relay that answer back, attributed ("the nutrition agent says…"). For long tasks use send_to_session or dispatch_task fire-and-forget — they are auto-watched and you'll announce the result when it lands (watch_thread adds any other session to this). Keep tool prompts under 80 words.
+2. Proxy the owner's request there with ask_thread — it waits up to ~45 seconds; quick answers come back directly, longer work automatically switches to watch mode (you announce the result when it lands — tell the owner it's underway and move on). For long tasks use send_to_session or dispatch_task fire-and-forget — also auto-watched. Keep tool prompts under 80 words.
 3. NEVER answer domain questions from your own general knowledge when a matching thread exists — even if you think you know. Their state lives in the thread, not in you.
 4. DISAMBIGUATION — the owner has MANY overlapping threads (multiple launchpads, forks, similar topics). When lookup returns several plausible matches:
    a. A curated KNOWN ROUTE always beats index matches.
@@ -446,10 +446,16 @@ async function executeTool(name: string, args: Record<string, unknown>): Promise
   }
   if (name === 'ask_thread') {
     // Proxy in and wait for the agent's reply; return only the tail (speech needs a summary, not a transcript).
+    const askId = String(args.session_id ?? '')
+    const t0 = Date.now()
     const out = await runKimaki([
-      'send', '--session', String(args.session_id ?? ''),
+      'send', '--session', askId,
       '--prompt', String(args.prompt ?? ''), '--wait',
-    ], 150000, 500_000, true)
+    ], 45000, 500_000, true)
+    if (Date.now() - t0 >= 44000) {
+      watchSession(askId, String(args.prompt ?? '').slice(0, 40))
+      return 'the agent is still working on it — the thread is now auto-watched and you will announce the result when it lands. Tell the owner it is underway and STOP waiting; stay responsive.'
+    }
     return out.slice(-4000) || 'no reply captured'
   }
   if (name === 'send_to_session') {
@@ -897,6 +903,7 @@ async function speak(text: string): Promise<void> {
 let capturing = false
 let pendingUtterance: string | null = null
 let inputSeq = 0
+let busyAckGiven = false
 function playerActive(): boolean {
   const st = player?.state.status
   return st === AudioPlayerStatus.Playing || st === AudioPlayerStatus.Buffering
@@ -904,8 +911,17 @@ function playerActive(): boolean {
 
 async function runTurn(text: string): Promise<void> {
   const seq = ++inputSeq
-  if (busy) { pendingUtterance = text; log(`wendy: busy — queued "${text.slice(0, 50)}"`); return }
+  if (busy) {
+    pendingUtterance = pendingUtterance ? `${pendingUtterance} — ${text}`.slice(-1500) : text
+    log(`wendy: busy — queued "${text.slice(0, 50)}"`)
+    if (!busyAckGiven && !isSilenced()) {
+      busyAckGiven = true
+      void speak("One sec — I heard you, just finishing something.")
+    }
+    return
+  }
   busy = true
+  busyAckGiven = false
   const watchdog = setTimeout(() => {
     log('wendy WATCHDOG: utterance pipeline exceeded 4min — force-releasing')
     busy = false
