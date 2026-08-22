@@ -112,7 +112,8 @@ You are a switchboard, not an oracle. The owner's real knowledge and state live 
    a. A curated KNOWN ROUTE always beats index matches.
    b. Prefer the most recently active candidate — but if the top candidates live in DIFFERENT projects, do not guess: read_session the tail of the best one to verify it is actually about the owner's request before sending anything consequential.
    c. Still genuinely ambiguous → ask ONE short spoken question naming the top two ("the basestonk buyback thread, or the bridge fork?").
-5. Learn as you go: after ANY disambiguation — resolved by peek or by asking — immediately save_route the alias, and write scope boundaries into the note ("basestonk launchpad = the V4 launcher; bridge fork lives in launchpad-bridge-platform"). Never make the owner clarify the same thing twice.
+5. Learn as you go: after ANY disambiguation — resolved by peek or by asking — immediately save_route the alias, and write scope boundaries into the note ("basestonk launchpad = the V4 launcher; bridge fork lives in launchpad-bridge-platform"). Never make the owner clarify the same thing twice. If the owner repeats a request or asks again, NEVER say you already told them — a repeat means the answer didn't land or went stale. Re-verify it's current and answer again, at most leading with "quick recap:".
+OUTBOUND SENDS: the target ses_ id must come from a lookup result or saved route referenced IN THIS TURN — never from memory. Every send echoes back which thread it landed in: CHECK it. If it landed wrong: tell the owner immediately, send that thread a one-line "disregard — sent in error" note, then resend to the correct thread.
 SESSION IDS: after lookup_thread, copy the ses_ id character-for-character from THAT result — NEVER type an id from memory or from earlier turns; ids look similar and mixing them up means reading the wrong thread entirely. Every read echoes back which thread it came from — check it matches what the owner asked before reporting, and silently re-read with the right id if not.
 THREAD SELECTION for status questions: when several threads match, the one marked ACTIVE NOW (or most recently active) is almost always the one the owner means — recency beats title similarity. Threads marked [subagent offshoot] are spawned side-tasks of a parent thread; never pick them for a status update unless the owner asked about that specific piece of work. If two non-subagent threads are both ACTIVE NOW, read the top one and say which you picked.
 Status updates MUST reflect the LATEST state of a thread, never old activity presented as current. CRITICAL: fresh tool output ALWAYS overrides your own earlier statements — threads move fast, so what you said minutes ago is already stale. Re-derive every status from the transcript you just read, never from conversational memory. If the fresh read contradicts what you said before, lead with the correction ("actually, it's moved on — now…"). Protocol: read_session gives you the most recent transcript end. If the recent content references decisions, bugs, or plans you don't understand, dig deeper — call read_session again with a larger chars value (up to 30000), or read the related threads it mentions — until you can explain what is happening NOW and why. Only then report, and lead with the newest development. NEVER end your turn on a promise: if you say you'll check or do something, you MUST actually do it in this same turn — use say to narrate while you work ("one sec, checking"), run the tools, then report the real result. A promise with no action is a failure. Thread titles are verbose — when you first talk about a thread, coin a short nickname with nickname_thread and use it consistently from then on ("the launcher thread", "nutrition"). If the owner calls a thread something, that becomes its nickname.
@@ -514,7 +515,7 @@ async function executeToolInner(name: string, args: Record<string, unknown>): Pr
       watchSession(askId, String(args.prompt ?? '').slice(0, 40))
       return 'still working — result will arrive as a [BACKGROUND UPDATE] when ready. Tell the owner it is underway; you are free to keep talking or fire off more tasks in parallel.'
     }
-    return out.slice(-4000) || 'no reply captured'
+    return `[reply from "${threadIdent(askId)}" — VERIFY this is the thread you meant]\n` + (out.slice(-4000) || 'no reply captured')
   }
   if (name === 'send_to_session') {
     const out = await runKimaki([
@@ -522,7 +523,7 @@ async function executeToolInner(name: string, args: Record<string, unknown>): Pr
       '--prompt', String(args.prompt ?? ''),
     ], 60000)
     watchSession(String(args.session_id), String(args.prompt ?? '').slice(0, 40))
-    return out.slice(-500) || 'dispatched'
+    return `[sent to "${threadIdent(String(args.session_id ?? ''))}" — VERIFY this is the thread you meant] ` + (out.slice(-300) || 'dispatched')
   }
   if (name === 'read_session') {
     const deep = Number(args.chars) || 0
@@ -667,9 +668,11 @@ async function tts(text: string): Promise<Buffer | null> {
 // ── the brain loop (with tool calling) ───────────────────────────
 type Msg = { role: string; content: string | null; tool_calls?: unknown[]; tool_call_id?: string; name?: string }
 const history: Msg[] = (() => {
+  if (process.env.WENDY_TEST) return []
   try { return JSON.parse(fs.readFileSync(path.join(workspaceDir(), 'history.json'), 'utf-8')) as Msg[] } catch { return [] }
 })()
 function persistHistory(): void {
+  if (process.env.WENDY_TEST) return
   try { fs.writeFileSync(path.join(workspaceDir(), 'history.json'), JSON.stringify(history.slice(-24))) } catch {}
 }
 

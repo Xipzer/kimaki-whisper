@@ -1,5 +1,6 @@
 // Live-fire chaos sim: drives the REAL think() pipeline (real brain, real tools)
 // with overlapping/messy group-call-style utterances. Backs up & restores state.
+process.env.WENDY_TEST = '1'
 import fs from 'node:fs'
 import os from 'node:os'
 import path from 'node:path'
