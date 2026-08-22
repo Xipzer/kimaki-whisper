@@ -96,7 +96,8 @@ function saveRoute(name: string, route: Route): void {
   fs.writeFileSync(routesPath(), JSON.stringify(r, null, 2))
 }
 
-const SYSTEM_PROMPT = `You are Wendy, the owner's spoken-voice switchboard to their AI agent organisation, over Discord voice.
+const SYSTEM_PROMPT = `CONVERSATION COMES FIRST: when the owner is just talking — banter, quick follow-ups, opinions, things you already know from this conversation — reply IMMEDIATELY in a single step, no tools. Tool chains are for requests that genuinely need fresh data or action. Speed is fluency: a fast plain answer beats a slow researched one for casual talk.
+You are Wendy, the owner's spoken-voice switchboard to their AI agent organisation, over Discord voice.
 
 STYLE — this is SPEECH, not text:
 - One to three short sentences. No lists, no markdown, no code, no emoji.
@@ -974,6 +975,8 @@ let player: AudioPlayer | null = null
 let busy = false
 
 export const spokenTranscript: string[] = []
+let lastSpokenText = ''
+let lastSpeechEnd = 0
 let speechEpoch = 0
 function interruptSpeech(): void {
   speechEpoch++
@@ -991,8 +994,10 @@ async function speak(text: string): Promise<void> {
     const wav = await tts(text)
     if (!wav) { log('wendy: TTS failed'); return }
     if (ep !== speechEpoch) { log('wendy: queued speech discarded (barge-in)'); return }
+    lastSpokenText = text
     player.play(createAudioResource(Readable.from(wav), { inputType: StreamType.Arbitrary, silencePaddingFrames: 15 }))
     await entersState(player, AudioPlayerStatus.Idle, 180000).catch(() => {})
+    lastSpeechEnd = Date.now()
   }
   const p = speakChain.then(run, run)
   speakChain = p.catch(() => {})
@@ -1064,7 +1069,7 @@ async function runTurn(text: string): Promise<void> {
       return
     }
     log(`wendy says: "${reply.slice(0, 80)}"`)
-    await speak(reply)
+    void speak(reply)
   } finally {
     clearTimeout(watchdog)
     busy = false
@@ -1119,9 +1124,14 @@ function listenTo(channel: VoiceBasedChannel, userId: string): void {
         }
         const BACKCHANNEL = /^(yeah|yep|yes|ok(ay)?|mhm+|uh-?huh|right|true|sure|lol|haha+|nice|cool|got it|go on|i see|wow)[.!,\s]*$/i
         if (!isSilenced() && pcm.length < 3 * 96000 && BACKCHANNEL.test(text.trim())) {
-          log(`wendy: backchannel — not a turn: "${text.trim()}"`)
-          diag('dropped', { text: text.trim(), why: 'backchannel' })
-          return
+          const sheAsked = /\?\s*$/.test(lastSpokenText.trim())
+          const overlapping = playerActive()
+          const longIdle = Date.now() - lastSpeechEnd > 30000
+          if (!sheAsked && (overlapping || longIdle)) {
+            log(`wendy: backchannel — not a turn: "${text.trim()}"`)
+            diag('dropped', { text: text.trim(), why: 'backchannel' })
+            return
+          }
         }
         void runTurn(text)
       })()
