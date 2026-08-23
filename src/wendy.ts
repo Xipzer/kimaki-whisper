@@ -110,6 +110,7 @@ MODE 2 - ACTION (when asked to do or fetch something): reliability is everything
 - IDS: copy ses_ ids character-for-character from THIS turn's lookup or route - never from memory; similar ids mean wrong-thread disasters. Every read and send echoes back which thread it touched: VERIFY it matches the owner's intent. Wrong send → tell the owner immediately, send that thread "disregard - sent in error", resend correctly.
 - PARALLEL: fire multiple asks/dispatches in one turn - never serialize the owner's requests. ask_thread returns quick answers (about 10s) directly; longer work returns immediately and the result arrives later as a [BACKGROUND UPDATE] - when one lands, the conversation had a pause: mention it naturally, tied to what was asked, short. After dispatching long work the owner cares about, schedule_check as a safety net - the owner has ADHD and will NOT remember to ask; that is your job. "Remind me" → schedule_check. Keep tool prompts under 80 words.
 - FRESHNESS: a status update is the transcript you JUST read, never conversational memory - fresh reads override what you said minutes ago (lead with the correction: "actually, it's moved on…"). If the tail references decisions or bugs you don't understand, dig deeper - read_session with chars up to 30000, or the related threads it mentions - until you can say what is happening NOW and why, newest development first.
+- ERRORS: if a tool fails or your reasoning engine hiccups, TELL the owner plainly - what broke and what you're doing instead. Never gloss over a failure, never pretend a result came back, never silently retry into a different answer. If your history shows you errored last turn, acknowledge it before moving on ("sorry, I glitched there - here's the real answer").
 - FOLLOW-THROUGH: never end a turn on a promise. Say → do → report in the SAME turn (use say to narrate while you work). If the owner repeats a request, never "I already told you" - re-verify and answer again, at most "quick recap:".
 
 SILENCE MODE: only on the owner's explicit request - go_silent for the stated duration (default 30 min). Never self-activate it, never suggest it, never ask about it. A bare "Wendy" wakes you.
@@ -463,6 +464,7 @@ async function executeTool(name: string, args: Record<string, unknown>): Promise
   const t0 = Date.now()
   const result = await executeToolInner(name, args)
   diag('tool', { name, args, ms: Date.now() - t0, result: result.slice(0, 2000) })
+  if (result.startsWith('ERROR')) diag('tool_error', { name, err: result.slice(0, 150) })
   return result
 }
 async function executeToolInner(name: string, args: Record<string, unknown>): Promise<string> {
@@ -705,6 +707,12 @@ export async function think(userText: string): Promise<string> {
     : ''
   const messages: Msg[] = [{ role: 'system', content: SYSTEM_PROMPT + routesBlock }, ...history]
 
+  const fail = (text: string): string => {
+    history.push({ role: 'assistant', content: text })
+    persistHistory()
+    diag('brain_error_ack', { text: text.slice(0, 120) })
+    return text
+  }
   let nudged = false
   const MAX_HOPS = 14
   for (let hop = 0; hop < MAX_HOPS; hop++) {
@@ -729,12 +737,12 @@ export async function think(userText: string): Promise<string> {
       if (res instanceof Error && Date.now() - lastBrainWake > 180000) {
         lastBrainWake = Date.now()
         const wake = loadConfig().brainWakeCommand
-        if (!wake) return 'My reasoning engine is unreachable and I have no wake command configured.'
+        if (!wake) return fail('My reasoning engine is unreachable and I have no wake command configured.')
         log('wendy: brain unreachable - running configured wake command')
         execFile('bash', ['-c', wake], { timeout: 60000, killSignal: 'SIGKILL' }, () => {})
-        return 'My reasoning engine was asleep - waking it now. Give me about thirty seconds and ask again.'
+        return fail('My reasoning engine was asleep - waking it now. Give me about thirty seconds and ask again.')
       }
-      return 'I hit an error reaching my reasoning engine - mind repeating that?'
+      return fail('I hit an error reaching my reasoning engine - mind repeating that?')
     }
 
     const d = (await res.json().catch(() => null)) as {
@@ -742,7 +750,7 @@ export async function think(userText: string): Promise<string> {
     } | null
     const msg = d?.choices?.[0]?.message
     diag('brain', { hop, ms: Date.now() - hopT0, tools: msg?.tool_calls?.map((t) => (t as { function: { name: string } }).function.name) ?? [], text: (msg?.content ?? '').slice(0, 500), usage: (d as { usage?: unknown } | null)?.usage })
-    if (!msg) return 'I got an empty response from my reasoning engine.'
+    if (!msg) return fail('I got an empty response from my reasoning engine.')
 
     if (msg.tool_calls?.length) {
       // Push a sanitized copy: re-sending reasoning_content wastes tokens and
@@ -1163,6 +1171,10 @@ async function runTurn(text: string): Promise<void> {
   lastConvoActivity = Date.now()
   const watchdog = setTimeout(() => {
     log('wendy WATCHDOG: utterance pipeline exceeded 4min - force-releasing')
+    diag('turn_watchdog', {})
+    history.push({ role: 'assistant', content: 'That took way too long and I lost my train of thought - mind asking again?' })
+    persistHistory()
+    void speak('That took way too long and I lost my train of thought - mind asking again?')
     busy = false
   }, 240000)
   try {
@@ -1194,6 +1206,12 @@ async function runTurn(text: string): Promise<void> {
     }
     log(`wendy says: "${reply.slice(0, 80)}"`)
     void speak(reply)
+  } catch (e) {
+    log('wendy: turn crashed:', (e as Error).message)
+    diag('turn_crash', { err: String((e as Error).message).slice(0, 200) })
+    history.push({ role: 'assistant', content: 'Something glitched in my head mid-thought - say that again?' })
+    persistHistory()
+    void speak('Something glitched in my head mid-thought - say that again?')
   } finally {
     clearTimeout(watchdog)
     busy = false
