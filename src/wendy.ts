@@ -663,7 +663,7 @@ const history: Msg[] = (() => {
 })()
 function persistHistory(): void {
   if (process.env.WENDY_TEST) return
-  try { fs.writeFileSync(path.join(workspaceDir(), 'history.json'), JSON.stringify(history.slice(-24))) } catch {}
+  try { fs.writeFileSync(path.join(workspaceDir(), 'history.json'), JSON.stringify(history.slice(-40))) } catch {}
 }
 
 export async function think(userText: string): Promise<string> {
@@ -671,7 +671,7 @@ export async function think(userText: string): Promise<string> {
   if (!url) return "My reasoning engine isn't configured yet."
 
   history.push({ role: 'user', content: userText })
-  if (history.length > 24) history.splice(0, history.length - 24)
+  if (history.length > 40) history.splice(0, history.length - 40)
 
   const routes = loadRoutes()
   const routesBlock = Object.keys(routes).length
@@ -744,6 +744,14 @@ export async function think(userText: string): Promise<string> {
     }
 
     const text = (msg.content ?? '').trim() || 'Done.'
+    const isBg = userText.startsWith('[BACKGROUND UPDATE')
+    if (/^skip\.?$/i.test(text) || /^\W*\(?(still|staying)\s+quiet\)?\W*$/i.test(text)) {
+      if (history[history.length - 1]?.role === 'user') history.pop()
+      persistHistory()
+      diag('turn_skipped', { bg: isBg, text: text.slice(0, 60) })
+      return ''
+    }
+    if (isBg && history[history.length - 1]?.role === 'user') history[history.length - 1].content = '[background update delivered]'
     const PROMISE = /\b(let me|i'?ll (check|go|look|dig|find|pull|grab|get)|one (sec|second|moment)|hold on|checking now|give me a (sec|second|moment|minute)|right back|be right back)\b/i
     if (!nudged && hop < MAX_HOPS - 2 && PROMISE.test(text)) {
       nudged = true
@@ -824,6 +832,8 @@ async function refreshThreadIndexInner(): Promise<void> {
     const changed = next.filter((e) => prev.has(e.id) && (e.updated ?? 0) > (prev.get(e.id) ?? 0) + 1000 && !watchlist.some((w) => w.id === e.id))
     const fresh = next.filter((e) => !prev.has(e.id))
     for (const e of changed.slice(0, 3)) {
+      const prevA = lastAnnounced.get(e.id)
+      if (prevA && Date.now() - prevA.at < 10 * 60 * 1000) continue
       const label = labelFor(e.id, e.title)
       const tail = await runKimaki(['session', 'read', e.id], 45000, 500_000, true)
       if (tail.startsWith('ERROR')) { announce(`${label} had activity.`, tierFor(e.id)); continue }
@@ -915,15 +925,17 @@ const pendingAnnouncements: string[] = []
 const digestQueue: string[] = []
 // ── silence mode: OWNER-ONLY, explicitly requested, never self-activated ──
 let silencedUntil = 0
+const heldWhileSilent: string[] = []
+let resumeOnContact = false
 let silenceGrace = 0   // brief window so the go_silent confirmation itself is audible
 function isSilenced(): boolean { return Date.now() < silencedUntil }
 setInterval(() => {
   if (silencedUntil && Date.now() >= silencedUntil) {
     silencedUntil = 0
+    resumeOnContact = true
     log('wendy: silence period expired')
-    if (connection) {
-      const held = pendingAnnouncements.splice(0)
-      void speak(held.length ? `Quiet period over. While I was silent: ${held.join(' ')}` : 'Quiet period over.')
+    if (connection && heldWhileSilent.length) {
+      void speak(`I'm back - ${heldWhileSilent.length === 1 ? 'one thing' : heldWhileSilent.length + ' things'} moved while I was quiet. Want the rundown?`)
     }
   }
 }, 20000).unref()
@@ -933,6 +945,11 @@ function tierFor(sessionId: string): NotifyTier {
 }
 function announce(text: string, tier: NotifyTier): void {
   diag('announce', { tier, text: text.slice(0, 300), inVc: !!connection })
+  if (isSilenced()) {
+    heldWhileSilent.push(text)
+    if (heldWhileSilent.length > 12) heldWhileSilent.splice(0, heldWhileSilent.length - 12)
+    return
+  }
   if (tier === 'interrupt' && connection) { convoEvents.push(text); return }
   if (tier === 'onjoin' || !connection || isSilenced()) {
     pendingAnnouncements.push(text)
@@ -949,7 +966,7 @@ setInterval(() => {
     pendingAnnouncements.push(...items)
     if (pendingAnnouncements.length > 8) pendingAnnouncements.splice(0, pendingAnnouncements.length - 8)
   }
-}, 5 * 60 * 1000).unref()
+}, 15 * 60 * 1000).unref()
 function fingerprint(tail: string): string { return tail.slice(-3000) }
 // One memory across ALL announcement sources (watches, change feed, schedules):
 // if a session's content hasn't changed since we last told the owner, stay quiet.
@@ -1033,7 +1050,14 @@ async function speak(text: string): Promise<void> {
     if (!connection || !player) return
     if (isSilenced() && Date.now() > silenceGrace) { log('wendy: speak suppressed (silenced)'); diag('speak_suppressed', { text: text.slice(0, 200), why: 'silenced' }); return }
     const ep = speechEpoch
-    const wav = await tts(text)
+    const speakable = text
+      .replace(/```[\s\S]*?```/g, ' ')
+      .replace(/[*_`#]+/g, '')
+      .replace(/^\s*[-•]\s+/gm, '')
+      .replace(/\s*\n+\s*/g, '. ')
+      .replace(/\.{2,}/g, '.')
+      .trim()
+    const wav = await tts(speakable)
     if (!wav) { log('wendy: TTS failed'); return }
     if (ep !== speechEpoch) { log('wendy: queued speech discarded (barge-in)'); return }
     lastSpokenText = text
@@ -1054,15 +1078,18 @@ let turnStartedAt = 0
 let lastBusyAck = 0
 let lastConvoActivity = 0
 const convoEvents: string[] = []
+let lastBgDelivery = 0
 // Deliver background results only when the conversation has space:
 // nobody talking, nothing playing, no turn running, >10s since last exchange.
 setInterval(() => {
-  if (!convoEvents.length || !connection || busy || capturing || isSilenced() || playerActive()) return
+  if (!convoEvents.length || !connection || busy || capturing || isSilenced() || playerActive() || resumeOnContact) return
   if (Date.now() - lastConvoActivity < 10000) return
+  if (Date.now() - lastBgDelivery < 4 * 60 * 1000) return
+  lastBgDelivery = Date.now()
   const events = convoEvents.splice(0, 4)
   log(`wendy: conversation idle - delivering ${events.length} background event(s)`)
   diag('bg_delivery', { count: events.length })
-  void runTurn(`[BACKGROUND UPDATE - this is NOT the owner speaking. Results from parallel work just arrived:]\n${events.join('\n')}\n[Tell the owner briefly and naturally, like a colleague mentioning news at a pause. Prioritize if several. Anything you ALREADY told the owner this conversation: skip it entirely or compress to one clause of what is genuinely new - never restate an update in different words.]`)
+  void runTurn(`[BACKGROUND UPDATE - this is NOT the owner speaking. Results from parallel work just arrived:]\n${events.join('\n')}\n[Tell the owner briefly and naturally, like a colleague mentioning news at a pause. Prioritize if several. Anything you ALREADY told the owner this conversation, or anything not worth interrupting for: reply with exactly SKIP (nothing else) - never say you are staying quiet, never restate old news in new words.]`)
 }, 5000).unref()
 function playerActive(): boolean {
   const st = player?.state.status
@@ -1096,16 +1123,23 @@ async function runTurn(text: string): Promise<void> {
       if (/\bw[ei]+nd[iy]e?\b/.test(t)) {
         silencedUntil = 0
         log('wendy: unmuted by owner voice command')
-        const held = pendingAnnouncements.splice(0)
-        await speak(held.length ? `I'm back. While I was silent: ${held.join(' ')}` : `I'm back.`)
+        await speak(heldWhileSilent.length
+          ? `I'm back - ${heldWhileSilent.length === 1 ? 'one thing' : heldWhileSilent.length + ' things'} moved while I was quiet. Want the rundown?`
+          : `I'm back.`)
       } else log(`wendy: silenced - dropped "${text.slice(0, 60)}"`)
       return
+    }
+    resumeOnContact = false
+    if (heldWhileSilent.length) {
+      const held = heldWhileSilent.splice(0)
+      text = `[Context: while you were silenced, these updates arrived: ${held.join(' | ')}. You offered a catch-up. If the owner wants it, deliver it concisely; if they've moved on to something else, follow their lead.]\n${text}`
     }
     log(`wendy heard: "${text.slice(0, 80)}"`)
     diag('owner_said', { text })
     const turnT0 = Date.now()
     const reply = await think(text)
     diag('turn_done', { ms: Date.now() - turnT0, reply: reply.slice(0, 800), superseded: seq !== inputSeq })
+    if (!reply.trim()) return
     if (seq !== inputSeq) {
       log(`wendy: reply superseded by newer input - staying quiet: "${reply.slice(0, 60)}"`)
       return
