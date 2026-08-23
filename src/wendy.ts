@@ -1,4 +1,4 @@
-// Wendy mode — a conversational voice concierge in a Discord voice channel.
+// Wendy mode - a conversational voice concierge in a Discord voice channel.
 //
 // The owner joins any VC; the sidecar follows, listens, and holds a natural
 // spoken conversation. It does no work itself: real tasks are delegated to the
@@ -96,27 +96,27 @@ function saveRoute(name: string, route: Route): void {
   fs.writeFileSync(routesPath(), JSON.stringify(r, null, 2))
 }
 
-const SYSTEM_PROMPT = `You are Wendy — the owner's personal assistant, speaking with them live over Discord voice.
+const SYSTEM_PROMPT = `You are Wendy - the owner's personal assistant, speaking with them live over Discord voice.
 
-WHO YOU ARE: assistant first. You hold fluid, natural conversation — warm, sharp, lightly witty, direct. The tools and the agent organisation exist to make you useful, not robotic: when you're just talking, talk; when you're asked to act, act RELIABLY.
+WHO YOU ARE: assistant first. You hold fluid, natural conversation - warm, sharp, lightly witty, direct. The tools and the agent organisation exist to make you useful, not robotic: when you're just talking, talk; when you're asked to act, act RELIABLY.
 
 SPEECH: one to three short sentences. No lists, markdown, code, or emoji. This is voice.
 
-MODE 1 — CONVERSATION (default): banter, opinions, follow-ups, anything already in this conversation → answer immediately, zero tools. Speed is fluency. Reach for tools only when the request genuinely needs fresh data or action.
+MODE 1 - CONVERSATION (default): banter, opinions, follow-ups, anything already in this conversation → answer immediately, zero tools. Speed is fluency. Reach for tools only when the request genuinely needs fresh data or action.
 
-MODE 2 — ACTION (when asked to do or fetch something): reliability is everything — in what you DO, not how you sound. Your voice stays exactly as conversational as Mode 1: report results like a person who just checked, not a system returning output. Vary your phrasing turn to turn; never fall into a fixed report format, never enumerate ("first… second…"), just tell them what you found the way you'd tell a friend. The owner's real knowledge and state live in long-running agent threads (codebases, nutrition, finances, research — everything). Never answer domain questions from general knowledge when a thread owns the topic.
-- FIND: KNOWN ROUTES first, then lookup_thread (instant index), then search_sessions. Threads overlap heavily: a curated route beats index matches; prefer ACTIVE NOW; [subagent offshoot] threads are never status targets; top candidates in different projects → peek at the best one before anything consequential; still unclear → ask ONE short question naming the top two. After ANY disambiguation, save_route with scope notes — never make the owner clarify twice. Coin nicknames for verbose titles (nickname_thread); whatever the owner calls a thread becomes its name.
-- READ vs ASK: if the answer already exists in a transcript (totals, latest status, what was said or decided) → read_session or fetch_reply it YOURSELF; reading is passive and free. ask_thread OCCUPIES the thread and interrupts its queued work — use it only when the agent must DO something or REASON about something new.
-- IDS: copy ses_ ids character-for-character from THIS turn's lookup or route — never from memory; similar ids mean wrong-thread disasters. Every read and send echoes back which thread it touched: VERIFY it matches the owner's intent. Wrong send → tell the owner immediately, send that thread "disregard — sent in error", resend correctly.
-- PARALLEL: fire multiple asks/dispatches in one turn — never serialize the owner's requests. ask_thread returns quick answers (about 10s) directly; longer work returns immediately and the result arrives later as a [BACKGROUND UPDATE] — when one lands, the conversation had a pause: mention it naturally, tied to what was asked, short. After dispatching long work the owner cares about, schedule_check as a safety net — the owner has ADHD and will NOT remember to ask; that is your job. "Remind me" → schedule_check. Keep tool prompts under 80 words.
-- FRESHNESS: a status update is the transcript you JUST read, never conversational memory — fresh reads override what you said minutes ago (lead with the correction: "actually, it's moved on…"). If the tail references decisions or bugs you don't understand, dig deeper — read_session with chars up to 30000, or the related threads it mentions — until you can say what is happening NOW and why, newest development first.
-- FOLLOW-THROUGH: never end a turn on a promise. Say → do → report in the SAME turn (use say to narrate while you work). If the owner repeats a request, never "I already told you" — re-verify and answer again, at most "quick recap:".
+MODE 2 - ACTION (when asked to do or fetch something): reliability is everything - in what you DO, not how you sound. Your voice stays exactly as conversational as Mode 1: report results like a person who just checked, not a system returning output. Vary your phrasing turn to turn; never fall into a fixed report format, never enumerate ("first… second…"), just tell them what you found the way you'd tell a friend. The owner's real knowledge and state live in long-running agent threads (codebases, nutrition, finances, research - everything). Never answer domain questions from general knowledge when a thread owns the topic.
+- FIND: KNOWN ROUTES first, then lookup_thread (instant index), then search_sessions. Threads overlap heavily: a curated route beats index matches; prefer ACTIVE NOW; [subagent offshoot] threads are never status targets; top candidates in different projects → peek at the best one before anything consequential; still unclear → ask ONE short question naming the top two. After ANY disambiguation, save_route with scope notes - never make the owner clarify twice. Coin nicknames for verbose titles (nickname_thread); whatever the owner calls a thread becomes its name.
+- READ vs ASK: if the answer already exists in a transcript (totals, latest status, what was said or decided) → read_session or fetch_reply it YOURSELF; reading is passive and free. ask_thread OCCUPIES the thread and interrupts its queued work - use it only when the agent must DO something or REASON about something new.
+- IDS: copy ses_ ids character-for-character from THIS turn's lookup or route - never from memory; similar ids mean wrong-thread disasters. Every read and send echoes back which thread it touched: VERIFY it matches the owner's intent. Wrong send → tell the owner immediately, send that thread "disregard - sent in error", resend correctly.
+- PARALLEL: fire multiple asks/dispatches in one turn - never serialize the owner's requests. ask_thread returns quick answers (about 10s) directly; longer work returns immediately and the result arrives later as a [BACKGROUND UPDATE] - when one lands, the conversation had a pause: mention it naturally, tied to what was asked, short. After dispatching long work the owner cares about, schedule_check as a safety net - the owner has ADHD and will NOT remember to ask; that is your job. "Remind me" → schedule_check. Keep tool prompts under 80 words.
+- FRESHNESS: a status update is the transcript you JUST read, never conversational memory - fresh reads override what you said minutes ago (lead with the correction: "actually, it's moved on…"). If the tail references decisions or bugs you don't understand, dig deeper - read_session with chars up to 30000, or the related threads it mentions - until you can say what is happening NOW and why, newest development first.
+- FOLLOW-THROUGH: never end a turn on a promise. Say → do → report in the SAME turn (use say to narrate while you work). If the owner repeats a request, never "I already told you" - re-verify and answer again, at most "quick recap:".
 
-SILENCE MODE: only on the owner's explicit request — go_silent for the stated duration (default 30 min). Never self-activate it, never suggest it, never ask about it. A bare "Wendy" wakes you.
+SILENCE MODE: only on the owner's explicit request - go_silent for the stated duration (default 30 min). Never self-activate it, never suggest it, never ask about it. A bare "Wendy" wakes you.
 
 NOTIFICATIONS: dispatched work is watched (start and finish announced). Thread and commit activity across all projects arrives as batched digests. Per-route priority via set_notify_tier: interrupt, digest, or onjoin.
 
-YOUR OWN HANDS: bash (cwd = your private workspace; curl and python3 available), write_note/read_note scratchpads, memory.md for standing facts and owner preferences — read it when they reference the past. Concierge work only: anything owned by a project or thread gets routed there even if you could do it yourself. Tool output may be long; your spoken reply stays one to three sentences. Ambiguity → one short question. Failed tool → say so plainly. Never invent results.`
+YOUR OWN HANDS: bash (cwd = your private workspace; curl and python3 available), write_note/read_note scratchpads, memory.md for standing facts and owner preferences - read it when they reference the past. Concierge work only: anything owned by a project or thread gets routed there even if you could do it yourself. Tool output may be long; your spoken reply stays one to three sentences. Ambiguity → one short question. Failed tool → say so plainly. Never invent results.`
 
 // ── tools exposed to the brain ───────────────────────────────────
 const TOOLS = [
@@ -233,7 +233,7 @@ const TOOLS = [
     type: 'function',
     function: {
       name: 'read_session',
-      description: 'Read the tail of an agent session\'s conversation — use to report results or catch up on what happened.',
+      description: 'Read the tail of an agent session\'s conversation - use to report results or catch up on what happened.',
       parameters: {
         type: 'object',
         properties: {
@@ -247,7 +247,7 @@ const TOOLS = [
     function: {
       name: 'bash',
       description:
-        'Run a shell command on the host (your own workspace is the cwd; curl, python3, standard tools available). For quick lookups, calculations, file ops, checking things. Output is truncated for speech — summarise aloud.',
+        'Run a shell command on the host (your own workspace is the cwd; curl, python3, standard tools available). For quick lookups, calculations, file ops, checking things. Output is truncated for speech - summarise aloud.',
       parameters: {
         type: 'object',
         properties: {
@@ -309,10 +309,10 @@ const TOOLS = [
     type: 'function',
     function: {
       name: 'fetch_reply',
-      description: 'Get the LATEST reply (last assistant message) from a thread, near-verbatim. THE tool for "what did it reply / what did it say / fetch the response". Copy the ses_ id exactly from a lookup result in this same turn — never from memory.',
+      description: 'Get the LATEST reply (last assistant message) from a thread, near-verbatim. THE tool for "what did it reply / what did it say / fetch the response". Copy the ses_ id exactly from a lookup result in this same turn - never from memory.',
       parameters: {
         type: 'object',
-        properties: { session_id: { type: 'string', description: 'ses_… — copy exactly from lookup_thread output' } },
+        properties: { session_id: { type: 'string', description: 'ses_… - copy exactly from lookup_thread output' } },
         required: ['session_id'],
       },
     },
@@ -337,7 +337,7 @@ const TOOLS = [
     type: 'function',
     function: {
       name: 'index_stats',
-      description: 'Exact stats of your thread index: total threads, projects, last refresh. ALWAYS use this when asked how many threads/projects you know — never estimate from lookup results.',
+      description: 'Exact stats of your thread index: total threads, projects, last refresh. ALWAYS use this when asked how many threads/projects you know - never estimate from lookup results.',
       parameters: { type: 'object', properties: {} },
     },
   },
@@ -345,7 +345,7 @@ const TOOLS = [
     type: 'function',
     function: {
       name: 'say',
-      description: 'Speak a short sentence to the owner RIGHT NOW while you keep working ("one sec, checking that thread"). Use this whenever a task needs multiple steps so the owner is never left in silence. After say, CONTINUE with your tools — your final answer comes at the end.',
+      description: 'Speak a short sentence to the owner RIGHT NOW while you keep working ("one sec, checking that thread"). Use this whenever a task needs multiple steps so the owner is never left in silence. After say, CONTINUE with your tools - your final answer comes at the end.',
       parameters: {
         type: 'object',
         properties: { text: { type: 'string', description: '1-2 short spoken sentences' } },
@@ -357,7 +357,7 @@ const TOOLS = [
     type: 'function',
     function: {
       name: 'nickname_thread',
-      description: 'Give a thread a short spoken nickname (your own memory — does not rename the real thread). Use at your discretion whenever a title is long or awkward to say; use the nickname consistently afterwards. Owner can assign or change nicknames too.',
+      description: 'Give a thread a short spoken nickname (your own memory - does not rename the real thread). Use at your discretion whenever a title is long or awkward to say; use the nickname consistently afterwards. Owner can assign or change nicknames too.',
       parameters: {
         type: 'object',
         properties: {
@@ -401,7 +401,7 @@ const TOOLS = [
 
 function runKimaki(args: string[], timeoutMs = 30000, maxChars = 6000, fromEnd = false): Promise<string> {
   // kimaki CLI truncates piped stdout at ~64KB (exits before the pipe drains),
-  // so route output through a temp file — file sinks flush completely.
+  // so route output through a temp file - file sinks flush completely.
   return new Promise((resolve) => {
     const tmp = path.join(os.tmpdir(), `wendy-${process.pid}-${Date.now()}-${Math.random().toString(36).slice(2)}.out`)
     const child = spawn('bash', ['-c', `exec kimaki "$@" > '${tmp}' 2> '${tmp}.err'`, 'kimaki', ...args], { stdio: 'ignore' })
@@ -482,13 +482,13 @@ async function executeToolInner(name: string, args: Record<string, unknown>): Pr
             ms < 86400000 ? `, active ${Math.round(ms / 3600000)}h ago` :
             `, active ${Math.round(ms / 86400000)}d ago`
           const sub = /@\w+ subagent/i.test(h.title) ? ' [subagent offshoot]' : ''
-          return `${nicknames[h.id] ? `[${nicknames[h.id]}] ` : ''}${h.title} — session ${h.id} (project: ${h.dir.split('/').pop()}${age})${sub}`
+          return `${nicknames[h.id] ? `[${nicknames[h.id]}] ` : ''}${h.title} - session ${h.id} (project: ${h.dir.split('/').pop()}${age})${sub}`
         }).join('\n')
-      : 'no matches in index — try search_sessions for a deep search'
+      : 'no matches in index - try search_sessions for a deep search'
   }
   if (name === 'watch_thread') {
     watchSession(String(args.session_id ?? ''), String(args.label ?? 'thread'))
-    return 'watching — I will announce updates'
+    return 'watching - I will announce updates'
   }
   if (name === 'search_sessions') {
     return runKimaki(['session', 'search', String(args.query ?? '')], 45000)
@@ -503,9 +503,9 @@ async function executeToolInner(name: string, args: Record<string, unknown>): Pr
     ], 12000, 500_000, true)
     if (Date.now() - t0 >= 11000) {
       watchSession(askId, String(args.prompt ?? '').slice(0, 40))
-      return 'still working — result will arrive as a [BACKGROUND UPDATE] when ready. Tell the owner it is underway; you are free to keep talking or fire off more tasks in parallel.'
+      return 'still working - result will arrive as a [BACKGROUND UPDATE] when ready. Tell the owner it is underway; you are free to keep talking or fire off more tasks in parallel.'
     }
-    return `[reply from "${threadIdent(askId)}" — VERIFY this is the thread you meant]\n` + (out.slice(-4000) || 'no reply captured')
+    return `[reply from "${threadIdent(askId)}" - VERIFY this is the thread you meant]\n` + (out.slice(-4000) || 'no reply captured')
   }
   if (name === 'send_to_session') {
     const out = await runKimaki([
@@ -513,13 +513,13 @@ async function executeToolInner(name: string, args: Record<string, unknown>): Pr
       '--prompt', String(args.prompt ?? ''),
     ], 60000)
     watchSession(String(args.session_id), String(args.prompt ?? '').slice(0, 40))
-    return `[sent to "${threadIdent(String(args.session_id ?? ''))}" — VERIFY this is the thread you meant] ` + (out.slice(-300) || 'dispatched')
+    return `[sent to "${threadIdent(String(args.session_id ?? ''))}" - VERIFY this is the thread you meant] ` + (out.slice(-300) || 'dispatched')
   }
   if (name === 'read_session') {
     const deep = Number(args.chars) || 0
     const out = await runKimaki(['session', 'read', String(args.session_id ?? '')], 60000, 500_000, true)
     if (out.startsWith('ERROR')) return out
-    const hdr = `[LIVE TRANSCRIPT of "${threadIdent(String(args.session_id ?? ''))}" — fetched seconds ago, OVERRIDES anything said earlier. VERIFY this is the thread the owner meant before reporting.]\n`
+    const hdr = `[LIVE TRANSCRIPT of "${threadIdent(String(args.session_id ?? ''))}" - fetched seconds ago, OVERRIDES anything said earlier. VERIFY this is the thread the owner meant before reporting.]\n`
     if (deep) return hdr + (out.replace(/\S{400,}/g, '[attachment]').slice(-Math.min(Math.max(deep, 500), 30000)) || 'empty session')
     return hdr + (recentMessages(out, 4) || 'empty session')
   }
@@ -576,12 +576,12 @@ async function executeToolInner(name: string, args: Record<string, unknown>): Pr
       : `no assistant reply found in "${threadIdent(fid)}"`
   }
   if (name === 'schedule_check') {
-    if (schedules.length >= 20) return 'ERROR: too many pending schedules (20 max) — check schedules.json via bash'
+    if (schedules.length >= 20) return 'ERROR: too many pending schedules (20 max) - check schedules.json via bash'
     const mins = Math.min(Math.max(Number(args.minutes) || 30, 1), 1440)
     const sid = String(args.session_id ?? '').trim()
     schedules.push({ at: Date.now() + mins * 60_000, kind: sid ? 'check' : 'remind', ...(sid ? { sessionId: sid } : {}), note: String(args.note ?? '').slice(0, 200) })
     saveSchedules()
-    return `scheduled — will ${sid ? 'check that thread' : 'remind the owner'} in ${mins} minutes`
+    return `scheduled - will ${sid ? 'check that thread' : 'remind the owner'} in ${mins} minutes`
   }
   if (name === 'index_stats') {
     const age = lastIndexRefresh ? Math.round((Date.now() - lastIndexRefresh) / 60000) : -1
@@ -589,21 +589,21 @@ async function executeToolInner(name: string, args: Record<string, unknown>): Pr
   }
   if (name === 'say') {
     await speak(String(args.text ?? ''))
-    return 'spoken — now continue the actual work and report the result'
+    return 'spoken - now continue the actual work and report the result'
   }
   if (name === 'nickname_thread') {
     const id = String(args.session_id ?? ''); const nick = String(args.nickname ?? '').trim()
     if (!id || !nick) return 'ERROR: need session_id and nickname'
     nicknames[id] = nick
     try { fs.writeFileSync(nicknamesPath(), JSON.stringify(nicknames, null, 2)) } catch {}
-    return `noted — will call it "${nick}" from now on`
+    return `noted - will call it "${nick}" from now on`
   }
   if (name === 'go_silent') {
     const mins = Math.min(Math.max(Number(args.minutes) || 30, 1), 480)
     silencedUntil = Date.now() + mins * 60_000
     silenceGrace = Date.now() + 20_000
     log(`wendy: silenced for ${mins} min at owner's request`)
-    return `silenced for ${mins} minutes — confirm briefly, then go quiet`
+    return `silenced for ${mins} minutes - confirm briefly, then go quiet`
   }
   if (name === 'set_notify_tier') {
     const routes = loadRoutes()
@@ -685,7 +685,7 @@ export async function think(userText: string): Promise<string> {
   for (let hop = 0; hop < MAX_HOPS; hop++) {
     const hopT0 = Date.now()
     const lastLap = hop === MAX_HOPS - 1
-    if (lastLap) messages.push({ role: 'user', content: '(system: tool budget exhausted — no more tool calls available. Give the owner your best answer RIGHT NOW from what you already found. If something is still unfinished, say exactly what and offer to follow up.)' })
+    if (lastLap) messages.push({ role: 'user', content: '(system: tool budget exhausted - no more tool calls available. Give the owner your best answer RIGHT NOW from what you already found. If something is still unfinished, say exactly what and offer to follow up.)' })
     // One retry after a short pause: idle keep-alive sockets to llama.cpp get
     // closed server-side and the first reuse fails instantly with a reset.
     let res: Response | Error = new Error('unreachable')
@@ -705,11 +705,11 @@ export async function think(userText: string): Promise<string> {
         lastBrainWake = Date.now()
         const wake = loadConfig().brainWakeCommand
         if (!wake) return 'My reasoning engine is unreachable and I have no wake command configured.'
-        log('wendy: brain unreachable — running configured wake command')
+        log('wendy: brain unreachable - running configured wake command')
         execFile('bash', ['-c', wake], { timeout: 60000, killSignal: 'SIGKILL' }, () => {})
-        return 'My reasoning engine was asleep — waking it now. Give me about thirty seconds and ask again.'
+        return 'My reasoning engine was asleep - waking it now. Give me about thirty seconds and ask again.'
       }
-      return 'I hit an error reaching my reasoning engine — mind repeating that?'
+      return 'I hit an error reaching my reasoning engine - mind repeating that?'
     }
 
     const d = (await res.json().catch(() => null)) as {
@@ -733,7 +733,7 @@ export async function think(userText: string): Promise<string> {
         const required: string[] = (spec?.function.parameters as { required?: string[] })?.required ?? []
         const missing = required.filter((k) => !args[k] || String(args[k]).trim() === '')
         if (!missing.length && (tc.function.name === 'ask_thread' || tc.function.name === 'dispatch_task')) {
-          void speak('One moment — passing that along.')
+          void speak('One moment - passing that along.')
         }
         const result = missing.length
           ? `ERROR: missing required argument(s): ${missing.join(', ')}. Call ${tc.function.name} again with ALL required fields filled in.`
@@ -747,7 +747,7 @@ export async function think(userText: string): Promise<string> {
     const PROMISE = /\b(let me|i'?ll (check|go|look|dig|find|pull|grab|get)|one (sec|second|moment)|hold on|checking now|give me a (sec|second|moment|minute)|right back|be right back)\b/i
     if (!nudged && hop < MAX_HOPS - 2 && PROMISE.test(text)) {
       nudged = true
-      log('wendy: promise detected in final reply — forcing follow-through')
+      log('wendy: promise detected in final reply - forcing follow-through')
       void speak(text)
       messages.push({ role: 'assistant', content: text })
       messages.push({ role: 'user', content: '(system: you just promised to check something but your turn was about to END with no action taken. Do it NOW with your tools, then report what you actually found. Never end a turn on a promise.)' })
@@ -757,7 +757,7 @@ export async function think(userText: string): Promise<string> {
     persistHistory()
     return text
   }
-  return "I ran out of room mid-task — ask me again and I'll pick it up from where I got to."
+  return "I ran out of room mid-task - ask me again and I'll pick it up from where I got to."
 }
 
 // ── voice channel session ────────────────────────────────────────
@@ -805,7 +805,7 @@ async function refreshThreadIndexInner(): Promise<void> {
   log('wendy: thread index refresh starting')
   const projRaw = await runKimaki(['project', 'list', '--json'], 45000, 2_000_000)
   const projects = extractJsonArray(projRaw) as Array<{ directory?: string }>
-  log(`wendy: index walk — ${projects.length} projects (raw ${projRaw.length}b${projRaw.startsWith('ERROR') ? ', ' + projRaw.slice(0, 80) : ''})`)
+  log(`wendy: index walk - ${projects.length} projects (raw ${projRaw.length}b${projRaw.startsWith('ERROR') ? ', ' + projRaw.slice(0, 80) : ''})`)
   const next: ThreadIndexEntry[] = []
   for (const p of projects) {
     if (!p.directory) continue
@@ -817,7 +817,7 @@ async function refreshThreadIndexInner(): Promise<void> {
       next.push({ id: sess.id, title: sess.title, dir: p.directory, updated: upd })
     }
   }
-  log(`wendy: index walk done — ${next.length} sessions`)
+  log(`wendy: index walk done - ${next.length} sessions`)
   lastIndexRefresh = Date.now(); indexProjectCount = projects.length
   if (next.length && threadIndex.length) {
     const prev = new Map(threadIndex.map((e) => [e.id, e.updated ?? 0]))
@@ -837,13 +837,13 @@ async function refreshThreadIndexInner(): Promise<void> {
     }
     if (changed.length > 5) announce(`Plus ${changed.length - 5} more threads had activity.`, 'digest')
     for (const e of fresh.slice(0, 3)) announce(`New thread in ${path.basename(e.dir)}: ${e.title}.`, 'digest')
-    if (changed.length || fresh.length) log(`wendy: change feed — ${changed.length} changed, ${fresh.length} new`)
+    if (changed.length || fresh.length) log(`wendy: change feed - ${changed.length} changed, ${fresh.length} new`)
   }
   await probeGitHeads(projects.map((p) => p.directory).filter((d): d is string => !!d))
   if (next.length) {
     threadIndex = next
     try { fs.writeFileSync(path.join(workspaceDir(), 'thread-index.json'), JSON.stringify(next)) } catch {}
-    log(`wendy: thread index refreshed — ${next.length} sessions across ${projects.length} projects`)
+    log(`wendy: thread index refreshed - ${next.length} sessions across ${projects.length} projects`)
   }
 }
 const gitHeadsPath = path.join(workspaceDir(), 'git-heads.json')
@@ -891,7 +891,7 @@ setInterval(() => {
   saveSchedules()
   void (async () => {
     for (const d of due) {
-      log(`wendy: scheduled ${d.kind} due — ${d.note}`)
+      log(`wendy: scheduled ${d.kind} due - ${d.note}`)
       diag('schedule_fire', { kind: d.kind, note: d.note })
       if (d.kind === 'check' && d.sessionId) {
         const out = await runKimaki(['session', 'read', d.sessionId], 60000, 500_000, true)
@@ -908,7 +908,7 @@ setInterval(() => {
   })()
 }, 30000).unref()
 
-// ── FEATURE A: watchlist — passive notifications on thread replies ──
+// ── FEATURE A: watchlist - passive notifications on thread replies ──
 type Watch = { id: string; label: string; fp: string; baselined: boolean; expires: number; seen?: boolean; idle?: number; more?: boolean }
 const watchlist: Watch[] = []
 const pendingAnnouncements: string[] = []
@@ -967,7 +967,7 @@ function watchSession(id: string, label: string): void {
   const w: Watch = { id, label, fp: '', baselined: false, expires: Date.now() + 45 * 60 * 1000 }
   watchlist.push(w)
   log(`wendy: watching ${label} (${id})`)
-  // Baseline NOW — replies landing after this instant are deltas. Baselining on
+  // Baseline NOW - replies landing after this instant are deltas. Baselining on
   // the first poll (~45s later) silently swallowed fast replies.
   void runKimaki(['session', 'read', id], 45000, 500_000, true).then((tail) => {
     if (!tail.startsWith('ERROR')) w.fp = fingerprint(tail)
@@ -1004,13 +1004,13 @@ async function summarizeForVoice(label: string, content: string): Promise<string
     method: 'POST',
     headers: { 'content-type': 'application/json', connection: 'close' },
     body: JSON.stringify({ model: 'local-fast', max_tokens: 200, messages: [
-      { role: 'system', content: 'You summarize agent-thread activity for spoken delivery. The messages are ordered oldest to newest — the LAST message is the current state and your focus. In 1-2 short sentences state concretely what is happening NOW or just finished — results, decisions, numbers, errors. Earlier messages are only context. Start with "' + label + ':". Plain speech, no formatting.' },
+      { role: 'system', content: 'You summarize agent-thread activity for spoken delivery. The messages are ordered oldest to newest - the LAST message is the current state and your focus. In 1-2 short sentences state concretely what is happening NOW or just finished - results, decisions, numbers, errors. Earlier messages are only context. Start with "' + label + ':". Plain speech, no formatting.' },
       { role: 'user', content } ] }),
     signal: AbortSignal.timeout(60000),
   }).catch(() => null)
-  if (!res?.ok) return `Update from ${label} — new activity in that thread.`
+  if (!res?.ok) return `Update from ${label} - new activity in that thread.`
   const d = await res.json().catch(() => null) as { choices?: Array<{ message?: { content?: string } }> } | null
-  return d?.choices?.[0]?.message?.content?.trim() || `Update from ${label} — new activity.`
+  return d?.choices?.[0]?.message?.content?.trim() || `Update from ${label} - new activity.`
 }
 let connection: VoiceConnection | null = null
 let player: AudioPlayer | null = null
@@ -1060,9 +1060,9 @@ setInterval(() => {
   if (!convoEvents.length || !connection || busy || capturing || isSilenced() || playerActive()) return
   if (Date.now() - lastConvoActivity < 10000) return
   const events = convoEvents.splice(0, 4)
-  log(`wendy: conversation idle — delivering ${events.length} background event(s)`)
+  log(`wendy: conversation idle - delivering ${events.length} background event(s)`)
   diag('bg_delivery', { count: events.length })
-  void runTurn(`[BACKGROUND UPDATE — this is NOT the owner speaking. Results from parallel work just arrived:]\n${events.join('\n')}\n[Tell the owner briefly and naturally, like a colleague mentioning news at a pause. Prioritize if several. Anything you ALREADY told the owner this conversation: skip it entirely or compress to one clause of what is genuinely new — never restate an update in different words.]`)
+  void runTurn(`[BACKGROUND UPDATE - this is NOT the owner speaking. Results from parallel work just arrived:]\n${events.join('\n')}\n[Tell the owner briefly and naturally, like a colleague mentioning news at a pause. Prioritize if several. Anything you ALREADY told the owner this conversation: skip it entirely or compress to one clause of what is genuinely new - never restate an update in different words.]`)
 }, 5000).unref()
 function playerActive(): boolean {
   const st = player?.state.status
@@ -1072,13 +1072,13 @@ function playerActive(): boolean {
 async function runTurn(text: string): Promise<void> {
   const seq = ++inputSeq
   if (busy) {
-    pendingUtterance = pendingUtterance ? `${pendingUtterance} — ${text}`.slice(-1500) : text
-    log(`wendy: busy — queued "${text.slice(0, 50)}"`)
+    pendingUtterance = pendingUtterance ? `${pendingUtterance} - ${text}`.slice(-1500) : text
+    log(`wendy: busy - queued "${text.slice(0, 50)}"`)
     diag('queued_while_busy', { text })
     if (!busyAckGiven && !isSilenced() && Date.now() - turnStartedAt > 10000 && Date.now() - lastBusyAck > 90000) {
       busyAckGiven = true
       lastBusyAck = Date.now()
-      void speak("One sec — I heard you, just finishing something.")
+      void speak("One sec - I heard you, just finishing something.")
     }
     return
   }
@@ -1087,7 +1087,7 @@ async function runTurn(text: string): Promise<void> {
   turnStartedAt = Date.now()
   lastConvoActivity = Date.now()
   const watchdog = setTimeout(() => {
-    log('wendy WATCHDOG: utterance pipeline exceeded 4min — force-releasing')
+    log('wendy WATCHDOG: utterance pipeline exceeded 4min - force-releasing')
     busy = false
   }, 240000)
   try {
@@ -1098,7 +1098,7 @@ async function runTurn(text: string): Promise<void> {
         log('wendy: unmuted by owner voice command')
         const held = pendingAnnouncements.splice(0)
         await speak(held.length ? `I'm back. While I was silent: ${held.join(' ')}` : `I'm back.`)
-      } else log(`wendy: silenced — dropped "${text.slice(0, 60)}"`)
+      } else log(`wendy: silenced - dropped "${text.slice(0, 60)}"`)
       return
     }
     log(`wendy heard: "${text.slice(0, 80)}"`)
@@ -1107,7 +1107,7 @@ async function runTurn(text: string): Promise<void> {
     const reply = await think(text)
     diag('turn_done', { ms: Date.now() - turnT0, reply: reply.slice(0, 800), superseded: seq !== inputSeq })
     if (seq !== inputSeq) {
-      log(`wendy: reply superseded by newer input — staying quiet: "${reply.slice(0, 60)}"`)
+      log(`wendy: reply superseded by newer input - staying quiet: "${reply.slice(0, 60)}"`)
       return
     }
     log(`wendy says: "${reply.slice(0, 80)}"`)
@@ -1145,7 +1145,7 @@ function listenTo(channel: VoiceBasedChannel, userId: string): void {
       if (!interrupted && bytes > 67200 && playerActive()) {
         interrupted = true
         interruptSpeech()
-        log('wendy: barge-in — owner spoke over me, playback cut')
+        log('wendy: barge-in - owner spoke over me, playback cut')
         diag('barge_in', {})
       }
     })
@@ -1170,7 +1170,7 @@ function listenTo(channel: VoiceBasedChannel, userId: string): void {
           const overlapping = playerActive()
           const longIdle = Date.now() - lastSpeechEnd > 30000
           if (!sheAsked && (overlapping || longIdle)) {
-            log(`wendy: backchannel — not a turn: "${text.trim()}"`)
+            log(`wendy: backchannel - not a turn: "${text.trim()}"`)
             diag('dropped', { text: text.trim(), why: 'backchannel' })
             return
           }
@@ -1207,7 +1207,7 @@ async function joinAndServe(channel: VoiceBasedChannel, userId: string): Promise
         entersState(conn, VoiceConnectionStatus.Connecting, 5000),
       ]).catch(() => null)
       if (!resumed) {
-        log('wendy: voice dropped — rejoining')
+        log('wendy: voice dropped - rejoining')
         void joinAndServe(channel, userId)
       }
     })()
@@ -1239,5 +1239,5 @@ export function initWendy(client: Client): void {
       leave()
     }
   })
-  log(`wendy: armed — will follow owner ${owner} into voice channels`)
+  log(`wendy: armed - will follow owner ${owner} into voice channels`)
 }

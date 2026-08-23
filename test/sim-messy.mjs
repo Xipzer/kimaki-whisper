@@ -26,7 +26,7 @@ const PROMISE = /\b(let me|i'?ll (check|go|look|dig|find|pull|grab|get)|one (sec
 const scenarios = [
   {
     name: 'S1 messy self-correcting request + background chatter',
-    utter: "hey wendy can you check the uh— no wait. hahaha stop it dude, I'm asking wendy something. ok yeah wendy, the launcher thread, what's the latest in there? someone's mowing outside sorry about the noise",
+    utter: "hey wendy can you check the uh- no wait. hahaha stop it dude, I'm asking wendy something. ok yeah wendy, the launcher thread, what's the latest in there? someone's mowing outside sorry about the noise",
     expect: 'tool use + substantive answer about launcher',
   },
   {
@@ -36,13 +36,13 @@ const scenarios = [
   },
   {
     name: 'S3 rapid topic-switch double request',
-    utter: "wendy what routes do you know — actually no, first: how many threads are in your index right now, THEN tell me the routes",
+    utter: "wendy what routes do you know - actually no, first: how many threads are in your index right now, THEN tell me the routes",
     expect: 'both answered in one turn',
   },
   {
     name: 'S4 promise-bait (vague, tempts a "let me check" stall)',
     utter: "wendy did anything happen in basestonk recently? like any activity at all",
-    expect: 'must NOT end on a bare promise — detector or tools fire',
+    expect: 'must NOT end on a bare promise - detector or tools fire',
   },
 ]
 
@@ -60,7 +60,7 @@ for (const s of scenarios) {
   console.log(`   WENDY (${secs}s): ${reply.slice(0, 300)}`)
   const bare = PROMISE.test(reply) && reply.length < 80
   const ok = !reply.startsWith('THREW') && reply.length > 5 && !bare
-  console.log(`   ${ok ? '✅' : '❌'} ${s.expect}${bare ? ' — ENDED ON BARE PROMISE' : ''}`)
+  console.log(`   ${ok ? '✅' : '❌'} ${s.expect}${bare ? ' - ENDED ON BARE PROMISE' : ''}`)
   ok ? pass++ : fail++
 }
 console.log(`\n══ RESULT: ${pass}/${scenarios.length} passed, ${fail} failed`)

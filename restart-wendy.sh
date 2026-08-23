@@ -39,10 +39,10 @@ export PATH="$HOME/.local/bin:$HOME/.kimaki/bin:$PATH"
     wait "$CHILD"
     CODE=$?
     if [ "$CODE" -eq 2 ]; then
-      echo "[supervisor] duplicate-instance guard (exit 2) — standing down" >> "$LOG"
+      echo "[supervisor] duplicate-instance guard (exit 2) - standing down" >> "$LOG"
       break
     fi
-    echo "[supervisor] sidecar exited ($CODE) — respawning in 3s" >> "$LOG"
+    echo "[supervisor] sidecar exited ($CODE) - respawning in 3s" >> "$LOG"
     sleep 3
   done
 ) &

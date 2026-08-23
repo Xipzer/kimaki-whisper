@@ -13,7 +13,7 @@ async function readTokenFromKimakiDb(): Promise<string | null> {
   const dbPath = path.join(os.homedir(), '.kimaki', 'discord-sessions.db')
   if (!fs.existsSync(dbPath)) return null
   try {
-    // Dynamic import: node:sqlite is experimental — tolerate absence.
+    // Dynamic import: node:sqlite is experimental - tolerate absence.
     const sqlite = (await import('node:sqlite')) as unknown as {
       DatabaseSync: new (path: string, opts?: { readOnly?: boolean }) => {
         prepare(sql: string): { get(): Record<string, unknown> | undefined }

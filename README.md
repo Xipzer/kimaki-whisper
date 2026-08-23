@@ -1,86 +1,84 @@
-# kimaki-whisper
+# Wendy
 
-Local, free, private **voice-note transcription for [Kimaki](https://github.com/remorses/kimaki)** — as a **sidecar**: a small companion process that needs **zero changes to Kimaki itself**.
-
-```
-npx kimaki-whisper           # run the sidecar
-/whisper-setup model: Auto   # in Discord — downloads + configures a local model
-```
-
-Audio never leaves your machine. No API keys, no Python, no GPU required (GPU optional).
-
-## How it works (no Kimaki changes)
+Local, $0, voice-first personal assistant living in Discord voice channels - assistant first,
+reliable operator second. She follows the owner into any VC, converses fluidly, and drives a
+47-project / 1,200-thread Kimaki agent organisation by voice.
 
 ```
-                 ┌── Discord (same bot token) ──┐
-      gateway #1 │                              │ gateway #2
-   ┌─────────────┤                              ├──────────────┐
-   ▼             └──────────────────────────────┘              ▼
- KIMAKI (stock)                                     KIMAKI-WHISPER SIDECAR
- ├─ ignores unknown slash commands                  ├─ registers /whisper-* itself
- ├─ voice notes → OPENAI_BASE_URL                   ├─ OpenAI-compatible endpoint on
- │   (built-in behavior)                            │   127.0.0.1:7071 (ONNX whisper
- └─ `kimaki send` CLI                               │   in-process, or GPU backend proxy)
-                                                    └─ reply "retranscribe" to any voice
-                                                        note → re-transcribes + injects
-                                                        via `kimaki send`
+you (Discord VC) ── opus ──> prism decode ──> speaches STT (faster-whisper large-v3, 4070S)
+                                                    │ text
+                                             think() loop ── llama.cpp brain
+                                                    │        (Qwen3.8-27B+MTP, 5090, 196K ctx)
+                              15 tools ─────────────┤
+                              (kimaki CLI, bash,    │ reply
+                               notes, schedules)    ▼
+                    your threads <──> Kokoro TTS (af_heart) ──> VC playback
 ```
 
-- **Slash commands**: registered additively (per-command POST) on the same bot; Kimaki silently ignores commands it doesn't know, the sidecar answers them.
-- **Transcription**: Kimaki already routes voice-note transcription to any OpenAI-compatible endpoint via `OPENAI_BASE_URL`. The sidecar *is* that endpoint.
-- **Missed voice notes**: reply `retranscribe` to any voice note — the sidecar re-fetches the audio and injects the transcription into the session through Kimaki's public `kimaki send` CLI.
+## Stack
 
-## Setup
-
-1. **Run the sidecar** (it finds your bot token from Kimaki's config automatically, or paste it once):
-
-   ```bash
-   npx kimaki-whisper
-   # if token auto-detection fails:
-   npx kimaki-whisper setup --token <your bot token>
-   ```
-
-2. **Pick a model** — in Discord: `/whisper-setup model: Auto` (recommends by your machine's RAM/CPU), or in the terminal: `kimaki-whisper setup --model auto`.
-
-   | Tier | Model | Download |
-   |---|---|---|
-   | Fast | whisper-tiny | ~110 MB |
-   | Balanced | whisper-base | ~200 MB |
-   | Accurate | whisper-small | ~600 MB |
-   | Best | large-v3-turbo | ~1 GB |
-
-   The ONNX inference runtime installs on demand into `~/.kimaki-whisper/` (not bundled — keeps `npx` fast).
-
-3. **Wire Kimaki (one line, once)** — add to your shell profile and restart Kimaki:
-
-   ```bash
-   export OPENAI_API_KEY=local OPENAI_BASE_URL=http://127.0.0.1:7071/v1
-   ```
-
-   > This is the only manual step, because a sidecar can't set another process's environment. Everything else is automatic.
-
-## GPU / advanced
-
-Have a GPU backend (e.g. [speaches](https://github.com/speaches-ai/speaches) running faster-whisper large-v3)? Proxy to it instead of the built-in model:
-
-```
-/whisper-setup backend-url: http://localhost:8000/v1
-```
-
-## Commands
-
-| Discord | Terminal | |
+| Piece | What | Where |
 |---|---|---|
-| `/whisper-setup` | `kimaki-whisper setup` | pick model / backend |
-| `/whisper-start` | — | start the endpoint |
-| `/whisper-stop` | — | stop it (free RAM) |
-| `/whisper-status` | `kimaki-whisper status` | health/config |
+| Sidecar | this repo - Discord gateway, VC capture/playback, `/whisper-*`, :7071 | `src/` |
+| Wendy core | prompt, tools, turn loop, watchers, feeds, schedules, diagnostics | `src/wendy.ts` |
+| STT | speaches, faster-whisper large-v3 | `http://localhost:8000` |
+| Brain | llama.cpp `local-fast` (Profile A) | `http://192.168.1.140:8080` (wake: `~/bin/llm-remote start A` via `ssh projector`) |
+| TTS | Kokoro-82M ONNX, voice `af_heart` (hot-swappable via config) | speaches |
+| Agent org | published Kimaki CLI - projects/threads she reads, asks, dispatches | `kimaki` on PATH |
 
-Reply **`retranscribe`** to any voice note to recover a missed transcription.
+## Architecture highlights
 
-## Notes
+- **Two modes, one voice** - conversation (zero tools, instant) vs action (reliability doctrine:
+  read-vs-ask, id discipline character-for-character, identity echo on every read/send,
+  freshness overrides memory, never end a turn on a promise). Same conversational delivery in both.
+- **Serial voice, parallel work** - dispatches return in seconds; results arrive as
+  `[BACKGROUND UPDATE]` events delivered only at conversation pauses (>10s idle, nobody
+  talking) via synthetic turns through her own brain, into shared history.
+- **Barge-in** - 0.7s of sustained speech cuts her playback; queued speech discarded by epoch;
+  superseded replies stay silent; backchannels ("yeah/ok") absorbed unless answering her question.
+- **Watchers** - dispatched threads auto-watched: content-fingerprint deltas (baselined at
+  registration), start + finish announcements, dedup memory shared with the change feed so
+  nothing is announced twice in different words.
+- **Global awareness** - 10-min index walk of every project/thread (updated-diff change feed),
+  git HEAD probe per repo, all delivered by notification tier (interrupt/digest/onjoin, per-route).
+- **Silence mode** - owner-only (`go_silent`), hard mute on both mouth and brain; a bare
+  "Wendy" wakes her (0.25s capture gate + mishear-tolerant name regex while muted).
+- **Scheduled checks** - persistent timers (`schedule_check`): re-read a thread at T+N minutes
+  or plain reminders; she self-schedules safety nets after long dispatches.
+- **Reads that actually work** - kimaki CLI truncates piped stdout (~64KB), so all CLI output
+  routes through temp-file sinks with seek-tail reads (293MB sessions fine); transcripts parsed
+  into messages, tool noise + inline-screenshot base64 stripped, last 3-4 messages aggregated.
 
-- If your Kimaki build already implements `/whisper-*` natively (e.g. the PR branch), both would answer — set `commandPrefix` in `~/.kimaki-whisper/config.json` (e.g. `"kw"`) to use `/kw-*` instead.
-- Kimaki re-registers its command set on restart, which removes the sidecar's commands until the sidecar's periodic re-registration (6h) or restart. Restart the sidecar after upgrading Kimaki for instant re-registration.
+## Runtime & ops
 
-MIT
+```bash
+./restart-jarvis.sh            # historical name; current: restart-wendy.sh
+./restart-wendy.sh             # atomic supervised restart (exit 2 = duplicate stands down)
+~/.kimaki-whisper/wendy.log    # runtime log (5MB rotate)
+~/.kimaki-whisper/diagnostics/YYYY-MM-DD.jsonl   # full event stream, 14-day retention:
+                               # owner_said / speak / tool (args+result+ms) / brain (per hop)
+                               # dropped / barge_in / announce / watch_delta / schedule_fire …
+~/.kimaki-whisper/config.json  # botToken, brainUrl, brainWakeCommand, speachesUrl, ttsVoice, ownerId
+~/.kimaki-whisper/routes.json  # curated alias → thread routes (+ notify tier)
+~/.kimaki-whisper/workspace/   # her memory: notes/, memory.md, history.json (24 msgs),
+                               # thread-index.json, nicknames.json, schedules.json, git-heads.json
+```
+
+Testing: `test/sim-messy.mjs` - live-fire chaos sim against the real brain/tools
+(`WENDY_TEST=1` isolates her real history). Build: `./node_modules/.bin/tsc`.
+
+## Origin
+
+Built session-by-session over Discord via Kimaki, debugged live in-channel with the owner -
+including her own feature requests (thread index, passive notifications, scheduled checks,
+read-vs-ask doctrine) filed by her, through the very switchboard she runs.
+
+## Whisper sidecar heritage
+
+Wendy grew out of (and still contains) the kimaki-whisper sidecar - these remain part of her stack:
+
+- `/whisper-*` Discord slash commands (registered additively on the same bot token; Kimaki ignores unknown commands)
+- OpenAI-compatible transcription endpoint on `127.0.0.1:7071` (Kimaki routes voice notes here via `OPENAI_BASE_URL`)
+- Reply "retranscribe" to any voice note to re-transcribe and inject via `kimaki send`
+
+Audio never leaves the machine. No API keys, no cloud.

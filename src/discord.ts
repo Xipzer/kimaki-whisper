@@ -28,13 +28,13 @@ function buildCommands() {
   return [
     new SlashCommandBuilder()
       .setName(`${p}-setup`)
-      .setDescription('Set up local voice transcription (sidecar) — pick a model, Kimaki handles the rest')
+      .setDescription('Set up local voice transcription (sidecar) - pick a model, Kimaki handles the rest')
       .addStringOption((o) =>
         o.setName('model').setDescription('Built-in local model (auto = best for this machine)').setRequired(false)
           .addChoices(
-            { name: 'Auto — recommended for this machine', value: 'auto' },
-            ...MODEL_TIERS.map((t) => ({ name: `${t.label} — ${t.approxSize}`, value: t.id })),
-            { name: 'Off — disable sidecar transcription', value: 'off' },
+            { name: 'Auto - recommended for this machine', value: 'auto' },
+            ...MODEL_TIERS.map((t) => ({ name: `${t.label} - ${t.approxSize}`, value: t.id })),
+            { name: 'Off - disable sidecar transcription', value: 'off' },
           ))
       .addStringOption((o) =>
         o.setName('backend-url').setDescription('Advanced: proxy to an OpenAI-compatible /v1 backend (e.g. GPU speaches)').setRequired(false))
@@ -48,7 +48,7 @@ function buildCommands() {
 
 async function safeReply(i: ChatInputCommandInteraction, content: string): Promise<void> {
   // Another process (a Kimaki build that implements /whisper-*) may have acked
-  // first — swallow "already acknowledged" instead of crashing.
+  // first - swallow "already acknowledged" instead of crashing.
   try {
     if (i.deferred || i.replied) await i.editReply(content)
     else await i.reply({ content, flags: MessageFlags.Ephemeral })
@@ -70,7 +70,7 @@ async function handleSetup(i: ChatInputCommandInteraction): Promise<void> {
   }
   if (!model) {
     const rec = recommendTier()
-    return safeReply(i, `🎤 **Sidecar setup**\nRecommended for this machine: **${rec.tier.label}** (${rec.tier.approxSize}) — ${rec.reason}.\nRun \`/${prefix()}-setup model: Auto\` to configure it.`)
+    return safeReply(i, `🎤 **Sidecar setup**\nRecommended for this machine: **${rec.tier.label}** (${rec.tier.approxSize}) - ${rec.reason}.\nRun \`/${prefix()}-setup model: Auto\` to configure it.`)
   }
   if (model === 'off') {
     saveConfig({ model: undefined, backendUrl: undefined })
@@ -89,14 +89,14 @@ async function handleSetup(i: ChatInputCommandInteraction): Promise<void> {
   saveConfig({ model: tier.id, backendUrl: undefined })
   startServer()
   const port = loadConfig().port ?? DEFAULT_PORT
-  return safeReply(i, `✅ **${tier.label}** ready — transcription runs locally, in-process.\nOne-time wiring: launch Kimaki with \`OPENAI_BASE_URL=http://127.0.0.1:${port}/v1 OPENAI_API_KEY=local\` (add to your shell profile).`)
+  return safeReply(i, `✅ **${tier.label}** ready - transcription runs locally, in-process.\nOne-time wiring: launch Kimaki with \`OPENAI_BASE_URL=http://127.0.0.1:${port}/v1 OPENAI_API_KEY=local\` (add to your shell profile).`)
 }
 
 async function handleLifecycle(i: ChatInputCommandInteraction, action: 'start' | 'stop' | 'status'): Promise<void> {
   const cfg = loadConfig()
   const port = cfg.port ?? DEFAULT_PORT
   if (action === 'start') {
-    if (!cfg.model && !cfg.backendUrl) return safeReply(i, `⚠️ Not configured — run \`/${prefix()}-setup\` first.`)
+    if (!cfg.model && !cfg.backendUrl) return safeReply(i, `⚠️ Not configured - run \`/${prefix()}-setup\` first.`)
     startServer()
     return safeReply(i, `🎤 Sidecar endpoint running at http://127.0.0.1:${port}/v1`)
   }
@@ -105,7 +105,7 @@ async function handleLifecycle(i: ChatInputCommandInteraction, action: 'start' |
     return safeReply(i, '🛑 Sidecar endpoint stopped (RAM freed).')
   }
   const source = cfg.backendUrl ? `backend ${cfg.backendUrl}` : cfg.model ? `built-in ${cfg.model}` : 'not configured'
-  return safeReply(i, `🎤 Sidecar: **${isServerRunning() ? 'running' : 'stopped'}** on :${port} — source: ${source}`)
+  return safeReply(i, `🎤 Sidecar: **${isServerRunning() ? 'running' : 'stopped'}** on :${port} - source: ${source}`)
 }
 
 const RETRANSCRIBE = /^\s*(?:re-?transcribe|retry(?:\s+transcription)?|transcribe(?:\s+(?:this|that|again))?)\s*$/i
@@ -142,7 +142,7 @@ async function handleRetranscribe(message: Message): Promise<void> {
   const child = spawn('kimaki', ['send', '--thread', message.channelId, '--prompt', prompt], {
     shell: false, stdio: 'ignore', detached: true,
   })
-  child.on('error', () => log('kimaki send failed — is kimaki on PATH?'))
+  child.on('error', () => log('kimaki send failed - is kimaki on PATH?'))
   child.unref()
   await message.react('📝').catch(() => {})
 }
@@ -169,7 +169,7 @@ export async function startDiscord(token: string): Promise<void> {
   const appId = client.application?.id ?? (await client.application?.fetch())?.id
   if (!appId) throw new Error('could not resolve application id')
 
-  // CRITICAL: never bulk-PUT — that would REPLACE the guild's whole command set
+  // CRITICAL: never bulk-PUT - that would REPLACE the guild's whole command set
   // and wipe Kimaki's commands. POST upserts one command at a time, additively.
   const rest = new REST().setToken(token)
   const registerAll = async () => {
@@ -185,7 +185,7 @@ export async function startDiscord(token: string): Promise<void> {
     log(`/${prefix()}-* registered in ${guilds.size} guild(s)`)
   }
   await registerAll()
-  // Kimaki bulk-PUTs its own set on restart, which wipes ours — re-register
+  // Kimaki bulk-PUTs its own set on restart, which wipes ours - re-register
   // periodically (POST is an upsert; 4 cmds × 4/day stays far under rate limits).
   setInterval(() => void registerAll(), 6 * 60 * 60 * 1000).unref()
   log(`connected as ${client.user?.tag}`)

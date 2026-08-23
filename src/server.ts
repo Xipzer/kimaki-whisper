@@ -4,8 +4,8 @@
 // expects. Logic ported from the battle-tested kimaki-whisper-shim.
 //
 // Transcription source (by config):
-//   - built-in ONNX model (config.model)          — zero-setup path
-//   - external backend  (config.backendUrl)      — advanced/GPU path, proxied
+//   - built-in ONNX model (config.model)          - zero-setup path
+//   - external backend  (config.backendUrl)      - advanced/GPU path, proxied
 import http from 'node:http'
 import { loadConfig, DEFAULT_PORT, log } from './config.js'
 import { transcribeOgg } from './transcribe/local-onnx.js'
@@ -92,7 +92,7 @@ export async function transcribeAudioBytes(bytes: Buffer): Promise<Error | strin
   const cfg = loadConfig()
   if (cfg.backendUrl) return proxyToBackend(bytes, cfg.backendUrl)
   if (cfg.model) return transcribeOgg({ ogg: bytes, modelId: cfg.model })
-  return new Error('not configured — run /whisper-setup (or `kimaki-whisper setup --model auto`)')
+  return new Error('not configured - run /whisper-setup (or `kimaki-whisper setup --model auto`)')
 }
 
 let server: http.Server | null = null
@@ -141,7 +141,7 @@ export function startServer(): number {
 
   server.on('error', (e: NodeJS.ErrnoException) => {
     if (e.code === 'EADDRINUSE') {
-      log(`FATAL: port ${port} already in use — another sidecar instance is running. Exiting.`)
+      log(`FATAL: port ${port} already in use - another sidecar instance is running. Exiting.`)
       process.exit(2)
     }
     throw e

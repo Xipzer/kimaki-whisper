@@ -1,5 +1,5 @@
 // Built-in local transcription: ONNX whisper in-process via @huggingface/transformers.
-// The heavy runtime is NOT a dependency of this package — it npm-installs on demand
+// The heavy runtime is NOT a dependency of this package - it npm-installs on demand
 // into ~/.kimaki-whisper/runtime (keeps `npx kimaki-whisper` light). Models cache
 // there too. Ported from the proven Kimaki PR implementation.
 import path from 'node:path'
@@ -35,7 +35,7 @@ export function recommendTier(): { tier: ModelTier; reason: string } {
     return { tier: tierById('best')!, reason: `${cores} cores + ${memGb} GB RAM run large-v3-turbo comfortably` }
   if (memGb >= 8) return { tier: tierById('accurate')!, reason: `${memGb} GB RAM fits the Accurate model` }
   if (memGb >= 4) return { tier: tierById('balanced')!, reason: `${memGb} GB RAM suits Balanced` }
-  return { tier: tierById('fast')!, reason: `limited RAM (${memGb} GB) — Fast avoids swapping` }
+  return { tier: tierById('fast')!, reason: `limited RAM (${memGb} GB) - Fast avoids swapping` }
 }
 
 function runtimeDir(): string {
@@ -85,7 +85,7 @@ export async function getPipeline({
     runtimeDir(),
     'node_modules', '@huggingface', 'transformers', 'dist', 'transformers.node.mjs',
   )
-  if (!fs.existsSync(entry)) return new Error('runtime not installed — run setup first')
+  if (!fs.existsSync(entry)) return new Error('runtime not installed - run setup first')
 
   const mod = (await import(pathToFileURL(entry).href).catch((e) => e as Error)) as
     | Error

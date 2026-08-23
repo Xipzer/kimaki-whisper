@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-// kimaki-whisper — local voice-note transcription sidecar for Kimaki.
+// kimaki-whisper - local voice-note transcription sidecar for Kimaki.
 //   kimaki-whisper                     run the sidecar (gateway + endpoint)
 //   kimaki-whisper setup [--model auto|fast|balanced|accurate|best]
 //                        [--backend-url <url>] [--token <bot token>]
@@ -47,7 +47,7 @@ async function main(): Promise<void> {
     }
     if (!token && !backendUrl && !modelArg) {
       const rec = recommendTier()
-      log(`recommended for this machine: ${rec.tier.label} (${rec.tier.approxSize}) — ${rec.reason}`)
+      log(`recommended for this machine: ${rec.tier.label} (${rec.tier.approxSize}) - ${rec.reason}`)
       log(`run: kimaki-whisper setup --model auto`)
     }
     return
@@ -75,7 +75,7 @@ async function main(): Promise<void> {
   }
   const cfg = loadConfig()
   if (cfg.model || cfg.backendUrl) startServer()
-  else log('transcription not configured yet — run /whisper-setup in Discord once connected')
+  else log('transcription not configured yet - run /whisper-setup in Discord once connected')
   await startDiscord(token)
   const port = cfg.port ?? DEFAULT_PORT
   log('sidecar running. One-time Kimaki wiring (shell profile):')

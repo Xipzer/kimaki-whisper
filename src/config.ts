@@ -1,4 +1,4 @@
-// Sidecar config at ~/.kimaki-whisper/config.json — deliberately its own dir so
+// Sidecar config at ~/.kimaki-whisper/config.json - deliberately its own dir so
 // we never write into Kimaki's data (loose coupling by design).
 import path from 'node:path'
 import os from 'node:os'

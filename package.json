@@ -1,11 +1,11 @@
 {
-  "name": "kimaki-whisper",
+  "name": "wendy",
   "version": "0.1.0",
-  "description": "Local voice-note transcription sidecar for Kimaki — free, private, zero upstream changes. Registers /whisper-* Discord commands and serves transcription on your machine.",
+  "description": "Wendy - local voice-first personal assistant: Discord VC presence, STT/LLM/TTS pipeline, and switchboard to a Kimaki agent organisation. Includes the whisper transcription sidecar.",
   "type": "module",
   "license": "MIT",
   "bin": {
-    "kimaki-whisper": "dist/cli.js"
+    "wendy": "dist/cli.js"
   },
   "files": [
     "dist",
