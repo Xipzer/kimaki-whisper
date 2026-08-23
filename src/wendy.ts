@@ -826,9 +826,15 @@ async function refreshThreadIndexInner(): Promise<void> {
     for (const e of changed.slice(0, 3)) {
       const label = labelFor(e.id, e.title)
       const tail = await runKimaki(['session', 'read', e.id], 45000, 500_000, true)
-      announce(tail.startsWith('ERROR') ? `${label} had activity.` : await summarizeForVoice(label, recentMessages(tail, 3)), tierFor(e.id))
+      if (tail.startsWith('ERROR')) { announce(`${label} had activity.`, tierFor(e.id)); continue }
+      if (!shouldAnnounce(e.id, tail)) continue
+      announce(await summarizeForVoice(label, recentMessages(tail, 3)), tierFor(e.id))
     }
-    for (const e of changed.slice(3, 5)) announce(`${labelFor(e.id, e.title)} also moved.`, tierFor(e.id))
+    for (const e of changed.slice(3, 5)) {
+      const prev = lastAnnounced.get(e.id)
+      if (prev && Date.now() - prev.at < 15 * 60 * 1000) continue
+      announce(`${labelFor(e.id, e.title)} also moved.`, tierFor(e.id))
+    }
     if (changed.length > 5) announce(`Plus ${changed.length - 5} more threads had activity.`, 'digest')
     for (const e of fresh.slice(0, 3)) announce(`New thread in ${path.basename(e.dir)}: ${e.title}.`, 'digest')
     if (changed.length || fresh.length) log(`wendy: change feed — ${changed.length} changed, ${fresh.length} new`)
@@ -891,7 +897,9 @@ setInterval(() => {
         const out = await runKimaki(['session', 'read', d.sessionId], 60000, 500_000, true)
         const summary = out.startsWith('ERROR')
           ? `I couldn't read that thread just now.`
-          : await summarizeForVoice(labelFor(d.sessionId, d.note || 'that thread'), recentMessages(out, 3))
+          : shouldAnnounce(d.sessionId, out)
+            ? await summarizeForVoice(labelFor(d.sessionId, d.note || 'that thread'), recentMessages(out, 3))
+            : 'no real movement since my last update.'
         announce(`Scheduled check${d.note ? ` on ${d.note}` : ''}: ${summary}`, 'interrupt')
       } else {
         announce(`Reminder: ${d.note}`, 'interrupt')
@@ -943,6 +951,16 @@ setInterval(() => {
   }
 }, 5 * 60 * 1000).unref()
 function fingerprint(tail: string): string { return tail.slice(-3000) }
+// One memory across ALL announcement sources (watches, change feed, schedules):
+// if a session's content hasn't changed since we last told the owner, stay quiet.
+const lastAnnounced = new Map<string, { fp: string; at: number }>()
+function shouldAnnounce(id: string, tail: string): boolean {
+  const fp = fingerprint(tail)
+  const prev = lastAnnounced.get(id)
+  if (prev && prev.fp === fp) { diag('announce_deduped', { id }); return false }
+  lastAnnounced.set(id, { fp, at: Date.now() })
+  return true
+}
 function watchSession(id: string, label: string): void {
   label = labelFor(id, label)
   if (watchlist.some((w) => w.id === id)) return
@@ -968,12 +986,12 @@ async function pollWatchlist(): Promise<void> {
       const first = !w.seen
       w.seen = true; w.idle = 0; w.fp = nfp
       diag('watch_delta', { id: w.id, label: w.label, first })
-      if (first) announce(await summarizeForVoice(w.label, recentMessages(tail, 3)), 'interrupt')
-      else w.more = true
+      if (first && shouldAnnounce(w.id, tail)) announce(await summarizeForVoice(w.label, recentMessages(tail, 3)), 'interrupt')
+      else if (!first) w.more = true
     } else if (w.seen && (w.idle = (w.idle ?? 0) + 1) >= 2) {
       watchlist.splice(i, 1)
       diag('watch_done', { id: w.id, label: w.label, hadMore: !!w.more })
-      if (w.more) announce(await summarizeForVoice(w.label + ' (finished)', recentMessages(tail, 3)), 'interrupt')
+      if (w.more && shouldAnnounce(w.id, tail)) announce(await summarizeForVoice(w.label + ' (finished)', recentMessages(tail, 3)), 'interrupt')
     }
   }
 }
@@ -1044,7 +1062,7 @@ setInterval(() => {
   const events = convoEvents.splice(0, 4)
   log(`wendy: conversation idle — delivering ${events.length} background event(s)`)
   diag('bg_delivery', { count: events.length })
-  void runTurn(`[BACKGROUND UPDATE — this is NOT the owner speaking. Results from parallel work just arrived:]\n${events.join('\n')}\n[Tell the owner briefly and naturally, like a colleague mentioning news at a pause. Prioritize if several.]`)
+  void runTurn(`[BACKGROUND UPDATE — this is NOT the owner speaking. Results from parallel work just arrived:]\n${events.join('\n')}\n[Tell the owner briefly and naturally, like a colleague mentioning news at a pause. Prioritize if several. Anything you ALREADY told the owner this conversation: skip it entirely or compress to one clause of what is genuinely new — never restate an update in different words.]`)
 }, 5000).unref()
 function playerActive(): boolean {
   const st = player?.state.status
