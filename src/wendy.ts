@@ -114,6 +114,7 @@ MODE 2 - ACTION (when asked to do or fetch something): reliability is everything
 
 SILENCE MODE: only on the owner's explicit request - go_silent for the stated duration (default 30 min). Never self-activate it, never suggest it, never ask about it. A bare "Wendy" wakes you.
 
+AMBIENT AWARENESS: you can see the whole organisation without asking anyone - index_pulse shows what is active right now, what worked today, and what went quiet mid-task. Use it for broad questions ("what's going on", "anything stuck", "how are things") instead of guessing or reading individual threads first. Stall notices (a steadily-working thread going silent for hours) arrive automatically as digests.
 NOTIFICATIONS: dispatched work is watched (start and finish announced). Thread and commit activity across all projects arrives as batched digests. Per-route priority via set_notify_tier: interrupt, digest, or onjoin.
 
 YOUR OWN HANDS: bash (cwd = your private workspace; curl and python3 available), write_note/read_note scratchpads, memory.md for standing facts and owner preferences - read it when they reference the past. Concierge work only: anything owned by a project or thread gets routed there even if you could do it yourself. Tool output may be long; your spoken reply stays one to three sentences. Ambiguity → one short question. Failed tool → say so plainly. Never invent results.`
@@ -331,6 +332,14 @@ const TOOLS = [
         },
         required: ['minutes', 'note'],
       },
+    },
+  },
+  {
+    type: 'function',
+    function: {
+      name: 'index_pulse',
+      description: 'Ambient view of the whole organisation: which threads are active RIGHT NOW, which worked recently, which went quiet mid-task. THE tool for broad questions like "what is going on", "anything stuck", "how are things looking".',
+      parameters: { type: 'object', properties: {} },
     },
   },
   {
@@ -582,6 +591,22 @@ async function executeToolInner(name: string, args: Record<string, unknown>): Pr
     schedules.push({ at: Date.now() + mins * 60_000, kind: sid ? 'check' : 'remind', ...(sid ? { sessionId: sid } : {}), note: String(args.note ?? '').slice(0, 200) })
     saveSchedules()
     return `scheduled - will ${sid ? 'check that thread' : 'remind the owner'} in ${mins} minutes`
+  }
+  if (name === 'index_pulse') {
+    const now = Date.now()
+    const withAge = threadIndex.filter((e) => e.updated).map((e) => ({ e, age: now - (e.updated ?? 0) }))
+    const activeNow = withAge.filter((x) => x.age < 3600000).sort((a, b) => a.age - b.age).slice(0, 8)
+    const today = withAge.filter((x) => x.age >= 3600000 && x.age < 86400000)
+    const stalled = [...ambient.entries()].filter(([, a]) => a.stallNotified).slice(0, 5)
+      .map(([id]) => threadIndex.find((e) => e.id === id)).filter((e): e is ThreadIndexEntry => !!e)
+    const byProject = new Map<string, number>()
+    for (const x of today) byProject.set(path.basename(x.e.dir), (byProject.get(path.basename(x.e.dir)) ?? 0) + 1)
+    const projLine = [...byProject.entries()].sort((a, b) => b[1] - a[1]).slice(0, 5).map(([p, n]) => `${p}(${n})`).join(', ')
+    return [
+      `ACTIVE NOW (last hour): ${activeNow.length ? activeNow.map((x) => `${labelFor(x.e.id, x.e.title).slice(0, 50)} [${path.basename(x.e.dir)}, ${Math.max(1, Math.round(x.age / 60000))}m ago, ${x.e.id}]`).join('; ') : 'nothing'}`,
+      `WORKED TODAY: ${today.length} threads across: ${projLine || 'none'}`,
+      stalled.length ? `WENT QUIET MID-TASK: ${stalled.map((e) => labelFor(e.id, e.title).slice(0, 50)).join('; ')}` : '',
+    ].filter(Boolean).join('\n')
   }
   if (name === 'index_stats') {
     const age = lastIndexRefresh ? Math.round((Date.now() - lastIndexRefresh) / 60000) : -1
@@ -848,6 +873,26 @@ async function refreshThreadIndexInner(): Promise<void> {
     if (changed.length > 5) announce(`Plus ${changed.length - 5} more threads had activity.`, 'digest')
     for (const e of fresh.slice(0, 3)) announce(`New thread in ${path.basename(e.dir)}: ${e.title}.`, 'digest')
     if (changed.length || fresh.length) log(`wendy: change feed - ${changed.length} changed, ${fresh.length} new`)
+    // ambient: track hot streaks on ALL moved threads (not just announced ones)
+    const movedIds = new Set(next.filter((e) => prev.has(e.id) && (e.updated ?? 0) > (prev.get(e.id) ?? 0) + 1000).map((e) => e.id))
+    for (const e of next) {
+      const a = ambient.get(e.id) ?? { hotStreak: 0, lastUpd: e.updated ?? 0, stallNotified: false }
+      if (movedIds.has(e.id)) { a.hotStreak++; a.stallNotified = false }
+      a.lastUpd = e.updated ?? 0
+      ambient.set(e.id, a)
+    }
+    // stall notices: a thread that was working steadily (2+ active refreshes) went quiet >4h
+    for (const e of next) {
+      const a = ambient.get(e.id)
+      if (!a || a.hotStreak < 2 || a.stallNotified) continue
+      const idleMs = Date.now() - (a.lastUpd || 0)
+      if (idleMs > 4 * 3600000 && idleMs < 48 * 3600000) {
+        a.stallNotified = true
+        a.hotStreak = 0
+        announce(`${labelFor(e.id, e.title)} has gone quiet - no movement in about ${Math.round(idleMs / 3600000)} hours after working steadily.`, 'digest')
+        diag('stall_notice', { id: e.id, title: e.title, idleH: Math.round(idleMs / 3600000) })
+      }
+    }
   }
   await probeGitHeads(projects.map((p) => p.directory).filter((d): d is string => !!d))
   if (next.length) {
@@ -856,6 +901,9 @@ async function refreshThreadIndexInner(): Promise<void> {
     log(`wendy: thread index refreshed - ${next.length} sessions across ${projects.length} projects`)
   }
 }
+// - ambient awareness: hot threads, stall detection -
+type Ambient = { hotStreak: number; lastUpd: number; stallNotified: boolean }
+const ambient = new Map<string, Ambient>()
 const gitHeadsPath = path.join(workspaceDir(), 'git-heads.json')
 let gitHeads: Record<string, string> = {}
 try { gitHeads = JSON.parse(fs.readFileSync(gitHeadsPath, 'utf-8')) } catch {}
