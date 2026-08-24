@@ -117,6 +117,8 @@ MODE 2 - ACTION (when asked to do or fetch something): reliability is everything
 - ERRORS: if a tool fails or your reasoning engine hiccups, TELL the owner plainly - what broke and what you're doing instead. Never gloss over a failure, never pretend a result came back, never silently retry into a different answer. If your history shows you errored last turn, acknowledge it before moving on ("sorry, I glitched there - here's the real answer").
 - FOLLOW-THROUGH: never end a turn on a promise. Say → do → report in the SAME turn (use say to narrate while you work). If the owner repeats a request, never "I already told you" - re-verify and answer again, at most "quick recap:".
 
+UPDATES & PRIORITY: every queued update carries [HIGH]/[MED]/[LOW]. Deliver highs first; skip lows unless asked for everything. When you genuinely can't tell how much the owner cares about a topic, ask casually once ("want me to treat launcher stuff as high-priority?") and remember the answer (set_notify_tier or a route note). If the owner dismisses updates - "not now", "later", "stop asking" - snooze_updates immediately and drop the subject without comment.
+DO-NOT-DISTURB: set_dnd only when the owner explicitly asks ("do not disturb", "stop update offers"). Under DND you converse completely normally but never offer or mention updates - the automatic high-priority valve is the only exception. Turn it off only when they ask.
 SILENCE MODE: only on the owner's explicit request - go_silent for the stated duration (default 30 min). Never self-activate it, never suggest it, never ask about it. A bare "Wendy" wakes you.
 
 AMBIENT AWARENESS: you can see the whole organisation without asking anyone - index_pulse shows what is active right now, what worked today, and what went quiet mid-task. Use it for broad questions ("what's going on", "anything stuck", "how are things") instead of guessing or reading individual threads first. Stall notices (a steadily-working thread going silent for hours) arrive automatically as digests.
@@ -385,6 +387,30 @@ const TOOLS = [
   {
     type: 'function',
     function: {
+      name: 'set_dnd',
+      description: 'Toggle do-not-disturb for updates: while on, you never offer or mention updates (they quietly accumulate) - the only exception is an automatic nudge when 3+ high-priority items stack. ONLY on the owner\'s explicit request; never suggest it, never activate it yourself. Different from go_silent: you still converse normally under DND.',
+      parameters: {
+        type: 'object',
+        properties: { on: { type: 'boolean' } },
+        required: ['on'],
+      },
+    },
+  },
+  {
+    type: 'function',
+    function: {
+      name: 'snooze_updates',
+      description: 'Stop offering updates for a while (they keep accumulating). Call when the owner dismisses updates - "not now", "later", "stop asking".',
+      parameters: {
+        type: 'object',
+        properties: { minutes: { type: 'number', description: 'default 30' } },
+        required: [],
+      },
+    },
+  },
+  {
+    type: 'function',
+    function: {
       name: 'go_silent',
       description: 'Silence yourself completely for N minutes: no speaking, no announcements, incoming speech is discarded before reaching your reasoning. ONLY call this when the owner explicitly asks you to be quiet/silent/muted. NEVER activate it on your own judgment and NEVER suggest or offer it. The owner can end it early just by saying your name.',
       parameters: {
@@ -628,6 +654,16 @@ async function executeToolInner(name: string, args: Record<string, unknown>): Pr
     nicknames[id] = nick
     try { fs.writeFileSync(nicknamesPath(), JSON.stringify(nicknames, null, 2)) } catch {}
     return `noted - will call it "${nick}" from now on`
+  }
+  if (name === 'set_dnd') {
+    dnd = Boolean(args.on)
+    diag('dnd', { on: dnd })
+    return dnd ? 'DND on - updates accumulate silently; only a 3+ high-priority stack will trigger a nudge' : 'DND off - normal update flow resumed'
+  }
+  if (name === 'snooze_updates') {
+    const mins = Math.min(Math.max(Number(args.minutes) || 30, 5), 480)
+    askSnoozedUntil = Date.now() + mins * 60_000
+    return `snoozed - no update offers for ${mins} minutes`
   }
   if (name === 'go_silent') {
     const mins = Math.min(Math.max(Number(args.minutes) || 30, 1), 480)
@@ -878,17 +914,17 @@ async function refreshThreadIndexInner(): Promise<void> {
       if (prevA && Date.now() - prevA.at < 10 * 60 * 1000) continue
       const label = labelFor(e.id, e.title)
       const tail = await runKimaki(['session', 'read', e.id], 45000, 500_000, true)
-      if (tail.startsWith('ERROR')) { announce(`${label} had activity.`, tierFor(e.id)); continue }
+      if (tail.startsWith('ERROR')) { announce(`[LOW] ${label} had activity.`, tierFor(e.id)); continue }
       if (!shouldAnnounce(e.id, tail)) continue
       announce(await summarizeForVoice(label, recentMessages(tail, 3)), tierFor(e.id))
     }
     for (const e of changed.slice(3, 5)) {
       const prev = lastAnnounced.get(e.id)
       if (prev && Date.now() - prev.at < 15 * 60 * 1000) continue
-      announce(`${labelFor(e.id, e.title)} also moved.`, tierFor(e.id))
+      announce(`[LOW] ${labelFor(e.id, e.title)} also moved.`, tierFor(e.id))
     }
-    if (changed.length > 5) announce(`Plus ${changed.length - 5} more threads had activity.`, 'digest')
-    for (const e of fresh.slice(0, 3)) announce(`New thread in ${path.basename(e.dir)}: ${e.title}.`, 'digest')
+    if (changed.length > 5) announce(`[LOW] Plus ${changed.length - 5} more threads had activity.`, 'digest')
+    for (const e of fresh.slice(0, 3)) announce(`[LOW] New thread in ${path.basename(e.dir)}: ${e.title}.`, 'digest')
     if (changed.length || fresh.length) log(`wendy: change feed - ${changed.length} changed, ${fresh.length} new`)
     // ambient: track hot streaks on ALL moved threads (not just announced ones)
     const movedIds = new Set(next.filter((e) => prev.has(e.id) && (e.updated ?? 0) > (prev.get(e.id) ?? 0) + 1000).map((e) => e.id))
@@ -906,7 +942,7 @@ async function refreshThreadIndexInner(): Promise<void> {
       if (idleMs > 4 * 3600000 && idleMs < 48 * 3600000) {
         a.stallNotified = true
         a.hotStreak = 0
-        announce(`${labelFor(e.id, e.title)} has gone quiet - no movement in about ${Math.round(idleMs / 3600000)} hours after working steadily.`, 'digest')
+        announce(`[MED] ${labelFor(e.id, e.title)} has gone quiet - no movement in about ${Math.round(idleMs / 3600000)} hours after working steadily.`, 'digest')
         diag('stall_notice', { id: e.id, title: e.title, idleH: Math.round(idleMs / 3600000) })
       }
     }
@@ -933,7 +969,7 @@ async function probeGitHeads(dirs: string[]): Promise<void> {
     if (!out) continue
     const [hash, subject] = out.split('|')
     if (!firstRun && gitHeads[dir] && gitHeads[dir] !== hash)
-      announce(`New commit in ${path.basename(dir)}: ${subject}.`, 'digest')
+      announce(`[LOW] New commit in ${path.basename(dir)}: ${subject}.`, 'digest')
     gitHeads[dir] = hash
   }
   try { fs.writeFileSync(gitHeadsPath, JSON.stringify(gitHeads)) } catch {}
@@ -991,6 +1027,24 @@ const digestQueue: string[] = []
 // ── silence mode: OWNER-ONLY, explicitly requested, never self-activated ──
 let silencedUntil = 0
 const heldWhileSilent: string[] = []
+let dnd = false
+let askSnoozedUntil = 0
+let lastDeliveredAt = 0
+let lastHighNudge = 0
+function highCount(): number {
+  return [...digestQueue, ...convoEvents, ...pendingAnnouncements, ...heldWhileSilent].filter((x) => x.includes('[HIGH]')).length
+}
+// DND pressure valve: the ONLY thing that speaks under do-not-disturb
+setInterval(() => {
+  if (!dnd || !connection || busy || capturing || isSilenced() || playerActive()) return
+  if (highCount() < 3 || Date.now() - lastHighNudge < 30 * 60 * 1000) return
+  lastHighNudge = Date.now()
+  const lines = [
+    'Hate to break do-not-disturb, but high-priority stuff is genuinely stacking - want a rundown?',
+    'DND still on - but there are several high-priority things piling up now. Say the word.',
+  ]
+  void speak(lines[Math.floor(Math.random() * lines.length)])
+}, 60000).unref()
 let resumeOnContact = false
 let silenceGrace = 0   // brief window so the go_silent confirmation itself is audible
 function isSilenced(): boolean { return Date.now() < silencedUntil }
@@ -1030,7 +1084,7 @@ setInterval(() => {
   if (connection && !busy && !isSilenced()) {
     heldWhileSilent.push(...items)
     if (heldWhileSilent.length > 12) heldWhileSilent.splice(0, heldWhileSilent.length - 12)
-    if (Date.now() - lastDigestAsk > 30 * 60 * 1000) {
+    if (!dnd && Date.now() > askSnoozedUntil && Date.now() - lastDeliveredAt > 10 * 60 * 1000 && Date.now() - lastDigestAsk > 30 * 60 * 1000) {
       lastDigestAsk = Date.now()
       const asks = [
         'Little stack of news piling up here - want it?',
@@ -1099,7 +1153,7 @@ async function summarizeForVoice(label: string, content: string): Promise<string
     method: 'POST',
     headers: { 'content-type': 'application/json', connection: 'close' },
     body: JSON.stringify({ model: 'local-fast', max_tokens: 200, messages: [
-      { role: 'system', content: 'You summarize agent-thread activity for spoken delivery. The messages are ordered oldest to newest - the LAST message is the current state and your focus. In 1-2 short sentences state concretely what is happening NOW or just finished - results, decisions, numbers, errors. Earlier messages are only context. Start with "' + label + ':". Plain speech, no formatting.' },
+      { role: 'system', content: 'You summarize agent-thread activity for spoken delivery. The messages are ordered oldest to newest - the LAST message is the current state and your focus. In 1-2 short sentences state concretely what is happening NOW or just finished - results, decisions, numbers, errors. Earlier messages are only context. PREFIX your reply with exactly one of [HIGH] [MED] [LOW]: breakages, blockers, failed deploys, or questions needing the owner = [HIGH]; completed milestones and notable results = [MED]; routine progress = [LOW]. Then "' + label + ':". Plain speech, no formatting.' },
       { role: 'user', content } ] }),
     signal: AbortSignal.timeout(60000),
   }).catch(() => null)
@@ -1161,10 +1215,15 @@ let lastBgDelivery = 0
 // nobody talking, nothing playing, no turn running, >10s since last exchange.
 setInterval(() => {
   if (!convoEvents.length || !connection || busy || capturing || isSilenced() || playerActive() || resumeOnContact) return
+  if (dnd || Date.now() < askSnoozedUntil) {
+    if (convoEvents.length > 15) convoEvents.splice(0, convoEvents.length - 15)
+    return
+  }
   if (Date.now() - lastConvoActivity < 10000) return
   if (Date.now() - lastBgDelivery < 4 * 60 * 1000) return
   lastBgDelivery = Date.now()
   const events = convoEvents.splice(0, 4)
+  lastDeliveredAt = Date.now()
   log(`wendy: conversation idle - delivering ${events.length} background event(s)`)
   diag('bg_delivery', { count: events.length })
   void runTurn(`[BACKGROUND UPDATE - this is NOT the owner speaking. Results from parallel work just arrived:]\n${events.join('\n')}\n[Tell the owner briefly and naturally, like a colleague mentioning news at a pause. Prioritize if several. Anything you ALREADY told the owner this conversation, or anything not worth interrupting for: reply with exactly SKIP (nothing else) - never say you are staying quiet, never restate old news in new words.]`)
@@ -1212,9 +1271,10 @@ async function runTurn(text: string): Promise<void> {
       return
     }
     resumeOnContact = false
-    if (heldWhileSilent.length && !text.startsWith('[')) {
-      const held = heldWhileSilent.splice(0)
-      text = `[Context - updates queued while you were quiet or the owner was away: ${held.join(' | ')}. You may have offered a catch-up. If the owner wants everything, deliver it concisely. If they ask for the most urgent or most recent only, REASON over the list yourself, pick the single most important item (breakages and blockers beat progress notes; newest beats oldest), deliver just that one, and stop - no extra digging, no spillover into other updates unless asked.]\n${text}`
+    if ((heldWhileSilent.length || (dnd && (convoEvents.length || digestQueue.length))) && !text.startsWith('[')) {
+      const held = [...heldWhileSilent.splice(0), ...(dnd ? [...convoEvents.splice(0), ...digestQueue.splice(0)] : [])]
+      lastDeliveredAt = Date.now()
+      text = `[Context - updates queued while you were quiet or the owner was away (each tagged HIGH/MED/LOW): ${held.join(' | ')}. You may have offered a catch-up. Deliver HIGH items first, then MED; skip LOW unless they want everything. If they dismiss ("not now", "later"), call snooze_updates and drop the subject instantly. If the owner wants everything, deliver it concisely. If they ask for the most urgent or most recent only, REASON over the list yourself, pick the single most important item (breakages and blockers beat progress notes; newest beats oldest), deliver just that one, and stop - no extra digging, no spillover into other updates unless asked.]\n${text}`
     }
     log(`wendy heard: "${text.slice(0, 80)}"`)
     diag('owner_said', { text })
@@ -1374,7 +1434,8 @@ async function joinAndServe(channel: VoiceBasedChannel, userId: string): Promise
     heldWhileSilent.push(...queued)
     if (heldWhileSilent.length > 12) heldWhileSilent.splice(0, heldWhileSilent.length - 12)
   }
-  void runTurn(`[The owner just joined voice. Greet them YOUR way - improvise something warm with personality, ONE short line, never a stock phrase, never the same greeting twice.${queued.length ? ` Also: ${queued.length} update${queued.length > 1 ? 's are' : ' is'} queued - fold a casual offer to share into the greeting, but do NOT deliver any contents yet.` : ''}]`)
+  const hi = queued.filter((x) => x.includes('[HIGH]')).length
+  void runTurn(`[The owner just joined voice. Greet them YOUR way - improvise something warm with personality, ONE short line, never a stock phrase, never the same greeting twice.${queued.length ? ` Also: ${queued.length} update${queued.length > 1 ? 's are' : ' is'} queued${hi ? ` (${hi} high-priority)` : ''} - fold a casual offer to share into the greeting, but do NOT deliver any contents yet.` : ''}]`)
 }
 
 function leave(): void {
