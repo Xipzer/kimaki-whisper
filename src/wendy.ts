@@ -654,17 +654,21 @@ function pcm48kMonoToWav(pcm: Buffer): Buffer {
   return Buffer.concat([header, pcm])
 }
 
-async function stt(wav: Buffer): Promise<string> {
+type SttResult = { text: string; noSpeech: number; logprob: number }
+async function stt(wav: Buffer): Promise<SttResult> {
   const form = new FormData()
   form.append('file', new Blob([new Uint8Array(wav)], { type: 'audio/wav' }), 'utterance.wav')
   form.append('model', 'Systran/faster-whisper-large-v3')
   form.append('language', 'en')
-  form.append('response_format', 'json')
+  form.append('response_format', 'verbose_json')
   const res = await fetch(`${speachesUrl()}/v1/audio/transcriptions`, { method: 'POST', body: form, signal: AbortSignal.timeout(30000) })
     .catch((e) => new Error(String(e)))
-  if (res instanceof Error || !res.ok) return ''
-  const d = (await res.json().catch(() => ({}))) as { text?: string }
-  return (d.text ?? '').trim()
+  if (res instanceof Error || !res.ok) return { text: '', noSpeech: 1, logprob: -10 }
+  const d = (await res.json().catch(() => ({}))) as { text?: string; segments?: Array<{ no_speech_prob?: number; avg_logprob?: number }> }
+  const segs = d.segments ?? []
+  const noSpeech = segs.length ? Math.min(...segs.map((x) => x.no_speech_prob ?? 0)) : 0
+  const logprob = segs.length ? segs.reduce((a, x) => a + (x.avg_logprob ?? 0), 0) / segs.length : 0
+  return { text: (d.text ?? '').trim(), noSpeech, logprob }
 }
 
 async function tts(text: string): Promise<Buffer | null> {
@@ -1262,8 +1266,19 @@ function listenTo(channel: VoiceBasedChannel, userId: string): void {
         for (let i = 0; i < pcm.length; i += 2) { const v = pcm.readInt16LE(i); sumSq += v * v }
         const rms = Math.sqrt(sumSq / samples)
         if (rms < 220) { diag('dropped', { why: 'low_energy', rms: Math.round(rms) }); return }
-        const text = await stt(pcm48kMonoToWav(pcm))
+        const { text, noSpeech, logprob } = await stt(pcm48kMonoToWav(pcm))
         if (!text || text.length < 2) return
+        // Whisper's own confidence: silence-hallucinations carry high no_speech_prob
+        // and low avg_logprob. Real speech is typically logprob > -0.5, noSpeech < 0.3.
+        if (noSpeech > 0.55 || logprob < -0.9) {
+          diag('dropped', { text: text.slice(0, 60), why: 'low_confidence', noSpeech: +noSpeech.toFixed(2), logprob: +logprob.toFixed(2) })
+          return
+        }
+        // Stock ghost phrases need GOOD confidence to be believed at all
+        if (/^(thank you|thanks|okay|ok|you|bye|yeah)[.!\s]*$/i.test(text.trim()) && (logprob < -0.4 || noSpeech > 0.25)) {
+          diag('dropped', { text: text.trim(), why: 'stock_low_conf', noSpeech: +noSpeech.toFixed(2), logprob: +logprob.toFixed(2) })
+          return
+        }
         // Whisper hallucination artifacts: subtitle credits, thanks-for-watching, url spam.
         // These are training-data ghosts - drop at ANY clip length.
         const ARTIFACT = /(thank you for watching|thanks for watching|takk for|teksting av|undertekster|subtitles? by|untertitel|sous-titr|like and subscribe|share this video|www\.|\.com\b)/i
