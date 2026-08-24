@@ -1235,6 +1235,9 @@ function listenTo(channel: VoiceBasedChannel, userId: string): void {
   receiver.speaking.on('start', (speakingUserId) => {
     if (speakingUserId !== userId || capturing) return
     capturing = true
+    const captureGuard = setTimeout(() => {
+      if (capturing) { capturing = false; log('wendy: capture guard - stuck capture released'); diag('capture_stuck_released', {}) }
+    }, 60000)
     const opus = receiver.subscribe(speakingUserId, {
       end: { behavior: EndBehaviorType.AfterSilence, duration: 900 },
     })
@@ -1254,7 +1257,11 @@ function listenTo(channel: VoiceBasedChannel, userId: string): void {
         diag('barge_in', {})
       }
     })
+    opus.on('close', () => { clearTimeout(captureGuard); capturing = false })
+    opus.on('error', () => { clearTimeout(captureGuard); capturing = false })
+    decoder.on('close', () => { clearTimeout(captureGuard); capturing = false })
     decoder.on('end', () => {
+      clearTimeout(captureGuard)
       capturing = false
       void (async () => {
         const pcm = Buffer.concat(chunks)
@@ -1308,12 +1315,14 @@ function listenTo(channel: VoiceBasedChannel, userId: string): void {
         void runTurn(text)
       })()
     })
-    decoder.on('error', () => { capturing = false })
+    decoder.on('error', () => { clearTimeout(captureGuard); capturing = false })
   })
 }
 
 async function joinAndServe(channel: VoiceBasedChannel, userId: string): Promise<void> {
   leave()
+  capturing = false
+  pendingUtterance = null
   log(`wendy: joining #${channel.name}`)
   connection = joinVoiceChannel({
     channelId: channel.id,
