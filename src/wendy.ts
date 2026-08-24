@@ -658,6 +658,7 @@ async function stt(wav: Buffer): Promise<string> {
   const form = new FormData()
   form.append('file', new Blob([new Uint8Array(wav)], { type: 'audio/wav' }), 'utterance.wav')
   form.append('model', 'Systran/faster-whisper-large-v3')
+  form.append('language', 'en')
   form.append('response_format', 'json')
   const res = await fetch(`${speachesUrl()}/v1/audio/transcriptions`, { method: 'POST', body: form, signal: AbortSignal.timeout(30000) })
     .catch((e) => new Error(String(e)))
@@ -1255,9 +1256,23 @@ function listenTo(channel: VoiceBasedChannel, userId: string): void {
         const pcm = Buffer.concat(chunks)
         const minBytes = isSilenced() ? 24000 : 48000 // silenced: 0.25s so a bare "Wendy" wake-word gets through
         if (pcm.length < minBytes) { diag('dropped', { why: 'too_short', bytes: pcm.length }); return }
+        // energy gate: breath/hum/keyboard is near-silent; real speech is not
+        let sumSq = 0
+        const samples = pcm.length / 2
+        for (let i = 0; i < pcm.length; i += 2) { const v = pcm.readInt16LE(i); sumSq += v * v }
+        const rms = Math.sqrt(sumSq / samples)
+        if (rms < 220) { diag('dropped', { why: 'low_energy', rms: Math.round(rms) }); return }
         const text = await stt(pcm48kMonoToWav(pcm))
         if (!text || text.length < 2) return
-        // Whisper hallucinates stock phrases on noise/breath; drop them for short clips.
+        // Whisper hallucination artifacts: subtitle credits, thanks-for-watching, url spam.
+        // These are training-data ghosts - drop at ANY clip length.
+        const ARTIFACT = /(thank you for watching|thanks for watching|takk for|teksting av|undertekster|subtitles? by|untertitel|sous-titr|like and subscribe|share this video|www\.|\.com\b)/i
+        if (ARTIFACT.test(text)) {
+          log(`wendy: dropped whisper artifact "${text.trim().slice(0, 50)}"`)
+          diag('dropped', { text: text.trim().slice(0, 80), why: 'artifact' })
+          return
+        }
+        // Stock phrases on noise/breath; drop for short clips.
         const NOISE = /^(thanks?( you| for watching)?|you|bye|\.|uh|um)[.!\s]*$/i
         if (!isSilenced() && pcm.length < 2 * 96000 && NOISE.test(text.trim())) {
           log(`wendy: dropped noise artifact "${text.trim()}"`)
