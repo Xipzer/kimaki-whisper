@@ -657,6 +657,7 @@ async function executeToolInner(name: string, args: Record<string, unknown>): Pr
   }
   if (name === 'set_dnd') {
     dnd = Boolean(args.on)
+    saveModeState()
     diag('dnd', { on: dnd })
     return dnd ? 'DND on - updates accumulate silently; only a 3+ high-priority stack will trigger a nudge' : 'DND off - normal update flow resumed'
   }
@@ -669,6 +670,7 @@ async function executeToolInner(name: string, args: Record<string, unknown>): Pr
     const mins = Math.min(Math.max(Number(args.minutes) || 30, 1), 480)
     silencedUntil = Date.now() + mins * 60_000
     silenceGrace = Date.now() + 20_000
+    saveModeState()
     log(`wendy: silenced for ${mins} min at owner's request`)
     return `silenced for ${mins} minutes - confirm briefly, then go quiet`
   }
@@ -1029,6 +1031,15 @@ let silencedUntil = 0
 const heldWhileSilent: string[] = []
 let dnd = false
 let askSnoozedUntil = 0
+const statePath = () => path.join(workspaceDir(), 'state.json')
+function saveModeState(): void {
+  try { fs.writeFileSync(statePath(), JSON.stringify({ silencedUntil, dnd })) } catch {}
+}
+try {
+  const st = JSON.parse(fs.readFileSync(statePath(), 'utf-8')) as { silencedUntil?: number; dnd?: boolean }
+  if (st.silencedUntil && st.silencedUntil > Date.now()) silencedUntil = st.silencedUntil
+  dnd = Boolean(st.dnd)
+} catch {}
 let lastDeliveredAt = 0
 let lastHighNudge = 0
 function highCount(): number {
@@ -1051,6 +1062,7 @@ function isSilenced(): boolean { return Date.now() < silencedUntil }
 setInterval(() => {
   if (silencedUntil && Date.now() >= silencedUntil) {
     silencedUntil = 0
+    saveModeState()
     resumeOnContact = true
     log('wendy: silence period expired')
     if (connection && heldWhileSilent.length) {
@@ -1263,6 +1275,7 @@ async function runTurn(text: string): Promise<void> {
       const t = text.toLowerCase()
       if (/\bw[ei]+nd[iy]e?\b/.test(t)) {
         silencedUntil = 0
+        saveModeState()
         log('wendy: unmuted by owner voice command')
         await speak(heldWhileSilent.length
           ? `I'm back - ${heldWhileSilent.length === 1 ? 'one thing' : heldWhileSilent.length + ' things'} moved while I was quiet. Want the rundown?`
@@ -1352,6 +1365,14 @@ function listenTo(channel: VoiceBasedChannel, userId: string): void {
         if (rms < 220) { diag('dropped', { why: 'low_energy', rms: Math.round(rms) }); return }
         const { text, noSpeech, logprob } = await stt(pcm48kMonoToWav(pcm))
         if (!text || text.length < 2) return
+        // Silence wake-word: DETERMINISTIC - checked before every other gate so
+        // nothing (confidence, artifact, noise filters) can eat a wake attempt.
+        if (isSilenced() && /\bw[ei]+nd[iy]e?\b/i.test(text)) {
+          diag('wake_word', { text: text.slice(0, 60) })
+          void runTurn(text)
+          return
+        }
+        if (isSilenced()) diag('dropped', { text: text.slice(0, 60), why: 'silenced', noSpeech: +noSpeech.toFixed(2), logprob: +logprob.toFixed(2) })
         // Whisper's own confidence: silence-hallucinations carry high no_speech_prob
         // and low avg_logprob. Real speech is typically logprob > -0.5, noSpeech < 0.3.
         if (noSpeech > 0.55 || logprob < -0.9) {
