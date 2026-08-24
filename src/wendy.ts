@@ -100,7 +100,7 @@ const SYSTEM_PROMPT = `You are Wendy - the owner's personal assistant, speaking 
 
 PRIMARY OBJECTIVE: be a fluid, conversational, human-like presence. That is what you ARE; the tech stack access is an enhancement that lets you also get real work done. Every behavior flows from "what would a great human assistant do here" - never from "what would a notification system do".
 
-WHO YOU ARE: warm, sharp, lightly witty, direct. When you're just talking, talk; when you're asked to act, act RELIABLY.
+WHO YOU ARE: warm, sharp, lightly witty, direct - with actual personality. Greetings, acknowledgments, and asides are yours to improvise: playful, alive, never the same line twice, never anything that sounds like a system message. BREVITY IS CHARM: one short punchy sentence beats three long ones - the owner tunes out rambles, so when you feel creative, compress it. Dry humor lands better than enthusiasm. When you're just talking, talk; when you're asked to act, act RELIABLY.
 
 WAKING AND GREETING: when the owner joins you, greet like a person - short and warm. NEVER launch into updates unprompted: if things are queued you'll have mentioned the count and asked. Respect the answer. If they ask for "the most urgent" or "just the latest", pick it yourself from what's queued and give only that.
 
@@ -1032,7 +1032,13 @@ setInterval(() => {
     if (heldWhileSilent.length > 12) heldWhileSilent.splice(0, heldWhileSilent.length - 12)
     if (Date.now() - lastDigestAsk > 30 * 60 * 1000) {
       lastDigestAsk = Date.now()
-      void speak(`A few updates have piled up, by the way - want to hear them?`)
+      const asks = [
+        'Little stack of news piling up here - want it?',
+        'Updates are queueing themselves - say the word.',
+        'Few things landed while we talked. Highlights?',
+        'News drawer is filling up - want a peek?',
+      ]
+      void speak(asks[Math.floor(Math.random() * asks.length)])
     }
   } else {
     pendingAnnouncements.push(...items)
@@ -1206,7 +1212,7 @@ async function runTurn(text: string): Promise<void> {
       return
     }
     resumeOnContact = false
-    if (heldWhileSilent.length) {
+    if (heldWhileSilent.length && !text.startsWith('[')) {
       const held = heldWhileSilent.splice(0)
       text = `[Context - updates queued while you were quiet or the owner was away: ${held.join(' | ')}. You may have offered a catch-up. If the owner wants everything, deliver it concisely. If they ask for the most urgent or most recent only, REASON over the list yourself, pick the single most important item (breakages and blockers beat progress notes; newest beats oldest), deliver just that one, and stop - no extra digging, no spillover into other updates unless asked.]\n${text}`
     }
@@ -1367,10 +1373,8 @@ async function joinAndServe(channel: VoiceBasedChannel, userId: string): Promise
   if (queued.length) {
     heldWhileSilent.push(...queued)
     if (heldWhileSilent.length > 12) heldWhileSilent.splice(0, heldWhileSilent.length - 12)
-    await speak(`Hey, welcome back. ${queued.length === 1 ? "One thing came in" : queued.length + ' things came in'} while you were away - want the rundown, or just the urgent stuff?`)
-  } else {
-    await speak('Hey, welcome back.')
   }
+  void runTurn(`[The owner just joined voice. Greet them YOUR way - improvise something warm with personality, ONE short line, never a stock phrase, never the same greeting twice.${queued.length ? ` Also: ${queued.length} update${queued.length > 1 ? 's are' : ' is'} queued - fold a casual offer to share into the greeting, but do NOT deliver any contents yet.` : ''}]`)
 }
 
 function leave(): void {
