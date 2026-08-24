@@ -98,7 +98,11 @@ function saveRoute(name: string, route: Route): void {
 
 const SYSTEM_PROMPT = `You are Wendy - the owner's personal assistant, speaking with them live over Discord voice.
 
-WHO YOU ARE: assistant first. You hold fluid, natural conversation - warm, sharp, lightly witty, direct. The tools and the agent organisation exist to make you useful, not robotic: when you're just talking, talk; when you're asked to act, act RELIABLY.
+PRIMARY OBJECTIVE: be a fluid, conversational, human-like presence. That is what you ARE; the tech stack access is an enhancement that lets you also get real work done. Every behavior flows from "what would a great human assistant do here" - never from "what would a notification system do".
+
+WHO YOU ARE: warm, sharp, lightly witty, direct. When you're just talking, talk; when you're asked to act, act RELIABLY.
+
+WAKING AND GREETING: when the owner joins you, greet like a person - short and warm. NEVER launch into updates unprompted: if things are queued you'll have mentioned the count and asked. Respect the answer. If they ask for "the most urgent" or "just the latest", pick it yourself from what's queued and give only that.
 
 SPEECH: one to three short sentences. No lists, markdown, code, or emoji. This is voice.
 
@@ -1019,11 +1023,18 @@ function announce(text: string, tier: NotifyTier): void {
   }
   digestQueue.push(text)
 }
+let lastDigestAsk = 0
 setInterval(() => {
   if (!digestQueue.length) return
   const items = digestQueue.splice(0, 6)
-  if (connection && !busy && !isSilenced()) void speak(`Quick digest: ${items.join(' ')}`)
-  else {
+  if (connection && !busy && !isSilenced()) {
+    heldWhileSilent.push(...items)
+    if (heldWhileSilent.length > 12) heldWhileSilent.splice(0, heldWhileSilent.length - 12)
+    if (Date.now() - lastDigestAsk > 30 * 60 * 1000) {
+      lastDigestAsk = Date.now()
+      void speak(`A few updates have piled up, by the way - want to hear them?`)
+    }
+  } else {
     pendingAnnouncements.push(...items)
     if (pendingAnnouncements.length > 8) pendingAnnouncements.splice(0, pendingAnnouncements.length - 8)
   }
@@ -1197,7 +1208,7 @@ async function runTurn(text: string): Promise<void> {
     resumeOnContact = false
     if (heldWhileSilent.length) {
       const held = heldWhileSilent.splice(0)
-      text = `[Context: while you were silenced, these updates arrived: ${held.join(' | ')}. You offered a catch-up. If the owner wants it, deliver it concisely; if they've moved on to something else, follow their lead.]\n${text}`
+      text = `[Context - updates queued while you were quiet or the owner was away: ${held.join(' | ')}. You may have offered a catch-up. If the owner wants everything, deliver it concisely. If they ask for the most urgent or most recent only, REASON over the list yourself, pick the single most important item (breakages and blockers beat progress notes; newest beats oldest), deliver just that one, and stop - no extra digging, no spillover into other updates unless asked.]\n${text}`
     }
     log(`wendy heard: "${text.slice(0, 80)}"`)
     diag('owner_said', { text })
@@ -1352,9 +1363,14 @@ async function joinAndServe(channel: VoiceBasedChannel, userId: string): Promise
     })()
   })
   listenTo(channel, userId)
-  await speak(pendingAnnouncements.length
-    ? `Online. While you were away: ${pendingAnnouncements.splice(0).join(' ')}`
-    : 'Online.')
+  const queued = pendingAnnouncements.splice(0)
+  if (queued.length) {
+    heldWhileSilent.push(...queued)
+    if (heldWhileSilent.length > 12) heldWhileSilent.splice(0, heldWhileSilent.length - 12)
+    await speak(`Hey, welcome back. ${queued.length === 1 ? "One thing came in" : queued.length + ' things came in'} while you were away - want the rundown, or just the urgent stuff?`)
+  } else {
+    await speak('Hey, welcome back.')
+  }
 }
 
 function leave(): void {
