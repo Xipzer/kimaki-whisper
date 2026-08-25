@@ -681,7 +681,7 @@ async function executeToolInner(name: string, args: Record<string, unknown>): Pr
     const t0 = Date.now()
     const res = await fetch(`${url.replace(/\/$/, '')}/v1/chat/completions`, {
       method: 'POST', headers: { 'content-type': 'application/json', connection: 'close' },
-      body: JSON.stringify({ model: 'local-fast', max_tokens: 80, messages: [{ role: 'user', content: 'Count from one to twenty, words, comma separated.' }] }),
+      body: JSON.stringify({ model: 'local-fast', cache_prompt: true, max_tokens: 80, messages: [{ role: 'user', content: 'Count from one to twenty, words, comma separated.' }] }),
       signal: AbortSignal.timeout(60000),
     }).catch(() => null)
     if (!res?.ok) return `ERROR: brain unreachable or errored (HTTP ${res?.status ?? 'network'})`
@@ -855,7 +855,7 @@ export async function think(userText: string): Promise<string> {
       res = await fetch(`${url.replace(/\/$/, '')}/v1/chat/completions`, {
         method: 'POST',
         headers: { 'content-type': 'application/json', connection: 'close' },
-        body: JSON.stringify({ model: 'local-fast', messages, ...(lastLap ? {} : { tools: TOOLS }), max_tokens: 1200 }),
+        body: JSON.stringify({ model: 'local-fast', cache_prompt: true, messages, ...(lastLap ? {} : { tools: TOOLS }), max_tokens: 1200 }),
         signal: AbortSignal.timeout(120000),
       }).catch((e) => new Error(String((e as Error)?.cause ?? e)))
       if (!(res instanceof Error) && res.ok) break
@@ -1318,7 +1318,7 @@ async function episodize(): Promise<void> {
     const convo = batch.map((m) => `${m.role}: ${String(m.content ?? '').slice(0, 400)}`).join('\n')
     const res = await fetch(`${url.replace(/\/$/, '')}/v1/chat/completions`, {
       method: 'POST', headers: { 'content-type': 'application/json', connection: 'close' },
-      body: JSON.stringify({ model: 'local-fast', max_tokens: 250, messages: [
+      body: JSON.stringify({ model: 'local-fast', cache_prompt: true, max_tokens: 250, messages: [
         { role: 'system', content: 'You are the memory-writer for a voice assistant. Compress this conversation fragment into ONE journal entry, 2-4 dense past-tense sentences: decisions made, tasks dispatched and their outcomes, personal facts/preferences/plans the owner revealed, anything they might reference weeks later. IGNORE routine update-delivery chatter and pleasantries. If truly nothing is worth remembering, reply exactly SKIP.' },
         { role: 'user', content: convo } ] }),
       signal: AbortSignal.timeout(60000),
@@ -1350,7 +1350,7 @@ async function consolidateMemory(): Promise<void> {
   const recent = eps.slice(-30).map((e) => `[${new Date(e.ts).toISOString().slice(0, 10)}] ${e.s}`).join('\n')
   const res = await fetch(`${url.replace(/\/$/, '')}/v1/chat/completions`, {
     method: 'POST', headers: { 'content-type': 'application/json', connection: 'close' },
-    body: JSON.stringify({ model: 'local-fast', max_tokens: 700, messages: [
+    body: JSON.stringify({ model: 'local-fast', cache_prompt: true, max_tokens: 700, messages: [
       { role: 'system', content: 'You maintain memory.md - a voice assistant\'s standing memory of her owner. Merge the journal entries into the current file: keep durable facts (preferences, ongoing projects and their state, people, health, routines, promises made), update anything that changed, drop stale or one-off details. Output ONLY the new file content, markdown, max 250 words, organized under a few short headers.' },
       { role: 'user', content: `CURRENT memory.md:\n${current.slice(0, 3000)}\n\nRECENT JOURNAL:\n${recent}` } ] }),
     signal: AbortSignal.timeout(90000),
@@ -1372,7 +1372,7 @@ async function summarizeForVoice(label: string, content: string): Promise<string
   const res = await fetch(`${url.replace(/\/$/, '')}/v1/chat/completions`, {
     method: 'POST',
     headers: { 'content-type': 'application/json', connection: 'close' },
-    body: JSON.stringify({ model: 'local-fast', max_tokens: 200, messages: [
+    body: JSON.stringify({ model: 'local-fast', cache_prompt: true, max_tokens: 200, messages: [
       { role: 'system', content: 'You summarize agent-thread activity for spoken delivery. The messages are ordered oldest to newest - the LAST message is the current state and your focus. In 1-2 short sentences state concretely what is happening NOW or just finished - results, decisions, numbers, errors. Earlier messages are only context. PREFIX your reply with exactly one of [HIGH] [MED] [LOW]: breakages, blockers, failed deploys, or questions needing the owner = [HIGH]; completed milestones and notable results = [MED]; routine progress = [LOW]. Then "' + label + ':". Plain speech, no formatting.' },
       { role: 'user', content } ] }),
     signal: AbortSignal.timeout(60000),
