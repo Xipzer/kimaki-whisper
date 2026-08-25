@@ -1776,7 +1776,15 @@ function listenTo(channel: VoiceBasedChannel, userId: string): void {
           }
         }
         recordAcceptedRms(rms)
-        void runTurn(text)
+        let turnText = text
+        if (interrupted && cutSpeech.length) {
+          // Real interruption: hand her the unfinished thought so she can reason
+          // about it - answer the owner first, then finish/drop the thread herself.
+          turnText = `${text}\n[note: you were mid-reply when the owner cut in - these sentences of yours were never heard: "${cutSpeech.join(' ').slice(0, 500)}". Answer the owner first. Then decide naturally whether that unfinished part still matters: if it does, weave it in or finish it in your own words (a casual bridge in whatever phrasing fits); if their interruption made it moot, just drop it.]`
+          cutSpeech = []
+          diag('interrupted_context', {})
+        }
+        void runTurn(turnText)
       })()
     })
     decoder.on('error', () => { clearTimeout(captureGuard); capturing = false })
