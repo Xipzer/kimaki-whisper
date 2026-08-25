@@ -75,6 +75,29 @@ try {
 } catch {}
 diag('boot', { pid: process.pid })
 
+// - episodic memory: eviction -> journal -> consolidated memory.md -
+type Episode = { ts: number; s: string }
+const journalPath = () => path.join(configDir(), 'workspace', 'journal.jsonl')
+function loadJournal(): Episode[] {
+  try { return fs.readFileSync(journalPath(), 'utf-8').trim().split('\n').filter(Boolean).map((l) => JSON.parse(l) as Episode) } catch { return [] }
+}
+function searchJournal(query: string, n = 3): Episode[] {
+  const eps = loadJournal()
+  const terms = [...new Set(query.toLowerCase().split(/\W+/).filter((w) => w.length > 3))]
+  if (!terms.length || !eps.length) return []
+  const now = Date.now()
+  return eps
+    .map((e) => {
+      const t = e.s.toLowerCase()
+      const hits = terms.filter((w) => t.includes(w)).length
+      return { e, score: hits * Math.exp(-((now - e.ts) / 86400000) / 30) }
+    })
+    .filter((x) => x.score > 0.2)
+    .sort((a, b) => b.score - a.score)
+    .slice(0, n)
+    .map((x) => x.e)
+}
+
 /** Wendy's own den: scratchpad, notes, memory.md, disposable thinking files. */
 export function workspaceDir(): string {
   const d = path.join(configDir(), 'workspace')
@@ -124,6 +147,7 @@ SILENCE MODE: only on the owner's explicit request - go_silent for the stated du
 AMBIENT AWARENESS: you can see the whole organisation without asking anyone - index_pulse shows what is active right now, what worked today, and what went quiet mid-task. Use it for broad questions ("what's going on", "anything stuck", "how are things") instead of guessing or reading individual threads first. Stall notices (a steadily-working thread going silent for hours) arrive automatically as digests.
 NOTIFICATIONS: dispatched work is watched (start and finish announced). Thread and commit activity across all projects arrives as batched digests. Per-route priority via set_notify_tier: interrupt, digest, or onjoin.
 
+MEMORY: you remember. Old conversations are auto-compressed into a journal; durable facts auto-consolidate into standing memory (always in your context - trust it as YOUR memory, speak from it naturally, never say "my notes say"). Possibly-relevant past moments appear in context when they match the topic; recall(query) digs deeper on demand. When the owner tells you something worth keeping forever RIGHT NOW, also write_note it into memory.md yourself.
 YOUR OWN HANDS: bash (cwd = your private workspace; curl and python3 available), write_note/read_note scratchpads, memory.md for standing facts and owner preferences - read it when they reference the past. Concierge work only: anything owned by a project or thread gets routed there even if you could do it yourself. Tool output may be long; your spoken reply stays one to three sentences. Ambiguity → one short question. Failed tool → say so plainly. Never invent results.`
 
 // ── tools exposed to the brain ───────────────────────────────────
@@ -338,6 +362,18 @@ const TOOLS = [
           session_id: { type: 'string', description: 'ses_… to re-check at that time (omit for a plain reminder)' },
         },
         required: ['minutes', 'note'],
+      },
+    },
+  },
+  {
+    type: 'function',
+    function: {
+      name: 'recall',
+      description: 'Search your long-term journal of past conversations ("do you remember when...", "what did I say about..."). Returns dated episodes. Your standing memory and possibly-relevant moments are already in context - use recall for deeper or more specific digging.',
+      parameters: {
+        type: 'object',
+        properties: { query: { type: 'string', description: 'what to search for' } },
+        required: ['query'],
       },
     },
   },
@@ -632,6 +668,13 @@ async function executeToolInner(name: string, args: Record<string, unknown>): Pr
     saveSchedules()
     return `scheduled - will ${sid ? 'check that thread' : 'remind the owner'} in ${mins} minutes`
   }
+  if (name === 'recall') {
+    const hits = searchJournal(String(args.query ?? ''), 6)
+    diag('recall', { query: String(args.query ?? '').slice(0, 60), hits: hits.length })
+    return hits.length
+      ? hits.map((e) => `[${new Date(e.ts).toISOString().slice(0, 10)}] ${e.s}`).join('\n')
+      : 'nothing in the journal matches - it may predate my memory system or genuinely never came up'
+  }
   if (name === 'brain_health') {
     const url = brainUrl()
     if (!url) return 'ERROR: no brain configured'
@@ -769,14 +812,29 @@ export async function think(userText: string): Promise<string> {
   if (!url) return "My reasoning engine isn't configured yet."
 
   history.push({ role: 'user', content: userText })
-  if (history.length > 40) history.splice(0, history.length - 40)
+  if (history.length > 40) {
+    const evicted = history.splice(0, history.length - 40)
+    evictionBuffer.push(...evicted.filter((m) => {
+      const c = String(m.content ?? '')
+      return c && c !== '[background update delivered]' && !c.startsWith('[BACKGROUND UPDATE')
+    }))
+    if (evictionBuffer.length > 40) evictionBuffer.splice(0, evictionBuffer.length - 40)
+    void episodize()
+  }
 
   const routes = loadRoutes()
   const routesBlock = Object.keys(routes).length
     ? '\n\nKNOWN ROUTES (check here FIRST before searching):\n' +
       Object.entries(routes).map(([n, r]) => `- ${n} → ${r.kind} ${r.id} (${r.note})`).join('\n')
     : ''
-  const messages: Msg[] = [{ role: 'system', content: SYSTEM_PROMPT + routesBlock }, ...history]
+  let capsule = ''
+  try {
+    const md = fs.readFileSync(path.join(workspaceDir(), 'memory.md'), 'utf-8').trim()
+    if (md) capsule += `\n\nSTANDING MEMORY (auto-consolidated - trust it):\n${md.slice(0, 1800)}`
+  } catch {}
+  const eps = searchJournal(userText, 2)
+  if (eps.length) capsule += `\n\nPOSSIBLY RELEVANT PAST MOMENTS:\n${eps.map((e) => `- [${new Date(e.ts).toISOString().slice(0, 10)}] ${e.s}`).join('\n')}`
+  const messages: Msg[] = [{ role: 'system', content: SYSTEM_PROMPT + routesBlock + capsule }, ...history]
 
   const fail = (text: string): string => {
     history.push({ role: 'assistant', content: text })
@@ -1247,6 +1305,66 @@ async function pollWatchlist(): Promise<void> {
   }
 }
 setInterval(() => void pollWatchlist(), 45000).unref()
+
+let evictionBuffer: Msg[] = []
+let episodizing = false
+async function episodize(): Promise<void> {
+  if (episodizing || evictionBuffer.length < 10) return
+  episodizing = true
+  const batch = evictionBuffer.splice(0, 16)
+  try {
+    const url = brainUrl()
+    if (!url) return
+    const convo = batch.map((m) => `${m.role}: ${String(m.content ?? '').slice(0, 400)}`).join('\n')
+    const res = await fetch(`${url.replace(/\/$/, '')}/v1/chat/completions`, {
+      method: 'POST', headers: { 'content-type': 'application/json', connection: 'close' },
+      body: JSON.stringify({ model: 'local-fast', max_tokens: 250, messages: [
+        { role: 'system', content: 'You are the memory-writer for a voice assistant. Compress this conversation fragment into ONE journal entry, 2-4 dense past-tense sentences: decisions made, tasks dispatched and their outcomes, personal facts/preferences/plans the owner revealed, anything they might reference weeks later. IGNORE routine update-delivery chatter and pleasantries. If truly nothing is worth remembering, reply exactly SKIP.' },
+        { role: 'user', content: convo } ] }),
+      signal: AbortSignal.timeout(60000),
+    }).catch(() => null)
+    const d = res?.ok ? (await res.json().catch(() => null)) as { choices?: Array<{ message?: { content?: string } }> } | null : null
+    const text = d?.choices?.[0]?.message?.content?.trim() ?? ''
+    if (text && !/^skip\.?$/i.test(text)) {
+      fs.appendFileSync(journalPath(), JSON.stringify({ ts: Date.now(), s: text.slice(0, 600) }) + '\n')
+      diag('memory_episode', { chars: text.length })
+      // prune: keep newest 400
+      const eps = loadJournal()
+      if (eps.length > 500) fs.writeFileSync(journalPath(), eps.slice(-400).map((e) => JSON.stringify(e)).join('\n') + '\n')
+    }
+  } catch {} finally { episodizing = false }
+}
+
+const consolMarkPath = () => path.join(workspaceDir(), 'consolidation.json')
+async function consolidateMemory(): Promise<void> {
+  if (busy || episodizing) return
+  const eps = loadJournal()
+  let mark = { count: 0, at: 0 }
+  try { mark = JSON.parse(fs.readFileSync(consolMarkPath(), 'utf-8')) as typeof mark } catch {}
+  const fresh = eps.length - mark.count
+  if (fresh < 8 && !(fresh >= 3 && Date.now() - mark.at > 12 * 3600000)) return
+  const url = brainUrl()
+  if (!url) return
+  let current = ''
+  try { current = fs.readFileSync(path.join(workspaceDir(), 'memory.md'), 'utf-8') } catch {}
+  const recent = eps.slice(-30).map((e) => `[${new Date(e.ts).toISOString().slice(0, 10)}] ${e.s}`).join('\n')
+  const res = await fetch(`${url.replace(/\/$/, '')}/v1/chat/completions`, {
+    method: 'POST', headers: { 'content-type': 'application/json', connection: 'close' },
+    body: JSON.stringify({ model: 'local-fast', max_tokens: 700, messages: [
+      { role: 'system', content: 'You maintain memory.md - a voice assistant\'s standing memory of her owner. Merge the journal entries into the current file: keep durable facts (preferences, ongoing projects and their state, people, health, routines, promises made), update anything that changed, drop stale or one-off details. Output ONLY the new file content, markdown, max 250 words, organized under a few short headers.' },
+      { role: 'user', content: `CURRENT memory.md:\n${current.slice(0, 3000)}\n\nRECENT JOURNAL:\n${recent}` } ] }),
+    signal: AbortSignal.timeout(90000),
+  }).catch(() => null)
+  const d = res?.ok ? (await res.json().catch(() => null)) as { choices?: Array<{ message?: { content?: string } }> } | null : null
+  const text = d?.choices?.[0]?.message?.content?.trim() ?? ''
+  if (text && text.length > 40) {
+    fs.writeFileSync(path.join(workspaceDir(), 'memory.md'), text)
+    fs.writeFileSync(consolMarkPath(), JSON.stringify({ count: eps.length, at: Date.now() }))
+    diag('memory_consolidated', { episodes: eps.length, bytes: text.length })
+    log(`wendy: memory consolidated (${eps.length} episodes -> ${text.length}b memory.md)`)
+  }
+}
+setInterval(() => void consolidateMemory(), 60 * 60 * 1000).unref()
 
 async function summarizeForVoice(label: string, content: string): Promise<string> {
   const url = brainUrl()
