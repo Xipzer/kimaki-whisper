@@ -1392,17 +1392,23 @@ function listenTo(channel: VoiceBasedChannel, userId: string): void {
     const decoder = new prism.opus.Decoder({ rate: 48000, channels: 1, frameSize: 960 })
     const chunks: Buffer[] = []
     let bytes = 0
+    let sumSqLive = 0
     let interrupted = false
     opus.pipe(decoder)
     decoder.on('data', (c: Buffer) => {
       chunks.push(c)
       bytes += c.length
-      // barge-in: ~0.7s of sustained speech while she's talking cuts her off
+      for (let i = 0; i < c.length; i += 8) { const v = c.readInt16LE(i - (i % 2)); sumSqLive += v * v }
+      // barge-in: ~0.7s of sustained AND genuinely loud speech while she's talking.
+      // Duration alone false-triggered on fan hum / speaker bleed (seen live at RMS 48).
       if (!interrupted && bytes > 67200 && playerActive()) {
-        interrupted = true
-        interruptSpeech()
-        log('wendy: barge-in - owner spoke over me, playback cut')
-        diag('barge_in', {})
+        const rmsLive = Math.sqrt(sumSqLive / (bytes / 8))
+        if (rmsLive >= 400) {
+          interrupted = true
+          interruptSpeech()
+          log('wendy: barge-in - owner spoke over me, playback cut')
+          diag('barge_in', { rms: Math.round(rmsLive) })
+        }
       }
     })
     opus.on('close', () => { clearTimeout(captureGuard); capturing = false })
