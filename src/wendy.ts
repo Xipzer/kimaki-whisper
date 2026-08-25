@@ -982,7 +982,8 @@ export async function think(userText: string, onSentence?: (s: string) => void):
         const spec = TOOLS.find((t) => t.function.name === tc.function.name)
         const required: string[] = (spec?.function.parameters as { required?: string[] })?.required ?? []
         const missing = required.filter((k) => !args[k] || String(args[k]).trim() === '')
-        if (!missing.length && (tc.function.name === 'ask_thread' || tc.function.name === 'dispatch_task')) {
+        if (!missing.length && (tc.function.name === 'ask_thread' || tc.function.name === 'dispatch_task') && Date.now() - lastRelayAck > 60000) {
+          lastRelayAck = Date.now()
           void speak('One moment - passing that along.')
         }
         const result = missing.length
@@ -1496,6 +1497,9 @@ async function speak(text: string): Promise<void> {
   const run = async (): Promise<void> => {
     if (!connection || !player) return
     if (isSilenced() && Date.now() > silenceGrace) { log('wendy: speak suppressed (silenced)'); diag('speak_suppressed', { text: text.slice(0, 200), why: 'silenced' }); return }
+    // Turn-taking: never START speaking while the owner is mid-utterance.
+    const waitStart = Date.now()
+    while (capturing && Date.now() - waitStart < 8000) await new Promise((r) => setTimeout(r, 150))
     const ep = speechEpoch
     const speakable = text
       .replace(/```[\s\S]*?```/g, ' ')
@@ -1546,6 +1550,7 @@ let inputSeq = 0
 let busyAckGiven = false
 let turnStartedAt = 0
 let lastBusyAck = 0
+let lastRelayAck = 0
 let lastConvoActivity = 0
 const convoEvents: string[] = []
 let lastBgDelivery = 0
