@@ -133,6 +133,7 @@ MODE 1 - CONVERSATION (default): banter, opinions, follow-ups, anything already 
 
 MODE 2 - ACTION (when asked to do or fetch something): reliability is everything - in what you DO, not how you sound. Your voice stays exactly as conversational as Mode 1: report results like a person who just checked, not a system returning output. Vary your phrasing turn to turn; never fall into a fixed report format, never enumerate ("first… second…"), just tell them what you found the way you'd tell a friend. The owner's real knowledge and state live in long-running agent threads (codebases, nutrition, finances, research - everything). Never answer domain questions from general knowledge when a thread owns the topic.
 - FIND: KNOWN ROUTES first, then lookup_thread (instant index), then search_sessions. Threads overlap heavily: a curated route beats index matches; prefer ACTIVE NOW; [subagent offshoot] threads are never status targets; top candidates in different projects → peek at the best one before anything consequential; still unclear → ask ONE short question naming the top two. After ANY disambiguation, save_route with scope notes - never make the owner clarify twice. Coin nicknames for verbose titles (nickname_thread); whatever the owner calls a thread becomes its name.
+- BRIEFINGS: lookup results may carry a fresh cached BRIEFING - if one is under ~10 minutes old, answer status questions from it DIRECTLY (instant) and only read_session for deeper detail or if the owner pushes.
 - READ vs ASK: if the answer already exists in a transcript (totals, latest status, what was said or decided) → read_session or fetch_reply it YOURSELF; reading is passive and free. ask_thread OCCUPIES the thread and interrupts its queued work - use it only when the agent must DO something or REASON about something new.
 - IDS: copy ses_ ids character-for-character from THIS turn's lookup or route - never from memory; similar ids mean wrong-thread disasters. Every read and send echoes back which thread it touched: VERIFY it matches the owner's intent. Wrong send → tell the owner immediately, send that thread "disregard - sent in error", resend correctly.
 - PARALLEL: fire multiple asks/dispatches in one turn - never serialize the owner's requests. ask_thread returns quick answers (about 10s) directly; longer work returns immediately and the result arrives later as a [BACKGROUND UPDATE] - when one lands, the conversation had a pause: mention it naturally, tied to what was asked, short. After dispatching long work the owner cares about, schedule_check as a safety net - the owner has ADHD and will NOT remember to ask; that is your job. "Remind me" → schedule_check. Keep tool prompts under 80 words.
@@ -567,7 +568,9 @@ async function executeToolInner(name: string, args: Record<string, unknown>): Pr
             ms < 86400000 ? `, active ${Math.round(ms / 3600000)}h ago` :
             `, active ${Math.round(ms / 86400000)}d ago`
           const sub = /@\w+ subagent/i.test(h.title) ? ' [subagent offshoot]' : ''
-          return `${nicknames[h.id] ? `[${nicknames[h.id]}] ` : ''}${h.title} - session ${h.id} (project: ${h.dir.split('/').pop()}${age})${sub}`
+          const b = briefingCache.get(h.id)
+          const brief = b && Date.now() - b.at < 15 * 60 * 1000 ? ` | BRIEFING (${Math.max(1, Math.round((Date.now() - b.at) / 60000))}m old): ${b.s.slice(0, 220)}` : ''
+          return `${nicknames[h.id] ? `[${nicknames[h.id]}] ` : ''}${h.title} - session ${h.id} (project: ${h.dir.split('/').pop()}${age})${sub}${brief}`
         }).join('\n')
       : 'no matches in index - try search_sessions for a deep search'
   }
@@ -807,7 +810,97 @@ function persistHistory(): void {
   try { fs.writeFileSync(path.join(workspaceDir(), 'history.json'), JSON.stringify(history.slice(-40))) } catch {}
 }
 
-export async function think(userText: string): Promise<string> {
+type BrainOut = {
+  content: string
+  toolCalls: Array<{ id: string; function: { name: string; arguments: string } }>
+  timings?: { predicted_per_second?: number; prompt_per_second?: number }
+  usage?: { prompt_tokens?: number }
+  error?: string
+}
+async function brainRequest(url: string, body: Record<string, unknown>, onSentence?: (s: string) => void): Promise<BrainOut> {
+  const stream = !!onSentence
+  let res: Response
+  try {
+    res = await fetch(`${url}/v1/chat/completions`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json', connection: 'close' },
+      body: JSON.stringify({ ...body, ...(stream ? { stream: true } : {}) }),
+      signal: AbortSignal.timeout(120000),
+    })
+  } catch (e) {
+    return { content: '', toolCalls: [], error: String((e as Error)?.cause ?? e) }
+  }
+  if (!res.ok) return { content: '', toolCalls: [], error: `HTTP ${res.status} ${(await res.text().catch(() => '')).slice(0, 200)}` }
+  if (!stream) {
+    const d = (await res.json().catch(() => null)) as { choices?: Array<{ message?: { content?: string; tool_calls?: BrainOut['toolCalls'] } }>; timings?: BrainOut['timings']; usage?: BrainOut['usage'] } | null
+    const m = d?.choices?.[0]?.message
+    return { content: (m?.content ?? '').trim(), toolCalls: m?.tool_calls ?? [], timings: d?.timings, usage: d?.usage }
+  }
+  const toolCalls: BrainOut['toolCalls'] = []
+  let content = ''
+  let sentenceBuf = ''
+  let timings: BrainOut['timings']
+  let usage: BrainOut['usage']
+  const flush = (final: boolean): void => {
+    for (;;) {
+      const idx = sentenceBuf.search(/[.!?](\s|$)/)
+      if (idx === -1) break
+      const sent = sentenceBuf.slice(0, idx + 1).trim()
+      const rest = sentenceBuf.slice(idx + 1).replace(/^\s+/, '')
+      if (!final && sent.length < 25 && !rest) break
+      sentenceBuf = rest
+      if (sent.length >= 4) onSentence!(sent)
+      if (!sentenceBuf) break
+    }
+    if (final) {
+      const t = sentenceBuf.trim()
+      if (t.length >= 2) onSentence!(t)
+      sentenceBuf = ''
+    }
+  }
+  try {
+    const reader = res.body!.getReader()
+    const dec = new TextDecoder()
+    let carry = ''
+    for (;;) {
+      const { done, value } = await reader.read()
+      if (done) break
+      carry += dec.decode(value, { stream: true })
+      const lines = carry.split('\n')
+      carry = lines.pop() ?? ''
+      for (const line of lines) {
+        const l = line.trim()
+        if (!l.startsWith('data:')) continue
+        const payload = l.slice(5).trim()
+        if (payload === '[DONE]') continue
+        let j: { timings?: BrainOut['timings']; usage?: BrainOut['usage']; choices?: Array<{ delta?: { content?: string; tool_calls?: Array<{ index?: number; id?: string; function?: { name?: string; arguments?: string } }> } }> }
+        try { j = JSON.parse(payload) } catch { continue }
+        if (j.timings) timings = j.timings
+        if (j.usage) usage = j.usage
+        const delta = j.choices?.[0]?.delta
+        if (!delta) continue
+        if (delta.content) {
+          content += delta.content
+          sentenceBuf += delta.content
+          if (!toolCalls.length) flush(false)
+        }
+        for (const tc of delta.tool_calls ?? []) {
+          const i = tc.index ?? 0
+          toolCalls[i] ??= { id: tc.id ?? `tc${i}`, function: { name: '', arguments: '' } }
+          if (tc.id) toolCalls[i].id = tc.id
+          if (tc.function?.name) toolCalls[i].function.name += tc.function.name
+          if (tc.function?.arguments) toolCalls[i].function.arguments += tc.function.arguments
+        }
+      }
+    }
+  } catch (e) {
+    log('wendy: stream interrupted:', (e as Error).message)
+  }
+  if (!toolCalls.length) flush(true)
+  return { content: content.trim(), toolCalls: toolCalls.filter((t) => t.function.name), timings, usage }
+}
+
+export async function think(userText: string, onSentence?: (s: string) => void): Promise<string> {
   const url = brainUrl()
   if (!url) return "My reasoning engine isn't configured yet."
 
@@ -850,20 +943,16 @@ export async function think(userText: string): Promise<string> {
     if (lastLap) messages.push({ role: 'user', content: '(system: tool budget exhausted - no more tool calls available. Give the owner your best answer RIGHT NOW from what you already found. If something is still unfinished, say exactly what and offer to follow up.)' })
     // One retry after a short pause: idle keep-alive sockets to llama.cpp get
     // closed server-side and the first reuse fails instantly with a reset.
-    let res: Response | Error = new Error('unreachable')
+    let out: BrainOut = { content: '', toolCalls: [], error: 'unreachable' }
     for (let attempt = 0; attempt < 2; attempt++) {
-      res = await fetch(`${url.replace(/\/$/, '')}/v1/chat/completions`, {
-        method: 'POST',
-        headers: { 'content-type': 'application/json', connection: 'close' },
-        body: JSON.stringify({ model: 'local-fast', cache_prompt: true, messages, ...(lastLap ? {} : { tools: TOOLS }), max_tokens: 1200 }),
-        signal: AbortSignal.timeout(120000),
-      }).catch((e) => new Error(String((e as Error)?.cause ?? e)))
-      if (!(res instanceof Error) && res.ok) break
-      log(`wendy brain attempt ${attempt + 1} failed: ${res instanceof Error ? res.message : `HTTP ${res.status} ${(await res.text().catch(() => '')).slice(0, 200)}`}`)
+      out = await brainRequest(url.replace(/\/$/, ''), { model: 'local-fast', cache_prompt: true, messages, ...(lastLap ? {} : { tools: TOOLS }), max_tokens: 1200 }, onSentence)
+      if (!out.error) break
+      log(`wendy brain attempt ${attempt + 1} failed: ${out.error}`)
       await new Promise((r) => setTimeout(r, 1500))
     }
-    if (res instanceof Error || !res.ok) {
-      if (res instanceof Error && Date.now() - lastBrainWake > 180000) {
+    if (out.error) {
+      const netFail = !out.error.startsWith('HTTP')
+      if (netFail && Date.now() - lastBrainWake > 180000) {
         lastBrainWake = Date.now()
         const wake = loadConfig().brainWakeCommand
         if (!wake) return fail('My reasoning engine is unreachable and I have no wake command configured.')
@@ -874,16 +963,11 @@ export async function think(userText: string): Promise<string> {
       return fail('I hit an error reaching my reasoning engine - mind repeating that?')
     }
 
-    const d = (await res.json().catch(() => null)) as {
-      choices?: Array<{ message: Msg & { tool_calls?: Array<{ id: string; function: { name: string; arguments: string } }> } }>
-      timings?: { predicted_per_second?: number; prompt_per_second?: number }
-    } | null
-    if (d?.timings?.predicted_per_second) { lastBrainTps = Math.round(d.timings.predicted_per_second); lastBrainTpsAt = Date.now() }
-    const pu = (d as { usage?: { prompt_tokens?: number } } | null)?.usage?.prompt_tokens
-    if (pu) lastPromptTokens = pu
-    const msg = d?.choices?.[0]?.message
-    diag('brain', { hop, ms: Date.now() - hopT0, tps: d?.timings?.predicted_per_second ? Math.round(d.timings.predicted_per_second) : undefined, tools: msg?.tool_calls?.map((t) => (t as { function: { name: string } }).function.name) ?? [], text: (msg?.content ?? '').slice(0, 500), usage: (d as { usage?: unknown } | null)?.usage })
-    if (!msg) return fail('I got an empty response from my reasoning engine.')
+    if (out.timings?.predicted_per_second) { lastBrainTps = Math.round(out.timings.predicted_per_second); lastBrainTpsAt = Date.now() }
+    if (out.usage?.prompt_tokens) lastPromptTokens = out.usage.prompt_tokens
+    diag('brain', { hop, ms: Date.now() - hopT0, tps: out.timings?.predicted_per_second ? Math.round(out.timings.predicted_per_second) : undefined, tools: out.toolCalls.map((t) => t.function.name), text: out.content.slice(0, 500), usage: out.usage })
+    const msg = { content: out.content || null, tool_calls: out.toolCalls.length ? out.toolCalls : undefined }
+    if (!out.content && !out.toolCalls.length) return fail('I got an empty response from my reasoning engine.')
 
     if (msg.tool_calls?.length) {
       // Push a sanitized copy: re-sending reasoning_content wastes tokens and
@@ -1007,7 +1091,9 @@ async function refreshThreadIndexInner(): Promise<void> {
       const tail = await runKimaki(['session', 'read', e.id], 45000, 500_000, true)
       if (tail.startsWith('ERROR')) { announce(`[LOW] ${label} had activity.`, tierFor(e.id)); continue }
       if (!shouldAnnounce(e.id, tail)) continue
-      announce(await summarizeForVoice(label, recentMessages(tail, 3)), tierFor(e.id))
+      const brief = await summarizeForVoice(label, recentMessages(tail, 3))
+      briefingCache.set(e.id, { s: brief, at: Date.now() })
+      announce(brief, tierFor(e.id))
     }
     for (const e of changed.slice(3, 5)) {
       const prev = lastAnnounced.get(e.id)
@@ -1263,6 +1349,7 @@ function fingerprint(tail: string): string { return tail.slice(-3000) }
 // One memory across ALL announcement sources (watches, change feed, schedules):
 // if a session's content hasn't changed since we last told the owner, stay quiet.
 const lastAnnounced = new Map<string, { fp: string; at: number }>()
+const briefingCache = new Map<string, { s: string; at: number }>()
 function shouldAnnounce(id: string, tail: string): boolean {
   const fp = fingerprint(tail)
   const prev = lastAnnounced.get(id)
@@ -1295,12 +1382,20 @@ async function pollWatchlist(): Promise<void> {
       const first = !w.seen
       w.seen = true; w.idle = 0; w.fp = nfp
       diag('watch_delta', { id: w.id, label: w.label, first })
-      if (first && shouldAnnounce(w.id, tail)) announce(await summarizeForVoice(w.label, recentMessages(tail, 3)), 'interrupt')
+      if (first && shouldAnnounce(w.id, tail)) {
+        const brief = await summarizeForVoice(w.label, recentMessages(tail, 3))
+        briefingCache.set(w.id, { s: brief, at: Date.now() })
+        announce(brief, 'interrupt')
+      }
       else if (!first) w.more = true
     } else if (w.seen && (w.idle = (w.idle ?? 0) + 1) >= 2) {
       watchlist.splice(i, 1)
       diag('watch_done', { id: w.id, label: w.label, hadMore: !!w.more })
-      if (w.more && shouldAnnounce(w.id, tail)) announce(await summarizeForVoice(w.label + ' (finished)', recentMessages(tail, 3)), 'interrupt')
+      if (w.more && shouldAnnounce(w.id, tail)) {
+        const brief = await summarizeForVoice(w.label + ' (finished)', recentMessages(tail, 3))
+        briefingCache.set(w.id, { s: brief, at: Date.now() })
+        announce(brief, 'interrupt')
+      }
     }
   }
 }
@@ -1422,6 +1517,29 @@ async function speak(text: string): Promise<void> {
   await p
 }
 
+// - self-calibrating audio gates: learn the owner's real speech levels -
+const audioStatsPath = () => path.join(workspaceDir(), 'audio-stats.json')
+let rmsSamples: number[] = []
+try { rmsSamples = (JSON.parse(fs.readFileSync(audioStatsPath(), 'utf-8')) as { samples?: number[] }).samples ?? [] } catch {}
+let calRmsGate = 220
+let calBargeGate = 400
+function recalibrateGates(): void {
+  if (rmsSamples.length < 30) return
+  const sorted = [...rmsSamples].sort((a, b) => a - b)
+  const q = (p: number): number => sorted[Math.floor(p * (sorted.length - 1))]
+  calRmsGate = Math.min(Math.max(Math.round(0.4 * q(0.1)), 120), 350)
+  calBargeGate = Math.min(Math.max(Math.round(0.5 * q(0.5)), 300), 900)
+  diag('gates_calibrated', { samples: rmsSamples.length, rmsGate: calRmsGate, bargeGate: calBargeGate, p10: q(0.1), p50: q(0.5) })
+}
+recalibrateGates()
+function recordAcceptedRms(rms: number): void {
+  rmsSamples.push(Math.round(rms))
+  if (rmsSamples.length > 200) rmsSamples.splice(0, rmsSamples.length - 200)
+  if (rmsSamples.length % 10 === 0) {
+    try { fs.writeFileSync(audioStatsPath(), JSON.stringify({ samples: rmsSamples })) } catch {}
+    recalibrateGates()
+  }
+}
 let capturing = false
 let pendingUtterance: string | null = null
 let inputSeq = 0
@@ -1500,15 +1618,21 @@ async function runTurn(text: string): Promise<void> {
     log(`wendy heard: "${text.slice(0, 80)}"`)
     diag('owner_said', { text })
     const turnT0 = Date.now()
-    const reply = await think(text)
-    diag('turn_done', { ms: Date.now() - turnT0, reply: reply.slice(0, 800), superseded: seq !== inputSeq })
+    let streamedCount = 0
+    const streamer = text.startsWith('[') ? undefined : (sent: string): void => {
+      if (seq !== inputSeq || isSilenced()) return
+      streamedCount++
+      void speak(sent)
+    }
+    const reply = await think(text, streamer)
+    diag('turn_done', { ms: Date.now() - turnT0, reply: reply.slice(0, 800), superseded: seq !== inputSeq, streamed: streamedCount })
     if (!reply.trim()) return
     if (seq !== inputSeq) {
       log(`wendy: reply superseded by newer input - staying quiet: "${reply.slice(0, 60)}"`)
       return
     }
     log(`wendy says: "${reply.slice(0, 80)}"`)
-    void speak(reply)
+    if (!streamedCount) void speak(reply)
   } catch (e) {
     log('wendy: turn crashed:', (e as Error).message)
     diag('turn_crash', { err: String((e as Error).message).slice(0, 200) })
@@ -1553,7 +1677,7 @@ function listenTo(channel: VoiceBasedChannel, userId: string): void {
       // Duration alone false-triggered on fan hum / speaker bleed (seen live at RMS 48).
       if (!interrupted && bytes > 67200 && playerActive()) {
         const rmsLive = Math.sqrt(sumSqLive / (bytes / 8))
-        if (rmsLive >= 400) {
+        if (rmsLive >= calBargeGate) {
           interrupted = true
           interruptSpeech()
           log('wendy: barge-in - owner spoke over me, playback cut')
@@ -1576,7 +1700,7 @@ function listenTo(channel: VoiceBasedChannel, userId: string): void {
         const samples = pcm.length / 2
         for (let i = 0; i < pcm.length; i += 2) { const v = pcm.readInt16LE(i); sumSq += v * v }
         const rms = Math.sqrt(sumSq / samples)
-        if (rms < 220) { diag('dropped', { why: 'low_energy', rms: Math.round(rms) }); return }
+        if (rms < calRmsGate) { diag('dropped', { why: 'low_energy', rms: Math.round(rms), gate: calRmsGate }); return }
         const { text, noSpeech, logprob } = await stt(pcm48kMonoToWav(pcm))
         if (!text || text.length < 2) return
         // Silence wake-word: DETERMINISTIC - checked before every other gate so
@@ -1624,6 +1748,7 @@ function listenTo(channel: VoiceBasedChannel, userId: string): void {
             return
           }
         }
+        recordAcceptedRms(rms)
         void runTurn(text)
       })()
     })
