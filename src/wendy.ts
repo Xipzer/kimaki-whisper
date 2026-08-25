@@ -1485,16 +1485,24 @@ export const spokenTranscript: string[] = []
 let lastSpokenText = ''
 let lastSpeechEnd = 0
 let speechEpoch = 0
-function interruptSpeech(): void {
+const speechQueueTexts: string[] = []
+function interruptSpeech(): string[] {
+  const snapshot = [...speechQueueTexts]
   speechEpoch++
   try { player?.stop(true) } catch {}
+  return snapshot
 }
 let speakChain: Promise<void> = Promise.resolve()
 async function speak(text: string): Promise<void> {
   diag('speak', { text })
+  speechQueueTexts.push(text)
   spokenTranscript.push(text)
   if (spokenTranscript.length > 50) spokenTranscript.splice(0, 20)
   const run = async (): Promise<void> => {
+    const dequeue = (): void => { const i = speechQueueTexts.indexOf(text); if (i !== -1) speechQueueTexts.splice(i, 1) }
+    try { await runInner() } finally { dequeue() }
+  }
+  const runInner = async (): Promise<void> => {
     if (!connection || !player) return
     if (isSilenced() && Date.now() > silenceGrace) { log('wendy: speak suppressed (silenced)'); diag('speak_suppressed', { text: text.slice(0, 200), why: 'silenced' }); return }
     // Turn-taking: never START speaking while the owner is mid-utterance.
@@ -1673,6 +1681,7 @@ function listenTo(channel: VoiceBasedChannel, userId: string): void {
     let bytes = 0
     let sumSqLive = 0
     let interrupted = false
+    let cutSpeech: string[] = []
     opus.pipe(decoder)
     decoder.on('data', (c: Buffer) => {
       chunks.push(c)
@@ -1684,7 +1693,7 @@ function listenTo(channel: VoiceBasedChannel, userId: string): void {
         const rmsLive = Math.sqrt(sumSqLive / (bytes / 8))
         if (rmsLive >= calBargeGate) {
           interrupted = true
-          interruptSpeech()
+          cutSpeech = interruptSpeech()
           log('wendy: barge-in - owner spoke over me, playback cut')
           diag('barge_in', { rms: Math.round(rmsLive) })
         }
@@ -1697,17 +1706,25 @@ function listenTo(channel: VoiceBasedChannel, userId: string): void {
       clearTimeout(captureGuard)
       capturing = false
       void (async () => {
+        const resumeIfPhantom = (): void => {
+          if (interrupted && cutSpeech.length) {
+            log('wendy: barge-in was a phantom - resuming what I was saying')
+            diag('barge_in_resumed', { sentences: cutSpeech.length })
+            for (const t of cutSpeech) void speak(t)
+            cutSpeech = []
+          }
+        }
         const pcm = Buffer.concat(chunks)
         const minBytes = isSilenced() ? 24000 : 48000 // silenced: 0.25s so a bare "Wendy" wake-word gets through
-        if (pcm.length < minBytes) { diag('dropped', { why: 'too_short', bytes: pcm.length }); return }
+        if (pcm.length < minBytes) { diag('dropped', { why: 'too_short', bytes: pcm.length }); resumeIfPhantom(); return }
         // energy gate: breath/hum/keyboard is near-silent; real speech is not
         let sumSq = 0
         const samples = pcm.length / 2
         for (let i = 0; i < pcm.length; i += 2) { const v = pcm.readInt16LE(i); sumSq += v * v }
         const rms = Math.sqrt(sumSq / samples)
-        if (rms < calRmsGate) { diag('dropped', { why: 'low_energy', rms: Math.round(rms), gate: calRmsGate }); return }
+        if (rms < calRmsGate) { diag('dropped', { why: 'low_energy', rms: Math.round(rms), gate: calRmsGate }); resumeIfPhantom(); return }
         const { text, noSpeech, logprob } = await stt(pcm48kMonoToWav(pcm))
-        if (!text || text.length < 2) return
+        if (!text || text.length < 2) { resumeIfPhantom(); return }
         // Silence wake-word: DETERMINISTIC - checked before every other gate so
         // nothing (confidence, artifact, noise filters) can eat a wake attempt.
         if (isSilenced() && /\bw[ei]+nd[iy]e?\b/i.test(text)) {
@@ -1720,11 +1737,13 @@ function listenTo(channel: VoiceBasedChannel, userId: string): void {
         // and low avg_logprob. Real speech is typically logprob > -0.5, noSpeech < 0.3.
         if (noSpeech > 0.55 || logprob < -0.9) {
           diag('dropped', { text: text.slice(0, 60), why: 'low_confidence', noSpeech: +noSpeech.toFixed(2), logprob: +logprob.toFixed(2) })
+          resumeIfPhantom()
           return
         }
         // Stock ghost phrases need GOOD confidence to be believed at all
         if (/^(thank you|thanks|okay|ok|you|bye|yeah)[.!\s]*$/i.test(text.trim()) && (logprob < -0.4 || noSpeech > 0.25)) {
           diag('dropped', { text: text.trim(), why: 'stock_low_conf', noSpeech: +noSpeech.toFixed(2), logprob: +logprob.toFixed(2) })
+          resumeIfPhantom()
           return
         }
         // Whisper hallucination artifacts: subtitle credits, thanks-for-watching, url spam.
@@ -1733,6 +1752,7 @@ function listenTo(channel: VoiceBasedChannel, userId: string): void {
         if (ARTIFACT.test(text)) {
           log(`wendy: dropped whisper artifact "${text.trim().slice(0, 50)}"`)
           diag('dropped', { text: text.trim().slice(0, 80), why: 'artifact' })
+          resumeIfPhantom()
           return
         }
         // Stock phrases on noise/breath; drop for short clips.
@@ -1740,6 +1760,7 @@ function listenTo(channel: VoiceBasedChannel, userId: string): void {
         if (!isSilenced() && pcm.length < 2 * 96000 && NOISE.test(text.trim())) {
           log(`wendy: dropped noise artifact "${text.trim()}"`)
           diag('dropped', { text: text.trim(), why: 'noise' })
+          resumeIfPhantom()
           return
         }
         const BACKCHANNEL = /^(yeah|yep|yes|ok(ay)?|mhm+|uh-?huh|right|true|sure|lol|haha+|nice|cool|got it|go on|i see|wow)[.!,\s]*$/i
@@ -1750,6 +1771,7 @@ function listenTo(channel: VoiceBasedChannel, userId: string): void {
           if (!sheAsked && (overlapping || longIdle)) {
             log(`wendy: backchannel - not a turn: "${text.trim()}"`)
             diag('dropped', { text: text.trim(), why: 'backchannel' })
+            resumeIfPhantom()
             return
           }
         }
