@@ -17,7 +17,7 @@ import { spawn } from 'node:child_process'
 import { loadConfig, saveConfig, DEFAULT_PORT, log } from './config.js'
 import { MODEL_TIERS, tierById, recommendTier, installRuntime, getPipeline } from './transcribe/local-onnx.js'
 import { transcribeAudioBytes, startServer, isServerRunning, stopServer } from './server.js'
-import { initWendy } from './wendy.js'
+import { initWendy, wendySleep, wendyWake, wendySetDnd, wendySilence, wendyUnsilence, wendyStatus } from './wendy.js'
 
 function prefix(): string {
   return loadConfig().commandPrefix ?? 'whisper'
@@ -43,7 +43,53 @@ function buildCommands() {
     new SlashCommandBuilder().setName(`${p}-start`).setDescription('Start the sidecar transcription endpoint').setDMPermission(false).toJSON(),
     new SlashCommandBuilder().setName(`${p}-stop`).setDescription('Stop the sidecar transcription endpoint').setDMPermission(false).toJSON(),
     new SlashCommandBuilder().setName(`${p}-status`).setDescription('Sidecar transcription status').setDMPermission(false).toJSON(),
+    new SlashCommandBuilder().setName('wendy-wake').setDescription('Wake Wendy - she follows you into voice again').setDMPermission(false).toJSON(),
+    new SlashCommandBuilder().setName('wendy-sleep').setDescription('Put Wendy to sleep - no voice, no speaking, updates accumulate').setDMPermission(false).toJSON(),
+    new SlashCommandBuilder().setName('wendy-status').setDescription('Wendy vitals: mode, brain, queues, index').setDMPermission(false).toJSON(),
+    new SlashCommandBuilder().setName('wendy-dnd').setDescription('Toggle do-not-disturb for updates')
+      .addBooleanOption((o) => o.setName('on').setDescription('true = no update offers').setRequired(true)).setDMPermission(false).toJSON(),
+    new SlashCommandBuilder().setName('wendy-silence').setDescription('Silence Wendy for N minutes (0 lifts silence)')
+      .addIntegerOption((o) => o.setName('minutes').setDescription('duration; 0 = unsilence').setRequired(true)).setDMPermission(false).toJSON(),
+    new SlashCommandBuilder().setName('wendy-brain').setDescription('Control the LLM brain on the GPU host')
+      .addStringOption((o) => o.setName('action').setDescription('what to do').setRequired(true)
+        .addChoices({ name: 'start', value: 'start' }, { name: 'stop', value: 'stop' }, { name: 'restart', value: 'restart' })).setDMPermission(false).toJSON(),
+    new SlashCommandBuilder().setName('wendy-restart').setDescription('Restart the Wendy process (supervisor respawns it)').setDMPermission(false).toJSON(),
   ]
+}
+
+async function handleWendyCommand(i: ChatInputCommandInteraction): Promise<void> {
+  const owner = loadConfig().ownerId
+  if (owner && i.user.id !== owner) return safeReply(i, 'Wendy only answers to her owner.')
+  try { await i.deferReply({ flags: MessageFlags.Ephemeral }) } catch { return }
+  const name = i.commandName
+  if (name === 'wendy-wake') return safeReply(i, wendyWake())
+  if (name === 'wendy-sleep') return safeReply(i, wendySleep())
+  if (name === 'wendy-status') return safeReply(i, await wendyStatus())
+  if (name === 'wendy-dnd') return safeReply(i, wendySetDnd(Boolean(i.options.getBoolean('on'))))
+  if (name === 'wendy-silence') {
+    const m = i.options.getInteger('minutes') ?? 0
+    return safeReply(i, m <= 0 ? wendyUnsilence() : wendySilence(m))
+  }
+  if (name === 'wendy-brain') {
+    const action = i.options.getString('action')
+    const wake = loadConfig().brainWakeCommand
+    const cmds: Record<string, string> = {
+      start: wake ?? '',
+      stop: (wake ?? '').replace(/start\s+\w+$/, 'stop'),
+      restart: wake ? `${wake.replace(/start\s+\w+$/, 'stop')} ; sleep 3 ; ${wake}` : '',
+    }
+    const cmd = cmds[action ?? '']
+    if (!cmd) return safeReply(i, 'No brain wake command configured.')
+    execFile('bash', ['-c', cmd], { timeout: 120000, killSignal: 'SIGKILL' }, (err: Error | null, so: string, se: string) => {
+      void safeReply(i, err ? `brain ${action} failed: ${String(err.message).slice(0, 150)}` : `brain ${action}: done\n${(so || se || '').trim().split('\n').slice(-2).join('\n').slice(0, 300)}`)
+    })
+    return
+  }
+  if (name === 'wendy-restart') {
+    await safeReply(i, 'Restarting - back in ~20 seconds.')
+    setTimeout(() => process.exit(0), 800)
+    return
+  }
 }
 
 async function safeReply(i: ChatInputCommandInteraction, content: string): Promise<void> {
@@ -160,6 +206,7 @@ export async function startDiscord(token: string): Promise<void> {
     if (i.commandName === `${p}-start`) return void handleLifecycle(i, 'start')
     if (i.commandName === `${p}-stop`) return void handleLifecycle(i, 'stop')
     if (i.commandName === `${p}-status`) return void handleLifecycle(i, 'status')
+    if (i.commandName.startsWith('wendy-')) return void handleWendyCommand(i)
   })
 
   client.on('messageCreate', (m) => void handleRetranscribe(m))

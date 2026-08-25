@@ -1030,16 +1030,74 @@ const digestQueue: string[] = []
 let silencedUntil = 0
 const heldWhileSilent: string[] = []
 let dnd = false
+let dormant = false
+let clientRef: Client | null = null
 let askSnoozedUntil = 0
 const statePath = () => path.join(workspaceDir(), 'state.json')
 function saveModeState(): void {
-  try { fs.writeFileSync(statePath(), JSON.stringify({ silencedUntil, dnd })) } catch {}
+  try { fs.writeFileSync(statePath(), JSON.stringify({ silencedUntil, dnd, dormant })) } catch {}
 }
 try {
-  const st = JSON.parse(fs.readFileSync(statePath(), 'utf-8')) as { silencedUntil?: number; dnd?: boolean }
+  const st = JSON.parse(fs.readFileSync(statePath(), 'utf-8')) as { silencedUntil?: number; dnd?: boolean; dormant?: boolean }
   if (st.silencedUntil && st.silencedUntil > Date.now()) silencedUntil = st.silencedUntil
   dnd = Boolean(st.dnd)
+  dormant = Boolean(st.dormant)
 } catch {}
+
+// - external control surface (Discord slash commands) -
+export function wendySleep(): string {
+  dormant = true
+  saveModeState()
+  leave()
+  log('wendy: dormant (slash command)')
+  return 'Wendy is asleep - she will not join voice or speak until woken. Updates keep accumulating.'
+}
+export function wendyWake(): string {
+  dormant = false
+  saveModeState()
+  log('wendy: woken (slash command)')
+  // if the owner is in a VC right now, join them
+  const owner = ownerId()
+  if (clientRef && owner) {
+    for (const [, g] of clientRef.guilds.cache) {
+      const vs = g.voiceStates.cache.get(owner)
+      if (vs?.channel) { void joinAndServe(vs.channel, owner); return 'Wendy is awake - joining your voice channel now.' }
+    }
+  }
+  return 'Wendy is awake - she will follow you into voice when you join.'
+}
+export function wendySetDnd(on: boolean): string {
+  dnd = on
+  saveModeState()
+  return on ? 'DND on - updates accumulate silently (3+ high-priority items may still nudge).' : 'DND off - normal update flow.'
+}
+export function wendySilence(minutes: number): string {
+  const mins = Math.min(Math.max(minutes, 1), 480)
+  silencedUntil = Date.now() + mins * 60_000
+  saveModeState()
+  return `Silenced for ${mins} minutes - saying "Wendy" in voice wakes her early.`
+}
+export function wendyUnsilence(): string {
+  silencedUntil = 0
+  saveModeState()
+  return 'Silence lifted.'
+}
+export async function wendyStatus(): Promise<string> {
+  const brain = await fetch(`${(brainUrl() ?? '').replace(/\/$/, '')}/v1/models`, { signal: AbortSignal.timeout(4000) })
+    .then((r) => r.ok).catch(() => false)
+  const silLeft = silencedUntil > Date.now() ? Math.ceil((silencedUntil - Date.now()) / 60000) : 0
+  const idxAge = lastIndexRefresh ? Math.round((Date.now() - lastIndexRefresh) / 60000) : -1
+  const highs = highCount()
+  const queued = digestQueue.length + convoEvents.length + pendingAnnouncements.length + heldWhileSilent.length
+  return [
+    `mode: ${dormant ? 'ASLEEP' : connection ? 'in voice' : 'awake, not in voice'}`,
+    `brain: ${brain ? 'up' : 'DOWN'}`,
+    `dnd: ${dnd ? 'on' : 'off'}${silLeft ? ` | silenced ${silLeft}m left` : ''}`,
+    `updates queued: ${queued}${highs ? ` (${highs} high)` : ''}`,
+    `index: ${threadIndex.length} threads${idxAge >= 0 ? `, refreshed ${idxAge}m ago` : ''}`,
+    `watching: ${watchlist.length} thread(s), ${schedules.length} scheduled check(s)`,
+  ].join('\n')
+}
 let lastDeliveredAt = 0
 let lastHighNudge = 0
 function highCount(): number {
@@ -1471,8 +1529,10 @@ export function initWendy(client: Client): void {
     log('wendy: disabled (set ownerId + brainUrl in config to enable)')
     return
   }
+  clientRef = client
   client.on('voiceStateUpdate', (oldState: VoiceState, newState: VoiceState) => {
     if (newState.member?.user.id !== owner) return
+    if (dormant) return
     if (newState.channel && newState.channelId !== oldState.channelId) {
       void joinAndServe(newState.channel, owner)
     } else if (!newState.channel && connection) {
