@@ -812,7 +812,7 @@ function persistHistory(): void {
 
 type BrainOut = {
   content: string
-  toolCalls: Array<{ id: string; function: { name: string; arguments: string } }>
+  toolCalls: Array<{ id: string; type?: string; function: { name: string; arguments: string } }>
   timings?: { predicted_per_second?: number; prompt_per_second?: number }
   usage?: { prompt_tokens?: number }
   error?: string
@@ -886,7 +886,7 @@ async function brainRequest(url: string, body: Record<string, unknown>, onSenten
         }
         for (const tc of delta.tool_calls ?? []) {
           const i = tc.index ?? 0
-          toolCalls[i] ??= { id: tc.id ?? `tc${i}`, function: { name: '', arguments: '' } }
+          toolCalls[i] ??= { id: tc.id ?? `tc${i}`, type: 'function', function: { name: '', arguments: '' } }
           if (tc.id) toolCalls[i].id = tc.id
           if (tc.function?.name) toolCalls[i].function.name += tc.function.name
           if (tc.function?.arguments) toolCalls[i].function.arguments += tc.function.arguments
