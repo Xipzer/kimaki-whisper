@@ -344,6 +344,14 @@ const TOOLS = [
   {
     type: 'function',
     function: {
+      name: 'brain_health',
+      description: 'Measure your own reasoning speed right now: runs a timed probe and reports tokens/sec with a verdict (full speed / degraded / likely spilled into system memory). Use when the owner asks if you are slow, laggy, or overflowing.',
+      parameters: { type: 'object', properties: {} },
+    },
+  },
+  {
+    type: 'function',
+    function: {
       name: 'index_pulse',
       description: 'Ambient view of the whole organisation: which threads are active RIGHT NOW, which worked recently, which went quiet mid-task. THE tool for broad questions like "what is going on", "anything stuck", "how are things looking".',
       parameters: { type: 'object', properties: {} },
@@ -624,6 +632,22 @@ async function executeToolInner(name: string, args: Record<string, unknown>): Pr
     saveSchedules()
     return `scheduled - will ${sid ? 'check that thread' : 'remind the owner'} in ${mins} minutes`
   }
+  if (name === 'brain_health') {
+    const url = brainUrl()
+    if (!url) return 'ERROR: no brain configured'
+    const t0 = Date.now()
+    const res = await fetch(`${url.replace(/\/$/, '')}/v1/chat/completions`, {
+      method: 'POST', headers: { 'content-type': 'application/json', connection: 'close' },
+      body: JSON.stringify({ model: 'local-fast', max_tokens: 80, messages: [{ role: 'user', content: 'Count from one to twenty, words, comma separated.' }] }),
+      signal: AbortSignal.timeout(60000),
+    }).catch(() => null)
+    if (!res?.ok) return `ERROR: brain unreachable or errored (HTTP ${res?.status ?? 'network'})`
+    const d = await res.json().catch(() => null) as { usage?: { completion_tokens?: number }; timings?: { predicted_per_second?: number; prompt_per_second?: number } } | null
+    const wall = Date.now() - t0
+    const tps = d?.timings?.predicted_per_second ?? (d?.usage?.completion_tokens ? d.usage.completion_tokens / (wall / 1000) : 0)
+    const verdict = tps >= 90 ? 'full speed - nothing has spilled' : tps >= 25 ? 'DEGRADED - possible partial spill into shared memory or thermal issue' : 'CRITICAL - almost certainly spilled into system memory or running on CPU'
+    return `generation ${Math.round(tps)} tok/s (prefill ${Math.round(d?.timings?.prompt_per_second ?? 0)} tok/s, ${wall}ms wall) - ${verdict}. Baseline on this rig is ~120 tok/s.`
+  }
   if (name === 'index_pulse') {
     const now = Date.now()
     const withAge = threadIndex.filter((e) => e.updated).map((e) => ({ e, age: now - (e.updated ?? 0) }))
@@ -794,9 +818,11 @@ export async function think(userText: string): Promise<string> {
 
     const d = (await res.json().catch(() => null)) as {
       choices?: Array<{ message: Msg & { tool_calls?: Array<{ id: string; function: { name: string; arguments: string } }> } }>
+      timings?: { predicted_per_second?: number; prompt_per_second?: number }
     } | null
+    if (d?.timings?.predicted_per_second) { lastBrainTps = Math.round(d.timings.predicted_per_second); lastBrainTpsAt = Date.now() }
     const msg = d?.choices?.[0]?.message
-    diag('brain', { hop, ms: Date.now() - hopT0, tools: msg?.tool_calls?.map((t) => (t as { function: { name: string } }).function.name) ?? [], text: (msg?.content ?? '').slice(0, 500), usage: (d as { usage?: unknown } | null)?.usage })
+    diag('brain', { hop, ms: Date.now() - hopT0, tps: d?.timings?.predicted_per_second ? Math.round(d.timings.predicted_per_second) : undefined, tools: msg?.tool_calls?.map((t) => (t as { function: { name: string } }).function.name) ?? [], text: (msg?.content ?? '').slice(0, 500), usage: (d as { usage?: unknown } | null)?.usage })
     if (!msg) return fail('I got an empty response from my reasoning engine.')
 
     if (msg.tool_calls?.length) {
@@ -855,6 +881,8 @@ let lastBrainWake = 0
 type ThreadIndexEntry = { id: string; title: string; dir: string; updated?: number }
 let threadIndex: ThreadIndexEntry[] = []
 let lastIndexRefresh = 0
+let lastBrainTps = 0
+let lastBrainTpsAt = 0
 let indexProjectCount = 0
 // ── Wendy's soft-rename map: session id → short spoken nickname ──
 const nicknamesPath = () => path.join(workspaceDir(), 'nicknames.json')
@@ -1091,7 +1119,7 @@ export async function wendyStatus(): Promise<string> {
   const queued = digestQueue.length + convoEvents.length + pendingAnnouncements.length + heldWhileSilent.length
   return [
     `mode: ${dormant ? 'ASLEEP' : connection ? 'in voice' : 'awake, not in voice'}`,
-    `brain: ${brain ? 'up' : 'DOWN'}`,
+    `brain: ${brain ? 'up' : 'DOWN'}${lastBrainTps ? ` | last speed ${lastBrainTps} tok/s (${Math.round((Date.now() - lastBrainTpsAt) / 60000)}m ago)` : ''}`,
     `dnd: ${dnd ? 'on' : 'off'}${silLeft ? ` | silenced ${silLeft}m left` : ''}`,
     `updates queued: ${queued}${highs ? ` (${highs} high)` : ''}`,
     `index: ${threadIndex.length} threads${idxAge >= 0 ? `, refreshed ${idxAge}m ago` : ''}`,
