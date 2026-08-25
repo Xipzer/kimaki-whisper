@@ -2,6 +2,7 @@
 // multiple sessions per bot; Kimaki silently ignores slash commands it doesn't
 // recognize (verified: bare `return` in its interaction handler), so the sidecar
 // can own /whisper-* without any Kimaki changes.
+import { execFile } from 'node:child_process'
 import {
   Client,
   GatewayIntentBits,
