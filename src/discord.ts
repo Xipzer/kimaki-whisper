@@ -74,10 +74,11 @@ async function handleWendyCommand(i: ChatInputCommandInteraction): Promise<void>
   if (name === 'wendy-brain') {
     const action = i.options.getString('action')
     const wake = loadConfig().brainWakeCommand
+    const stopCmd = (wake ?? '').replace(/start\s+\w+/, 'stop')
     const cmds: Record<string, string> = {
       start: wake ?? '',
-      stop: (wake ?? '').replace(/start\s+\w+$/, 'stop'),
-      restart: wake ? `${wake.replace(/start\s+\w+$/, 'stop')} ; sleep 3 ; ${wake}` : '',
+      stop: stopCmd !== wake ? stopCmd : '',
+      restart: wake && stopCmd !== wake ? `${stopCmd} ; sleep 3 ; ${wake}` : '',
     }
     const cmd = cmds[action ?? '']
     if (!cmd) return safeReply(i, 'No brain wake command configured.')
