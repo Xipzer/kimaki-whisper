@@ -821,6 +821,8 @@ export async function think(userText: string): Promise<string> {
       timings?: { predicted_per_second?: number; prompt_per_second?: number }
     } | null
     if (d?.timings?.predicted_per_second) { lastBrainTps = Math.round(d.timings.predicted_per_second); lastBrainTpsAt = Date.now() }
+    const pu = (d as { usage?: { prompt_tokens?: number } } | null)?.usage?.prompt_tokens
+    if (pu) lastPromptTokens = pu
     const msg = d?.choices?.[0]?.message
     diag('brain', { hop, ms: Date.now() - hopT0, tps: d?.timings?.predicted_per_second ? Math.round(d.timings.predicted_per_second) : undefined, tools: msg?.tool_calls?.map((t) => (t as { function: { name: string } }).function.name) ?? [], text: (msg?.content ?? '').slice(0, 500), usage: (d as { usage?: unknown } | null)?.usage })
     if (!msg) return fail('I got an empty response from my reasoning engine.')
@@ -883,6 +885,7 @@ let threadIndex: ThreadIndexEntry[] = []
 let lastIndexRefresh = 0
 let lastBrainTps = 0
 let lastBrainTpsAt = 0
+let lastPromptTokens = 0
 let indexProjectCount = 0
 // ── Wendy's soft-rename map: session id → short spoken nickname ──
 const nicknamesPath = () => path.join(workspaceDir(), 'nicknames.json')
@@ -1122,6 +1125,7 @@ export async function wendyStatus(): Promise<string> {
     `brain: ${brain ? 'up' : 'DOWN'}${lastBrainTps ? ` | last speed ${lastBrainTps} tok/s (${Math.round((Date.now() - lastBrainTpsAt) / 60000)}m ago)` : ''}`,
     `dnd: ${dnd ? 'on' : 'off'}${silLeft ? ` | silenced ${silLeft}m left` : ''}`,
     `updates queued: ${queued}${highs ? ` (${highs} high)` : ''}`,
+    `context: last turn ${lastPromptTokens ? `${(lastPromptTokens / 1000).toFixed(1)}K / 196K (${(lastPromptTokens / 196608 * 100).toFixed(1)}%)` : 'no data yet'}`,
     `index: ${threadIndex.length} threads${idxAge >= 0 ? `, refreshed ${idxAge}m ago` : ''}`,
     `watching: ${watchlist.length} thread(s), ${schedules.length} scheduled check(s)`,
   ].join('\n')
