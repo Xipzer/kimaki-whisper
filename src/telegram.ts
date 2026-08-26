@@ -371,7 +371,7 @@ export function telegramChatDigest(target: string): string {
 }
 
 // - person profiles: cross-chat, persistent, auto-consolidated -
-type Profile = { name: string; handle?: string; firstSeen: number; lastSeen: number; interactions: number; sinceRefresh: number; profile: string; recent: string[] }
+type Profile = { name: string; handle?: string; firstSeen: number; lastSeen: number; interactions: number; sinceRefresh: number; profile: string; recent: string[]; tone?: 'professional' | 'casual' | 'banter' }
 const membersPath = () => path.join(tgDir(), 'chat-members.json')
 let chatMembers: Record<string, Record<string, { name: string; username?: string }>> = {}
 try { chatMembers = JSON.parse(fs.readFileSync(membersPath(), 'utf-8')) } catch {}
@@ -410,6 +410,28 @@ function noteInteraction(m: TgMsg, chatTitle: string): void {
   if (p.recent.length > 25) p.recent.splice(0, p.recent.length - 25)
   profiles[key] = p
   saveProfiles()
+}
+
+/** Register to use with a person in a chat: an explicit chat setting wins,
+ *  otherwise their own known register travels with them across chats. */
+export function telegramEffectiveTone(chatId: string, personKeyOrName?: string): string {
+  const cp = policies[chatId]
+  if (cp?.toneSetByOwner) return cp.tone
+  if (personKeyOrName) {
+    const q = personKeyOrName.toLowerCase().replace(/^@/, '')
+    const hit = Object.values(profiles).find((p) => p.name.toLowerCase().includes(q) || (p.handle ?? '').toLowerCase() === q)
+    if (hit?.tone) return hit.tone
+  }
+  return cp?.tone ?? 'professional'
+}
+/** Owner: set how you talk to a PERSON, anywhere. */
+export function telegramSetPersonTone(query: string, tone: string): string {
+  const q = query.toLowerCase().replace(/^@/, '')
+  const hit = Object.entries(profiles).find(([k, p]) => k === q || p.name.toLowerCase().includes(q) || (p.handle ?? '').toLowerCase() === q)
+  if (!hit) return `ERROR: no profile for "${query}" yet`
+  hit[1].tone = (['professional', 'casual', 'banter'].includes(tone) ? tone : 'professional') as Profile['tone']
+  saveProfiles()
+  return `you now talk to ${hit[1].name} in ${tone} register wherever you meet them`
 }
 
 /** Her working knowledge of a person, for injection when replying to them. */
@@ -676,6 +698,7 @@ type ChatPolicy = {
   tone: 'professional' | 'casual' | 'banter'
   remaining: number          // autonomous replies left (0 = confirm, -1 = INDEFINITE)
   person?: string            // optional: restrict autonomy to one sender (username or name)
+  toneSetByOwner?: boolean                        // explicit owner instruction vs default
   privacy?: 'open' | 'discreet' | 'silent'        // how much may be spoken aloud
   notify?: 'immediate' | 'threshold' | 'ignore'   // how chat activity surfaces (default threshold)
   threshold?: number         // messages that must build up before a summary (default 8)
@@ -714,6 +737,11 @@ export function telegramGrant(target: string, count: number, tone?: string, scop
     person: person ?? prev?.person,
     sent: prev?.sent ?? [],
   }
+  if (person && tone) {
+    const pk = person.toLowerCase().replace(/^@/, '')
+    const hit = Object.entries(profiles).find(([k, pr]) => k === pk || pr.name.toLowerCase().includes(pk) || (pr.handle ?? '').toLowerCase() === pk)
+    if (hit) { hit[1].tone = t; saveProfiles() }
+  }
   savePolicies()
   if (count < 0) return `granted: INDEFINITE autonomous replies in "${chat.title}"${person ? ` with ${person}` : ''} (tone: ${t}). No expiry, no counter - you keep him in the loop with periodic summaries and still stop for anything consequential.`
   return count > 0
@@ -727,7 +755,7 @@ export function telegramSetTone(target: string, tone: string): string {
   if (!chat) return ambiguityError(target)
   const id = String(chat.id)
   const t = (['professional', 'casual', 'banter'].includes(tone) ? tone : 'professional') as ChatPolicy['tone']
-  policies[id] = { ...(policies[id] ?? { title: chat.title, remaining: 0, grantedAt: 0, expiresAt: 0, scope: '', sent: [] }), title: chat.title, tone: t }
+  policies[id] = { ...(policies[id] ?? { title: chat.title, remaining: 0, grantedAt: 0, expiresAt: 0, scope: '', sent: [] }), title: chat.title, tone: t, toneSetByOwner: true }
   savePolicies()
   return `"${chat.title}" tone set to ${t}`
 }
