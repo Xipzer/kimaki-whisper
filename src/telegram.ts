@@ -296,7 +296,7 @@ export function telegramDrainChat(chatId: string): string {
 /** Owner-facing: set how a chat surfaces. */
 export function telegramWatchMode(target: string, mode: string, threshold?: number): string {
   const chat = resolveChat(target)
-  if (!chat) return `ERROR: no known chat matching "${target}"`
+  if (!chat) return ambiguityError(target)
   const id = String(chat.id)
   const p = policies[id] ?? { title: chat.title, tone: 'professional' as const, remaining: 0, grantedAt: 0, expiresAt: 0, scope: '', sent: [] }
   p.title = chat.title
@@ -313,7 +313,7 @@ export function telegramWatchMode(target: string, mode: string, threshold?: numb
 /** On-demand: what's been happening in a chat right now. */
 export function telegramChatDigest(target: string): string {
   const chat = resolveChat(target)
-  if (!chat) return `ERROR: no known chat matching "${target}"`
+  if (!chat) return ambiguityError(target)
   const p = policies[String(chat.id)]
   const buf = p?.unread ?? []
   if (!buf.length) return `nothing new in "${chat.title}" since your last summary`
@@ -488,7 +488,7 @@ export async function telegramWho(query: string, chatHint?: string): Promise<str
 /** Who is known to be in a given chat (people who have spoken there). */
 export function telegramChatMembers(target: string): string {
   const chat = resolveChat(target)
-  if (!chat) return `ERROR: no known chat matching "${target}"`
+  if (!chat) return ambiguityError(target)
   const m = chatMembers[String(chat.id)] ?? {}
   const list = Object.values(m)
   if (!list.length) return `nobody has spoken in "${chat.title}" since I started watching - I cannot confirm who is in there`
@@ -503,19 +503,31 @@ export function telegramRoster(): string {
 }
 
 /** Resolve a chat by name fragment or id across known DMs and groups. */
-function resolveChat(query: string): { id: number; title: string; isGroup: boolean } | null {
+type ChatRef = { id: number; title: string; isGroup: boolean }
+function resolveChatAll(query: string): ChatRef[] {
   const q = query.trim().toLowerCase().replace(/^@/, '')
   if (/^-?\d{5,}$/.test(q)) {
     const g = seenGroups[q]
-    return { id: Number(q), title: g?.title ?? q, isGroup: q.startsWith('-') }
+    return [{ id: Number(q), title: g?.title ?? q, isGroup: q.startsWith('-') }]
   }
-  for (const [id, g] of Object.entries(seenGroups)) {
-    if (g.title.toLowerCase().includes(q)) return { id: Number(id), title: g.title, isGroup: true }
-  }
-  for (const [id, c] of Object.entries(contacts)) {
-    if (c.name.toLowerCase().includes(q)) return { id: Number(id), title: c.name, isGroup: false }
-  }
-  return null
+  const groups = Object.entries(seenGroups).map(([id, g]) => ({ id: Number(id), title: g.title, isGroup: true }))
+  const dms = Object.entries(contacts).map(([id, c]) => ({ id: Number(id), title: c.name, isGroup: false }))
+  const all = [...groups, ...dms]
+  // exact title match always wins - "BaseStonk" must not silently become "BaseStonk Gang Gang"
+  const exact = all.filter((c) => c.title.toLowerCase() === q)
+  if (exact.length === 1) return exact
+  if (exact.length > 1) return exact
+  return all.filter((c) => c.title.toLowerCase().includes(q))
+}
+function resolveChat(query: string): ChatRef | null {
+  const hits = resolveChatAll(query)
+  return hits.length === 1 ? hits[0] : null
+}
+/** Human-readable reason a target could not be pinned down. */
+function ambiguityError(query: string): string {
+  const hits = resolveChatAll(query)
+  if (!hits.length) return `ERROR: no known chat matching "${query}" - telegram_groups list shows what exists`
+  return `AMBIGUOUS: "${query}" matches ${hits.length} chats - ${hits.map((h) => `"${h.title}"`).join(', ')}. Name the exact chat (or use its id); nothing was sent.`
 }
 
 /** Hard outbound scrubber. Doctrine can be social-engineered; this cannot.
@@ -548,9 +560,9 @@ export async function telegramSend(target: string, html: string): Promise<string
   const token = (loadConfig() as TgConfig).telegramBotToken
   if (!token) return 'ERROR: no telegram token configured'
   const chat = resolveChat(target)
-  if (!chat) return `ERROR: no known chat matching "${target}" - use telegram_groups list or a numeric id`
+  if (!chat) return ambiguityError(target)
   // never emit LLM-smell punctuation
-  let out = html.replace(/\u2014/g, '-').replace(/\u2013/g, '-')
+  let out = html.replace(/\u2014/g, '-').replace(/\u2013/g, '-').replace(/<@([A-Za-z0-9_]+)>/g, '@$1')
   // fix @mentions: resolve display names to real handles WITHOUT swallowing the
   // sentence after them (the greedy-space bug), and guarantee a trailing space.
   const findByName = (q: string) => Object.values(contacts).find(
@@ -637,7 +649,7 @@ export function telegramPolicyFor(chatId: string): ChatPolicy | null {
 /** Owner grants (or revokes) autonomous replying for one chat. */
 export function telegramGrant(target: string, count: number, tone?: string, scope?: string, hours = 12, person?: string): string {
   const chat = resolveChat(target)
-  if (!chat) return `ERROR: no known chat matching "${target}"`
+  if (!chat) return ambiguityError(target)
   const id = String(chat.id)
   const prev = policies[id]
   const t = (['professional', 'casual', 'banter'].includes(String(tone)) ? String(tone) : prev?.tone ?? 'professional') as ChatPolicy['tone']
@@ -661,7 +673,7 @@ export function telegramGrant(target: string, count: number, tone?: string, scop
 /** Set tone register without touching the reply budget. */
 export function telegramSetTone(target: string, tone: string): string {
   const chat = resolveChat(target)
-  if (!chat) return `ERROR: no known chat matching "${target}"`
+  if (!chat) return ambiguityError(target)
   const id = String(chat.id)
   const t = (['professional', 'casual', 'banter'].includes(tone) ? tone : 'professional') as ChatPolicy['tone']
   policies[id] = { ...(policies[id] ?? { title: chat.title, remaining: 0, grantedAt: 0, expiresAt: 0, scope: '', sent: [] }), title: chat.title, tone: t }
