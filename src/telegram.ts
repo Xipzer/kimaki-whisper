@@ -293,6 +293,44 @@ export function telegramDrainChat(chatId: string): string {
   return msgs.map((m) => `${m.from.name}: ${m.text.slice(0, 200)}`).join('\n')
 }
 
+// global "I'm on speaker" switch - discretion everywhere regardless of per-chat setting
+let globalDiscreet = false
+try { globalDiscreet = !!(JSON.parse(fs.readFileSync(statePath(), 'utf-8')) as { globalDiscreet?: boolean }).globalDiscreet } catch {}
+export function telegramPrivacyMode(on: boolean): string {
+  globalDiscreet = on
+  try {
+    const st = JSON.parse(fs.readFileSync(statePath(), 'utf-8')) as Record<string, unknown>
+    fs.writeFileSync(statePath(), JSON.stringify({ ...st, globalDiscreet: on }))
+  } catch {}
+  return on
+    ? 'discreet mode ON - you name who messaged and roughly why it matters, never the actual content, in every chat'
+    : 'discreet mode OFF - normal per-chat privacy levels apply again'
+}
+/** Effective privacy for a chat, honouring the global switch. */
+export function telegramPrivacyFor(chatId: string): 'open' | 'discreet' | 'silent' {
+  const p = policies[chatId]?.privacy ?? 'open'
+  if (p === 'silent') return 'silent'
+  return globalDiscreet ? 'discreet' : p
+}
+export function telegramSetPrivacy(target: string, level: string): string {
+  const chat = resolveChat(target)
+  if (!chat) return ambiguityError(target)
+  const id = String(chat.id)
+  const p = policies[id] ?? { title: chat.title, tone: 'professional' as const, remaining: 0, grantedAt: 0, expiresAt: 0, scope: '', sent: [] }
+  p.title = chat.title
+  p.privacy = (['open', 'discreet', 'silent'].includes(level) ? level : 'open') as ChatPolicy['privacy']
+  policies[id] = p
+  savePolicies()
+  return level === 'silent' ? `"${chat.title}" is now SILENT - nothing from it is spoken aloud at all; it waits until he asks`
+    : level === 'discreet' ? `"${chat.title}" is now DISCREET - you say who messaged and that it may matter, never the topic or content`
+    : `"${chat.title}" is now OPEN - normal summaries aloud`
+}
+export function telegramPrivacyStatus(): string {
+  const rows = Object.entries(policies).filter(([, p]) => p.privacy && p.privacy !== 'open')
+    .map(([, p]) => `"${p.title}": ${p.privacy}`)
+  return `${globalDiscreet ? 'GLOBAL DISCREET MODE: ON (everything is discreet)' : 'global discreet mode: off'}${rows.length ? '\n' + rows.join('\n') : '\nno per-chat privacy overrides'}`
+}
+
 /** Owner-facing: set how a chat surfaces. */
 export function telegramWatchMode(target: string, mode: string, threshold?: number): string {
   const chat = resolveChat(target)
@@ -626,6 +664,7 @@ type ChatPolicy = {
   tone: 'professional' | 'casual' | 'banter'
   remaining: number          // autonomous replies left (0 = confirm, -1 = INDEFINITE)
   person?: string            // optional: restrict autonomy to one sender (username or name)
+  privacy?: 'open' | 'discreet' | 'silent'        // how much may be spoken aloud
   notify?: 'immediate' | 'threshold' | 'ignore'   // how chat activity surfaces (default threshold)
   threshold?: number         // messages that must build up before a summary (default 8)
   unread?: TgMsg[]           // buffer since her last summary of this chat
