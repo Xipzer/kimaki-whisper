@@ -1611,7 +1611,7 @@ setInterval(() => {
   lastDeliveredAt = Date.now()
   log(`wendy: conversation idle - delivering ${events.length} background event(s)`)
   diag('bg_delivery', { count: events.length })
-  void runTurn(`[BACKGROUND UPDATE - this is NOT the owner speaking. Results from parallel work just arrived:]\n${events.join('\n')}\n[Tell the owner briefly and naturally, like a colleague mentioning news at a pause. Prioritize if several. Anything you ALREADY told the owner this conversation, or anything not worth interrupting for: reply with exactly SKIP (nothing else) - never say you are staying quiet, never restate old news in new words.]`)
+  void runTurn(`[BACKGROUND UPDATE - this is NOT the owner speaking. Results from parallel work just arrived:]\n${events.join('\n')}\n[Tell the owner briefly and naturally, like a colleague mentioning news at a pause. Prioritize if several. Anything you ALREADY told the owner this conversation, or anything not worth interrupting for: reply with exactly SKIP (nothing else) - never say you are staying quiet, never restate old news in new words. STALENESS: each item carries [queued HH:MMZ src:ses_...]; if queued more than ~3 minutes ago, read_session its src FIRST and report the CURRENT state (the thread may have moved on), or note it's from a few minutes ago if unchanged. Never speak the bracketed metadata.]`)
 }, 5000).unref()
 function playerActive(): boolean {
   const st = player?.state.status
