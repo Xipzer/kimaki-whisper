@@ -145,6 +145,7 @@ MODE 2 - ACTION (when asked to do or fetch something): reliability is everything
 - FRESHNESS: a status update is the transcript you JUST read, never conversational memory - fresh reads override what you said minutes ago (lead with the correction: "actually, it's moved on…"). If the tail references decisions or bugs you don't understand, dig deeper - read_session with chars up to 30000, or the related threads it mentions - until you can say what is happening NOW and why, newest development first.
 - ERRORS: if a tool fails or your reasoning engine hiccups, TELL the owner plainly - what broke and what you're doing instead. Never gloss over a failure, never pretend a result came back, never silently retry into a different answer. If your history shows you errored last turn, acknowledge it before moving on ("sorry, I glitched there - here's the real answer").
 - YOUR OWN LONG WORK: when a task needs YOUR sustained effort (deep multi-repo analysis, org-wide research) rather than a thread's, self_task it - you'll work it autonomously between conversation and the result arrives as an update. Never grind long work in-turn; the foreground belongs to the owner. self_tasks_status shows progress if asked.
+- MODEL SELECTION: spawned threads default to local (your own LLM - it SHARES your compute, so heavy agents can slow your conversation). Pick opus for hard/long work or when you want your compute free; fable for quick cheap tasks. If you notice yourself slowing down (or expect to), switch_thread_model moves running threads off local onto opus on the fly. ONLY local/opus/fable exist - never attempt any other model name, especially any other local model: that would kill your own brain.
 - SPAWNING AGENTS: spawn_agent creates full agents in the #wendy Discord channel - the owner can read every thread and reply into them directly (your watchers will pick up their input). Hard cap on concurrent agents; check spawns_status before spawning, collect before expanding. The spawn ledger is your authoritative memory of everything you've delegated - you can never lose track of an agent.
 - FOLLOW-THROUGH: never end a turn on a promise. Say → do → report in the SAME turn (use say to narrate while you work). If the owner repeats a request, never "I already told you" - re-verify and answer again, at most "quick recap:".
 
@@ -367,8 +368,24 @@ const TOOLS = [
         properties: {
           goal: { type: 'string', description: 'Complete self-contained task for the agent' },
           label: { type: 'string', description: 'Short spoken name for this agent, e.g. "repo scanner"' },
+          model: { type: 'string', enum: ['local', 'opus', 'fable'], description: 'local = your own LLM (default; shares YOUR compute - conversation may slow while it works), opus = strongest cloud model, fable = fast cloud model' },
         },
         required: ['goal'],
+      },
+    },
+  },
+  {
+    type: 'function',
+    function: {
+      name: 'switch_thread_model',
+      description: 'Switch an existing thread to a different model on the fly - e.g. move a thread OFF your own LLM (local) onto opus to free up your compute when you are slowing down or expect load. Only local, opus, or fable exist; NOTHING else is permitted (other local models would kill your own brain - fragile).',
+      parameters: {
+        type: 'object',
+        properties: {
+          session_id: { type: 'string', description: 'ses_... to switch' },
+          model: { type: 'string', enum: ['local', 'opus', 'fable'] },
+        },
+        required: ['session_id', 'model'],
       },
     },
   },
@@ -732,16 +749,32 @@ async function executeToolInner(name: string, args: Record<string, unknown>): Pr
     const goal = String(args.goal ?? '').trim()
     if (goal.length < 10) return 'ERROR: goal too vague'
     const label = String(args.label ?? goal.slice(0, 40))
+    const mdl = resolveSpawnModel(args.model as string | undefined)
+    if (!mdl) return 'ERROR: unknown model - only local, opus, or fable are permitted'
     const out = await runKimaki([
-      'send', '--channel', cfg.wendyChannelId, '--prompt', goal,
+      'send', '--channel', cfg.wendyChannelId, '--model', mdl.id, '--prompt', goal,
       ...(ownerId() ? ['--user', ownerId()!] : []),
     ], 60000)
     const newId = out.match(/ses_[a-zA-Z0-9]+/)?.[0]
     if (!newId) return `ERROR: spawn failed - ${out.slice(0, 150)}`
-    ledgerAdd(newId, label, goal)
+    ledgerAdd(newId, `${label} (${mdl.alias})`, goal)
     watchSession(newId, label)
     setTimeout(() => void refreshThreadIndex(), 60000)
-    return `spawned "${label}" (${newId}) in the wendy channel - ledgered, watched, owner can see it`
+    return `spawned "${label}" on ${mdl.alias} (${newId}) in the wendy channel - ledgered, watched, owner can see it`
+  }
+  if (name === 'switch_thread_model') {
+    const mdl = resolveSpawnModel(String(args.model))
+    if (!mdl) return 'ERROR: unknown model - only local, opus, or fable are permitted'
+    const sid = String(args.session_id ?? '')
+    const out = await runKimaki([
+      'send', '--session', sid, '--model', mdl.id,
+      '--prompt', `(Wendy switched this thread to a different model to balance compute load. Continue exactly where you left off.)`,
+    ], 60000)
+    if (out.startsWith('ERROR')) return out
+    const sp = spawns.find((x) => x.id === sid)
+    if (sp) { sp.label = sp.label.replace(/ \((local|opus|fable)\)$/, '') + ` (${mdl.alias})`; saveSpawns() }
+    diag('thread_model_switched', { id: sid, model: mdl.alias })
+    return `switched "${threadIdent(sid)}" to ${mdl.alias} - it will continue on the new model`
   }
   if (name === 'spawns_status') {
     if (!spawns.length) return 'no spawned agents yet'
@@ -1574,6 +1607,11 @@ function ledgerComplete(id: string, result?: string): void {
   sp.status = 'done'
   if (result) sp.result = result.slice(0, 300)
   saveSpawns()
+}
+function resolveSpawnModel(alias: string | undefined): { id: string; alias: string } | null {
+  const models = (loadConfig() as { spawnModels?: Record<string, string> }).spawnModels ?? {}
+  const a = (alias ?? 'local').toLowerCase().trim()
+  return models[a] ? { id: models[a], alias: a } : null
 }
 function runningSpawns(): Spawn[] {
   const now = Date.now()
