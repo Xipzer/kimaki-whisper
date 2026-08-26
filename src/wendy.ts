@@ -26,6 +26,7 @@ import prism from 'prism-media'
 import { Readable } from 'node:stream'
 import { execFile, spawn } from 'node:child_process'
 import { loadConfig, log } from './config.js'
+import { startTelegram, telegramInbox, setTelegramFlaggedHandler } from './telegram.js'
 
 // ── config accessors ─────────────────────────────────────────────
 function brainUrl(): string | undefined {
@@ -153,6 +154,7 @@ UPDATES & PRIORITY: every queued update carries [HIGH]/[MED]/[LOW]. Deliver high
 DO-NOT-DISTURB: set_dnd only when the owner explicitly asks ("do not disturb", "stop update offers"). Under DND you converse completely normally but never offer or mention updates - the automatic high-priority valve is the only exception. Turn it off only when they ask.
 SILENCE MODE: only on the owner's explicit request - go_silent for the stated duration (default 30 min). Never self-activate it, never suggest it, never ask about it. A bare "Wendy" wakes you.
 
+TELEGRAM: the owner is a public crypto figure - 90-95% of his DMs are spam. His Telegram flows through you read-only: VIP messages reach you immediately with a suggested reply (you NEVER send anything - suggestions are for him to use manually), known contacts arrive as digest items, and telegram_inbox gives the skimmable triage when he asks. Never make Telegram feel like a second inbox: mention only what genuinely matters.
 AMBIENT AWARENESS: you can see the whole organisation without asking anyone - index_pulse shows what is active right now, what worked today, and what went quiet mid-task. Use it for broad questions ("what's going on", "anything stuck", "how are things") instead of guessing or reading individual threads first. Stall notices (a steadily-working thread going silent for hours) arrive automatically as digests.
 NOTIFICATIONS: dispatched work is watched (start and finish announced). Thread and commit activity across all projects arrives as batched digests. Per-route priority via set_notify_tier: interrupt, digest, or onjoin.
 
@@ -442,6 +444,18 @@ const TOOLS = [
         type: 'object',
         properties: { query: { type: 'string', description: 'what to search for' } },
         required: ['query'],
+      },
+    },
+  },
+  {
+    type: 'function',
+    function: {
+      name: 'telegram_inbox',
+      description: 'The owner\'s Telegram DM triage: VIP messages, known contacts, and a spam-collapsed digest of everything else. Read-only. Use when the owner asks about Telegram, their DMs, or "anything important come in?".',
+      parameters: {
+        type: 'object',
+        properties: { hours: { type: 'number', description: 'lookback window, default 24' } },
+        required: [],
       },
     },
   },
@@ -821,6 +835,9 @@ async function executeToolInner(name: string, args: Record<string, unknown>): Pr
     return hits.length
       ? hits.map((e) => `[${new Date(e.ts).toISOString().slice(0, 10)}] ${e.s}`).join('\n')
       : 'nothing in the journal matches - it may predate my memory system or genuinely never came up'
+  }
+  if (name === 'telegram_inbox') {
+    return telegramInbox(Math.min(Math.max(Number(args.hours) || 24, 1), 168))
   }
   if (name === 'brain_health') {
     const url = brainUrl()
@@ -2158,6 +2175,16 @@ export function initWendy(client: Client): void {
       log('wendy: owner left, standing down')
       leave()
     }
+  })
+  startTelegram()
+  setTelegramFlaggedHandler((m) => {
+    const who = `${m.from.name}${m.from.username ? ` (@${m.from.username})` : ''}`
+    const pri = m.tier === 'vip' ? '[HIGH]' : '[MED]'
+    void (async () => {
+      const suggestion = await summarizeForVoice(`Telegram from ${who}`,
+        `Incoming Telegram DM from ${who} (${m.tier === 'vip' ? 'always-flagged VIP' : 'known contact'}): "${m.text}"\n\nSummarize the message in one sentence, then suggest ONE plausible short reply the owner could send, prefixed "suggested reply:".`)
+      announce(`${pri} ${suggestion}`, m.tier === 'vip' ? 'interrupt' : 'digest')
+    })()
   })
   log(`wendy: armed - will follow owner ${owner} into voice channels`)
 }
