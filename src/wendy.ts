@@ -1773,8 +1773,8 @@ function listenTo(channel: VoiceBasedChannel, userId: string): void {
         const pcm = Buffer.concat(chunks)
         // She just asked a question -> a short "yes/sure/okay" is the EXPECTED shape
         // of the answer; the anti-phantom gates must not eat it.
-        const expectingAnswer = /\?\s*$/.test(lastSpokenText.trim()) && Date.now() - lastSpeechEnd < 15000
-        const minBytes = isSilenced() || expectingAnswer ? 24000 : 48000 // 0.25s when a wake-word or short answer is expected
+        const expectingAnswer = /\?\s*$/.test(lastSpokenText.trim()) && Date.now() - lastSpeechEnd < 45000
+        const minBytes = isSilenced() || expectingAnswer ? 24000 : 38400 // 0.25s when a wake-word or short answer is expected
         if (pcm.length < minBytes) { diag('dropped', { why: 'too_short', bytes: pcm.length }); resumeIfPhantom(); return }
         // energy gate: breath/hum/keyboard is near-silent; real speech is not
         let sumSq = 0
