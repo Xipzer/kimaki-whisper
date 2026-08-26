@@ -4,7 +4,7 @@
 // with one switch. Read-only: this module never sends anything to anyone.
 import fs from 'node:fs'
 import path from 'node:path'
-import { loadConfig, log } from './config.js'
+import { loadConfig, saveConfig, log } from './config.js'
 
 type TgMsg = {
   id: number
@@ -39,6 +39,8 @@ let contacts: Record<string, { name: string; lastSeen: number; ownerReplied?: bo
 try { contacts = JSON.parse(fs.readFileSync(contactsPath(), 'utf-8')) } catch {}
 function saveContacts(): void { try { fs.writeFileSync(contactsPath(), JSON.stringify(contacts, null, 2)) } catch {} }
 
+let ownerTgId = 0
+try { ownerTgId = (JSON.parse(fs.readFileSync(statePath(), 'utf-8')) as { ownerTgId?: number }).ownerTgId ?? 0 } catch {}
 let offset = 0
 try { offset = (JSON.parse(fs.readFileSync(statePath(), 'utf-8')) as { offset?: number }).offset ?? 0 } catch {}
 
@@ -57,7 +59,7 @@ function classify(m: { id: number; username?: string; name: string }): TgMsg['ti
 async function poll(): Promise<void> {
   const token = (loadConfig() as TgConfig).telegramBotToken
   if (!token) return
-  const res = await fetch(`https://api.telegram.org/bot${token}/getUpdates?timeout=25&offset=${offset}&allowed_updates=["business_message","business_connection","message"]`, {
+  const res = await fetch(`https://api.telegram.org/bot${token}/getUpdates?timeout=25&offset=${offset}&allowed_updates=["business_message","business_connection","message","my_chat_member"]`, {
     signal: AbortSignal.timeout(35000),
   }).catch(() => null)
   if (!res?.ok) return
@@ -81,7 +83,12 @@ async function poll(): Promise<void> {
         caption?: string
         date: number
       }
-      business_connection?: { is_enabled?: boolean; user?: { first_name?: string } }
+      business_connection?: { is_enabled?: boolean; user?: { first_name?: string; id?: number } }
+      my_chat_member?: {
+        chat: { id: number; type: string; title?: string }
+        from?: { id: number }
+        new_chat_member?: { status?: string }
+      }
     }>
   } | null
   if (!d?.ok || !d.result?.length) return
@@ -107,6 +114,23 @@ async function poll(): Promise<void> {
     }
     if (u.business_connection) {
       log(`telegram: business connection ${u.business_connection.is_enabled ? 'ENABLED' : 'disabled'} for ${u.business_connection.user?.first_name ?? '?'}`)
+      if (u.business_connection.user?.id) ownerTgId = u.business_connection.user.id
+      continue
+    }
+    const cm = u.my_chat_member
+    if (cm?.chat && (cm.chat.type === 'group' || cm.chat.type === 'supergroup')) {
+      const gid = String(cm.chat.id)
+      seenGroups[gid] = { title: cm.chat.title ?? gid, lastSeen: Date.now() }
+      try { fs.writeFileSync(seenGroupsPath(), JSON.stringify(seenGroups, null, 2)) } catch {}
+      const joined = ['member', 'administrator'].includes(cm.new_chat_member?.status ?? '')
+      if (joined && cm.from && ownerTgId && cm.from.id === ownerTgId) {
+        const cfg = loadConfig() as { telegramGroups?: string[] }
+        const groups = (cfg.telegramGroups ?? []).map(String)
+        if (!groups.includes(gid)) {
+          saveConfig({ telegramGroups: [...groups, gid] } as never)
+          log(`telegram: owner added bot to "${cm.chat.title}" - auto-allowlisted (${gid})`)
+        }
+      }
       continue
     }
     const bm = u.business_message
@@ -134,7 +158,7 @@ async function poll(): Promise<void> {
     try { fs.appendFileSync(inboxPath(), JSON.stringify(msg) + '\n') } catch {}
     if ((msg.tier === 'vip' || msg.tier === 'known') && onFlagged) onFlagged(msg)
   }
-  try { fs.writeFileSync(statePath(), JSON.stringify({ offset })) } catch {}
+  try { fs.writeFileSync(statePath(), JSON.stringify({ offset, ownerTgId })) } catch {}
 }
 
 let polling = false

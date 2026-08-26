@@ -1191,8 +1191,19 @@ export async function think(userText: string, onSentence?: (s: string) => void):
       return ''
     }
     if (isBg && history[history.length - 1]?.role === 'user') history[history.length - 1].content = '[background update delivered]'
-    const PROMISE = /\b(let me|i'?ll (check|go|look|dig|find|pull|grab|get|keep|tell|flag|send|pass|relay|forward|share|report|update|ask)|one (sec|second|moment)|hold on|checking now|give me a (sec|second|moment|minute)|right back|be right back|having (a bit of )?trouble (pinning|finding|locating|tracking)|can'?t seem to (find|locate|pin)|struggling to (find|locate)|track it down|keep looking|let (him|her|them|fred|you) know|pass (that|this|it) along)\b/i
-    if (!nudged && hop < MAX_HOPS - 2 && PROMISE.test(text)) {
+    const BROAD_PROMISE = /\b(i'?ll|i will|let me|gonna|going to|one (sec|second|moment)|hold on|right back|having (a bit of )?trouble|can'?t seem to|struggling to|keep looking)\b/i
+    let isPromise = false
+    if (!nudged && hop < MAX_HOPS - 2 && BROAD_PROMISE.test(text)) {
+      const v = await brainRequest(url.replace(/\/$/, ''), {
+        model: 'local-fast', cache_prompt: true, max_tokens: 5,
+        messages: [
+          { role: 'system', content: 'Answer with exactly YES or NO.' },
+          { role: 'user', content: 'Does this assistant reply commit to performing a concrete action right now (relaying/telling someone something, checking, finding, adding, fixing) that has NOT been done yet - rather than merely answering or describing?\n<<<' + text.slice(0, 500) + '>>>' },
+        ],
+      })
+      isPromise = /yes/i.test(v.content)
+    }
+    if (isPromise) {
       nudged = true
       log('wendy: promise detected in final reply - forcing follow-through')
       void speak(text)
