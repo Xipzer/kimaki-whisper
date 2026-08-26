@@ -961,7 +961,7 @@ export async function think(userText: string, onSentence?: (s: string) => void):
     // closed server-side and the first reuse fails instantly with a reset.
     let out: BrainOut = { content: '', toolCalls: [], error: 'unreachable' }
     for (let attempt = 0; attempt < 2; attempt++) {
-      out = await brainRequest(url.replace(/\/$/, ''), { model: 'local-fast', cache_prompt: true, messages, ...(lastLap ? {} : { tools: TOOLS }), max_tokens: 1200 }, onSentence)
+      out = await brainRequest(url.replace(/\/$/, ''), { model: 'local-fast', cache_prompt: true, messages, ...(lastLap ? {} : { tools: TOOLS }), max_tokens: 4000 }, onSentence)
       if (!out.error) break
       log(`wendy brain attempt ${attempt + 1} failed: ${out.error}`)
       await new Promise((r) => setTimeout(r, 1500))
@@ -986,6 +986,16 @@ export async function think(userText: string, onSentence?: (s: string) => void):
     if (!out.content && !out.toolCalls.length) return fail('I got an empty response from my reasoning engine.')
 
     if (msg.tool_calls?.length) {
+      // Repair truncated tool-call JSON BEFORE it re-enters the conversation:
+      // a generation cut mid-arguments would 500 every subsequent hop.
+      const truncatedCalls = new Set<string>()
+      for (const tc of msg.tool_calls) {
+        try { JSON.parse(tc.function.arguments || '{}') } catch {
+          truncatedCalls.add(tc.id)
+          tc.function.arguments = '{}'
+          diag('tool_call_truncated', { name: tc.function.name })
+        }
+      }
       // Push a sanitized copy: re-sending reasoning_content wastes tokens and
       // risks template quirks.
       messages.push({ role: 'assistant', content: msg.content ?? null, tool_calls: msg.tool_calls })
@@ -1002,9 +1012,11 @@ export async function think(userText: string, onSentence?: (s: string) => void):
           lastRelayAck = Date.now()
           void speak('One moment - passing that along.')
         }
-        const result = missing.length
-          ? `ERROR: missing required argument(s): ${missing.join(', ')}. Call ${tc.function.name} again with ALL required fields filled in.`
-          : await executeTool(tc.function.name, args)
+        const result = truncatedCalls.has(tc.id)
+          ? `ERROR: your ${tc.function.name} call was CUT OFF by the generation limit - the JSON never closed. Retry with much shorter arguments; split long content across multiple calls.`
+          : missing.length
+            ? `ERROR: missing required argument(s): ${missing.join(', ')}. Call ${tc.function.name} again with ALL required fields filled in.`
+            : await executeTool(tc.function.name, args)
         messages.push({ role: 'tool', content: result, tool_call_id: tc.id, name: tc.function.name })
       }
       continue
