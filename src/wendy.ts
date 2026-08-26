@@ -1518,6 +1518,7 @@ async function speak(text: string): Promise<void> {
       .replace(/\s*\n+\s*/g, '. ')
       .replace(/\.{2,}/g, '.')
       .trim()
+      .replace(/([^.!?])$/, '$1.')
     const wav = await tts(speakable)
     if (!wav) { log('wendy: TTS failed'); return }
     if (ep !== speechEpoch) { log('wendy: queued speech discarded (barge-in)'); return }
@@ -1634,10 +1635,23 @@ async function runTurn(text: string): Promise<void> {
     diag('owner_said', { text })
     const turnT0 = Date.now()
     let streamedCount = 0
+    const sentBuf: string[] = []
+    let draining = false
+    const drain = async (): Promise<void> => {
+      if (draining) return
+      draining = true
+      try {
+        while (sentBuf.length) {
+          const chunk = sentBuf.splice(0).join(' ')
+          await speak(chunk) // awaits playback - later sentences coalesce into one prosody unit
+        }
+      } finally { draining = false }
+    }
     const streamer = text.startsWith('[') ? undefined : (sent: string): void => {
       if (seq !== inputSeq || isSilenced()) return
       streamedCount++
-      void speak(sent)
+      sentBuf.push(sent)
+      void drain()
     }
     const reply = await think(text, streamer)
     diag('turn_done', { ms: Date.now() - turnT0, reply: reply.slice(0, 800), superseded: seq !== inputSeq, streamed: streamedCount })
