@@ -53,8 +53,12 @@ let onAutonomous: ((m: TgMsg, policy: { tone: string; remaining: number; scope: 
 export function setTelegramAutonomousHandler(fn: (m: TgMsg, p: { tone: string; remaining: number; scope: string; title: string }) => void): void { onAutonomous = fn }
 function maybeAutonomous(m: TgMsg): void {
   const p = telegramPolicyFor(String(m.chatId))
-  if (!p || p.remaining <= 0 || (p.expiresAt && p.expiresAt < Date.now())) return
-  if (!onAutonomous) return
+  const live = p && (p.remaining === -1 || (p.remaining > 0 && (!p.expiresAt || p.expiresAt > Date.now())))
+  if (!p || !live || !onAutonomous) return
+  if (p.person) {
+    const who = `${m.from.username ?? ''} ${m.from.name}`.toLowerCase()
+    if (!who.includes(p.person.toLowerCase().replace(/^@/, ''))) return
+  }
   onAutonomous(m, { tone: p.tone, remaining: p.remaining, scope: p.scope, title: p.title })
 }
 
@@ -284,7 +288,8 @@ export async function telegramSend(target: string, html: string): Promise<string
   if (!d?.ok) return `ERROR: Telegram refused - ${d?.description ?? 'unknown'}`
   log(`telegram: sent to "${chat.title}" (${chat.isGroup ? 'group, as bot' : 'DM, as owner'})`)
   const left = consumeGrant(String(chat.id), out)
-  const budget = left >= 0 ? ` [autonomous budget: ${left} replies left${left <= 2 ? ' - ask the owner for more if the conversation is still going' : ''}]` : ''
+  const budget = left === -1 ? ' [indefinite autonomy active - keep the owner in the loop]'
+    : left >= 0 ? ` [autonomous budget: ${left} replies left${left <= 2 ? ' - ask the owner for more if the conversation is still going' : ''}]` : ''
   return `sent to "${chat.title}"${chat.isGroup ? ' (as the bot)' : ' (as you, via business connection)'}${budget}`
 }
 
@@ -292,7 +297,8 @@ export async function telegramSend(target: string, html: string): Promise<string
 type ChatPolicy = {
   title: string
   tone: 'professional' | 'casual' | 'banter'
-  remaining: number          // autonomous replies left (0 = must confirm)
+  remaining: number          // autonomous replies left (0 = confirm, -1 = INDEFINITE)
+  person?: string            // optional: restrict autonomy to one sender (username or name)
   grantedAt: number
   expiresAt: number
   scope: string
@@ -311,7 +317,7 @@ export function telegramPolicyFor(chatId: string): ChatPolicy | null {
 }
 
 /** Owner grants (or revokes) autonomous replying for one chat. */
-export function telegramGrant(target: string, count: number, tone?: string, scope?: string, hours = 12): string {
+export function telegramGrant(target: string, count: number, tone?: string, scope?: string, hours = 12, person?: string): string {
   const chat = resolveChat(target)
   if (!chat) return `ERROR: no known chat matching "${target}"`
   const id = String(chat.id)
@@ -320,13 +326,15 @@ export function telegramGrant(target: string, count: number, tone?: string, scop
   policies[id] = {
     title: chat.title,
     tone: t,
-    remaining: Math.max(0, Math.min(count, 100)),
+    remaining: count < 0 ? -1 : Math.max(0, Math.min(count, 100)),
     grantedAt: Date.now(),
     expiresAt: count > 0 ? Date.now() + hours * 3600000 : 0,
     scope: scope ?? prev?.scope ?? '',
+    person: person ?? prev?.person,
     sent: prev?.sent ?? [],
   }
   savePolicies()
+  if (count < 0) return `granted: INDEFINITE autonomous replies in "${chat.title}"${person ? ` with ${person}` : ''} (tone: ${t}). No expiry, no counter - you keep him in the loop with periodic summaries and still stop for anything consequential.`
   return count > 0
     ? `granted: ${count} autonomous replies in "${chat.title}" (tone: ${t}, expires in ${hours}h). Ask for more before running out if the conversation is still live.`
     : `revoked: autonomous replies OFF in "${chat.title}" - confirm with the owner from now on`
@@ -348,17 +356,20 @@ export function telegramPolicyStatus(): string {
   const entries = Object.entries(policies)
   if (!entries.length) return 'no chat policies set - every chat is professional tone, confirm-before-send'
   return entries.map(([id, p]) => {
-    const live = p.expiresAt > Date.now() && p.remaining > 0
+    const live = p.remaining === -1 || (p.remaining > 0 && p.expiresAt > Date.now())
     const mins = live ? Math.round((p.expiresAt - Date.now()) / 60000) : 0
-    return `"${p.title}" (${id}): tone ${p.tone} | ${live ? `${p.remaining} autonomous replies left, ${mins}m remaining${p.scope ? ` (${p.scope})` : ''}` : 'confirm-before-send'}`
+    const state = p.remaining === -1 ? `INDEFINITE autonomy${p.person ? ` with ${p.person}` : ''}${p.scope ? ` (${p.scope})` : ''}` : live ? `${p.remaining} autonomous replies left, ${mins}m remaining${p.scope ? ` (${p.scope})` : ''}` : 'confirm-before-send'
+    return `"${p.title}" (${id}): tone ${p.tone} | ${state}`
   }).join('\n')
 }
 
 /** Consume one reply from a chat's budget. Returns remaining, or -1 if none. */
 function consumeGrant(chatId: string, text: string): number {
   const p = policies[chatId]
-  if (!p || p.remaining <= 0 || (p.expiresAt && p.expiresAt < Date.now())) return -1
-  p.remaining -= 1
+  if (!p) return -2
+  const live = p.remaining === -1 || (p.remaining > 0 && (!p.expiresAt || p.expiresAt > Date.now()))
+  if (!live) return -2
+  if (p.remaining > 0) p.remaining -= 1
   p.sent.push({ at: Date.now(), text: text.slice(0, 200) })
   if (p.sent.length > 40) p.sent.splice(0, p.sent.length - 40)
   savePolicies()
@@ -379,7 +390,7 @@ export function telegramAutoDrain(): string {
 /** Chats with live grants running low - so she can ask for more in time. */
 export function telegramLowBudgets(): Array<{ title: string; remaining: number }> {
   return Object.values(policies)
-    .filter((p) => p.expiresAt > Date.now() && p.remaining > 0 && p.remaining <= 2)
+    .filter((p) => p.remaining > 0 && p.remaining <= 2 && p.expiresAt > Date.now())
     .map((p) => ({ title: p.title, remaining: p.remaining }))
 }
 
