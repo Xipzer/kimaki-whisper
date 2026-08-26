@@ -1717,7 +1717,10 @@ function listenTo(channel: VoiceBasedChannel, userId: string): void {
           }
         }
         const pcm = Buffer.concat(chunks)
-        const minBytes = isSilenced() ? 24000 : 48000 // silenced: 0.25s so a bare "Wendy" wake-word gets through
+        // She just asked a question -> a short "yes/sure/okay" is the EXPECTED shape
+        // of the answer; the anti-phantom gates must not eat it.
+        const expectingAnswer = /\?\s*$/.test(lastSpokenText.trim()) && Date.now() - lastSpeechEnd < 15000
+        const minBytes = isSilenced() || expectingAnswer ? 24000 : 48000 // 0.25s when a wake-word or short answer is expected
         if (pcm.length < minBytes) { diag('dropped', { why: 'too_short', bytes: pcm.length }); resumeIfPhantom(); return }
         // energy gate: breath/hum/keyboard is near-silent; real speech is not
         let sumSq = 0
@@ -1743,7 +1746,7 @@ function listenTo(channel: VoiceBasedChannel, userId: string): void {
           return
         }
         // Stock ghost phrases need GOOD confidence to be believed at all
-        if (/^(thank you|thanks|okay|ok|you|bye|yeah)[.!\s]*$/i.test(text.trim()) && (logprob < -0.4 || noSpeech > 0.25)) {
+        if (!expectingAnswer && /^(thank you|thanks|okay|ok|you|bye|yeah)[.!\s]*$/i.test(text.trim()) && (logprob < -0.4 || noSpeech > 0.25)) {
           diag('dropped', { text: text.trim(), why: 'stock_low_conf', noSpeech: +noSpeech.toFixed(2), logprob: +logprob.toFixed(2) })
           resumeIfPhantom()
           return
