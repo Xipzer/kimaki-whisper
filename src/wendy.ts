@@ -2111,7 +2111,10 @@ function listenTo(channel: VoiceBasedChannel, userId: string): void {
         const samples = pcm.length / 2
         for (let i = 0; i < pcm.length; i += 2) { const v = pcm.readInt16LE(i); sumSq += v * v }
         const rms = Math.sqrt(sumSq / samples)
-        if (rms < calRmsGate) { diag('dropped', { why: 'low_energy', rms: Math.round(rms), gate: calRmsGate }); resumeIfPhantom(); return }
+        // Quiet-but-real speech: let borderline audio through to Whisper, which
+        // has confidence scores to judge it far better than raw loudness can.
+        if (rms < calRmsGate * 0.35) { diag('dropped', { why: 'low_energy', rms: Math.round(rms), gate: calRmsGate }); resumeIfPhantom(); return }
+        const borderline = rms < calRmsGate
         const { text, noSpeech, logprob } = await stt(pcm48kMonoToWav(pcm))
         if (!text || text.length < 2) { resumeIfPhantom(); return }
         // Silence wake-word: DETERMINISTIC - checked before every other gate so
@@ -2124,7 +2127,7 @@ function listenTo(channel: VoiceBasedChannel, userId: string): void {
         if (isSilenced()) diag('dropped', { text: text.slice(0, 60), why: 'silenced', noSpeech: +noSpeech.toFixed(2), logprob: +logprob.toFixed(2) })
         // Whisper's own confidence: silence-hallucinations carry high no_speech_prob
         // and low avg_logprob. Real speech is typically logprob > -0.5, noSpeech < 0.3.
-        if (noSpeech > 0.55 || logprob < -0.9) {
+        if (noSpeech > (borderline ? 0.4 : 0.55) || logprob < (borderline ? -0.7 : -0.9)) {
           diag('dropped', { text: text.slice(0, 60), why: 'low_confidence', noSpeech: +noSpeech.toFixed(2), logprob: +logprob.toFixed(2) })
           resumeIfPhantom()
           return
