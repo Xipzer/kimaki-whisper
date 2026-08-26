@@ -1667,7 +1667,10 @@ async function runTurn(text: string): Promise<void> {
         }
       } finally { draining = false; streamDrains-- }
     }
-    const streamer = text.startsWith('[') ? undefined : (sent: string): void => {
+    // Sentence-pipelined speech OFF by default: owner prefers ~1.5s more wait for
+    // a single natural prosody arc over faster-but-choppier delivery. Flip with
+    // "streamSpeech": true in config.json (hot - no restart needed).
+    const streamer = !(loadConfig() as { streamSpeech?: boolean }).streamSpeech || text.startsWith('[') ? undefined : (sent: string): void => {
       if (seq !== inputSeq || isSilenced()) return
       streamedCount++
       sentBuf.push(sent)
