@@ -49,6 +49,14 @@ try { offset = (JSON.parse(fs.readFileSync(statePath(), 'utf-8')) as { offset?: 
 
 let onFlagged: ((m: TgMsg) => void) | null = null
 export function setTelegramFlaggedHandler(fn: (m: TgMsg) => void): void { onFlagged = fn }
+let onAutonomous: ((m: TgMsg, policy: { tone: string; remaining: number; scope: string; title: string }) => void) | null = null
+export function setTelegramAutonomousHandler(fn: (m: TgMsg, p: { tone: string; remaining: number; scope: string; title: string }) => void): void { onAutonomous = fn }
+function maybeAutonomous(m: TgMsg): void {
+  const p = telegramPolicyFor(String(m.chatId))
+  if (!p || p.remaining <= 0 || (p.expiresAt && p.expiresAt < Date.now())) return
+  if (!onAutonomous) return
+  onAutonomous(m, { tone: p.tone, remaining: p.remaining, scope: p.scope, title: p.title })
+}
 
 function classify(m: { id: number; username?: string; name: string }): TgMsg['tier'] {
   const cfg = loadConfig() as TgConfig
@@ -115,6 +123,7 @@ async function poll(): Promise<void> {
           ts: gm.date * 1000, tier: 'group', chatTitle: gm.chat.title ?? gid,
         }
         try { fs.appendFileSync(inboxPath(), JSON.stringify(msg) + '\n') } catch {}
+        maybeAutonomous(msg)
       }
       continue
     }
@@ -158,6 +167,7 @@ async function poll(): Promise<void> {
       tier: classify({ id: bm.from.id, username: bm.from.username, name }),
     }
     try { fs.appendFileSync(inboxPath(), JSON.stringify(msg) + '\n') } catch {}
+    maybeAutonomous(msg)
     if ((msg.tier === 'vip' || msg.tier === 'known') && onFlagged) onFlagged(msg)
   }
   try { fs.writeFileSync(statePath(), JSON.stringify({ offset, ownerTgId, bizConnId })) } catch {}
@@ -237,11 +247,24 @@ export async function telegramSend(target: string, html: string): Promise<string
   if (!chat) return `ERROR: no known chat matching "${target}" - use telegram_groups list or a numeric id`
   // never emit LLM-smell punctuation
   let out = html.replace(/\u2014/g, '-').replace(/\u2013/g, '-')
-  // fix @mentions: map display names to real @handles seen in this chat
-  out = out.replace(/@([A-Za-z][\w ]{1,30})/g, (m, name: string) => {
-    const n = String(name).trim().toLowerCase()
-    const hit = Object.values(contacts).find((c) => c.username && (c.name.toLowerCase() === n || c.name.toLowerCase().startsWith(n) || c.username.toLowerCase() === n.replace(/\s+/g, '')))
-    return hit?.username ? `@${hit.username}` : `@${String(name).replace(/\s+/g, '')}`
+  // fix @mentions: resolve display names to real handles WITHOUT swallowing the
+  // sentence after them (the greedy-space bug), and guarantee a trailing space.
+  const findByName = (q: string) => Object.values(contacts).find(
+    (c) => c.username && (c.name.toLowerCase() === q || c.username.toLowerCase() === q.replace(/\s+/g, '')),
+  )
+  out = out.replace(/@([A-Za-z][A-Za-z0-9_]*(?:\s+[A-Za-z][A-Za-z0-9_]*){0,3})/g, (_full, span: string) => {
+    const words = String(span).split(/\s+/)
+    // longest-first: only collapse a multi-word span if it IS a known display name
+    for (let n = words.length; n >= 1; n--) {
+      const hit = findByName(words.slice(0, n).join(' ').toLowerCase())
+      if (hit?.username) {
+        const rest = words.slice(n).join(' ')
+        return `@${hit.username}${rest ? ' ' + rest : ''}`
+      }
+    }
+    // unknown: the handle is the FIRST word only - never absorb the sentence
+    const rest = words.slice(1).join(' ')
+    return `@${words[0]}${rest ? ' ' + rest : ''}`
   })
   const body: Record<string, unknown> = {
     chat_id: chat.id,
