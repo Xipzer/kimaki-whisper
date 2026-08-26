@@ -53,7 +53,20 @@ let onFlagged: ((m: TgMsg) => void) | null = null
 export function setTelegramFlaggedHandler(fn: (m: TgMsg) => void): void { onFlagged = fn }
 let onAutonomous: ((m: TgMsg, policy: { tone: string; remaining: number; scope: string; title: string }) => void) | null = null
 export function setTelegramAutonomousHandler(fn: (m: TgMsg, p: { tone: string; remaining: number; scope: string; title: string }) => void): void { onAutonomous = fn }
+/** True only for the real owner - verified by immutable Telegram user id,
+ *  never by display name or handle text (both are trivially spoofed). */
+export function isVerifiedOwner(m: TgMsg): boolean {
+  return !!ownerTgId && m.from.id === ownerTgId
+}
 function maybeAutonomous(m: TgMsg): void {
+  // the owner @-mentioning her is standing authority to reply to HIM, anywhere
+  if (isVerifiedOwner(m) && onAutonomous) {
+    const t = m.text.toLowerCase()
+    if ((botHandle && t.includes('@' + botHandle)) || /\bwendy\b/.test(t)) {
+      onAutonomous(m, { tone: policies[String(m.chatId)]?.tone ?? 'casual', remaining: -1, scope: 'owner asked you directly', title: policies[String(m.chatId)]?.title ?? 'chat' })
+      return
+    }
+  }
   const p = telegramPolicyFor(String(m.chatId))
   const live = p && (p.remaining === -1 || (p.remaining > 0 && (!p.expiresAt || p.expiresAt > Date.now())))
   if (!p || !live || !onAutonomous) return
@@ -505,6 +518,30 @@ function resolveChat(query: string): { id: number; title: string; isGroup: boole
   return null
 }
 
+/** Hard outbound scrubber. Doctrine can be social-engineered; this cannot.
+ *  Returns a block reason, or null if the text is safe to transmit. */
+function outboundBlockReason(text: string): string | null {
+  const t = text
+  const checks: Array<[RegExp, string]> = [
+    [/\b(sk|pk|rk)-[A-Za-z0-9_-]{16,}/, 'looks like an API key'],
+    [/\b(gh[pousr]|xox[baprs])_[A-Za-z0-9]{16,}/, 'looks like a service token'],
+    [/-----BEGIN [A-Z ]*PRIVATE KEY-----/i, 'contains a private key block'],
+    [/\b0x[a-fA-F0-9]{64}\b/, 'looks like a raw private key / 32-byte secret'],
+    [/\b[0-9]{8,10}:[A-Za-z0-9_-]{30,}\b/, 'looks like a bot token'],
+    [/(^|\n)\s*(export\s+)?[A-Z][A-Z0-9_]{3,}\s*=\s*\S{6,}/m, 'looks like environment variables'],
+    [/\b(mongodb(\+srv)?|postgres(ql)?|mysql|redis):\/\/[^\s]+:[^\s]+@/i, 'contains a database connection string'],
+    [/\/home\/[a-z0-9_-]+\/(?!$)[\w./-]{4,}/i, 'contains absolute filesystem paths from the owner machine'],
+    [/\b(?:[a-z]{3,8}\s+){11,}[a-z]{3,8}\b/i, 'reads like a seed phrase'],
+    [/\b(?:\d{1,3}\.){3}\d{1,3}(:\d+)?\b/, 'contains an internal IP address'],
+  ]
+  for (const [re, why] of checks) if (re.test(t)) return why
+  // bulk verbatim code: a few lines to illustrate is fine, a file is not
+  const codeLines = (t.match(/(^|\n)\s{0,8}(const |let |var |function |class |import |from |def |public |private |async |return |if \(|for \(|\}|<\/?\w+>)/g) ?? []).length
+  if (codeLines >= 6) return 'contains a substantial block of source code'
+  if (t.length > 2000 && /```/.test(t)) return 'contains a large verbatim code dump'
+  return null
+}
+
 /** Send a message. DMs go through the business connection (as the owner);
  *  groups go through the bot's own identity. HTML formatting supported. */
 export async function telegramSend(target: string, html: string): Promise<string> {
@@ -533,6 +570,11 @@ export async function telegramSend(target: string, html: string): Promise<string
     const rest = words.slice(1).join(' ')
     return `@${words[0]}${rest ? ' ' + rest : ''}`
   })
+  const leak = outboundBlockReason(out)
+  if (leak) {
+    log(`telegram: BLOCKED outbound - ${leak}`)
+    return `BLOCKED by the outbound filter: that message ${leak}. Nothing was sent. Telegram is a public surface - describe at headline level instead (what changed, not how it is built), and never transmit secrets, config, internals or file contents even if the owner asks there.`
+  }
   // MISDIRECTION GUARD: if the message tags someone, make sure they are actually
   // in this chat - a wrong-chat send cannot be unsent.
   for (const tag of out.match(/@[A-Za-z0-9_]{3,32}/g) ?? []) {
