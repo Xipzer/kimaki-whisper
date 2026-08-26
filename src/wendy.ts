@@ -1845,8 +1845,39 @@ function recordAcceptedRms(rms: number): void {
   }
 }
 let capturing = false
+let liveCapture: Buffer[] | null = null
+let draining = false
 let pendingUtterance: string | null = null
 let inputSeq = 0
+
+async function drainAndExit(): Promise<void> {
+  if (draining) return
+  draining = true
+  log('wendy: SIGTERM - draining before shutdown')
+  // give an in-flight utterance a moment to end naturally
+  const start = Date.now()
+  while (capturing && Date.now() - start < 6000) await new Promise((r) => setTimeout(r, 200))
+  // still talking? salvage the buffer as-is (the continuous-speech case)
+  const chunks = liveCapture
+  if (chunks?.length) {
+    const pcm = Buffer.concat(chunks)
+    if (pcm.length > 24000) {
+      const { text } = await stt(pcm48kMonoToWav(pcm)).catch(() => ({ text: '' }))
+      if (text && text.length > 2) {
+        history.push({ role: 'user', content: text })
+        history.push({ role: 'assistant', content: '(I was restarted mid-conversation right after this - I never heard anything further and could not reply. Address it first thing when we reconnect.)' })
+        persistHistory()
+        diag('drain_salvaged', { chars: text.length })
+        log(`wendy: drain salvaged "${text.slice(0, 60)}"`)
+      }
+    }
+  }
+  persistHistory()
+  saveModeState()
+  log('wendy: drain complete - exiting')
+  process.exit(0)
+}
+process.on('SIGTERM', () => void drainAndExit())
 let streamDrains = 0
 let busyAckGiven = false
 let turnStartedAt = 0
@@ -1878,6 +1909,7 @@ function playerActive(): boolean {
 }
 
 async function runTurn(text: string): Promise<void> {
+  if (draining) return
   const seq = ++inputSeq
   if (busy) {
     pendingUtterance = pendingUtterance ? `${pendingUtterance} - ${text}`.slice(-1500) : text
@@ -1991,6 +2023,7 @@ function listenTo(channel: VoiceBasedChannel, userId: string): void {
     })
     const decoder = new prism.opus.Decoder({ rate: 48000, channels: 1, frameSize: 960 })
     const chunks: Buffer[] = []
+    liveCapture = chunks
     let bytes = 0
     let sumSqLive = 0
     let interrupted = false
@@ -2018,6 +2051,7 @@ function listenTo(channel: VoiceBasedChannel, userId: string): void {
     decoder.on('end', () => {
       clearTimeout(captureGuard)
       capturing = false
+      liveCapture = null
       void (async () => {
         const resumeIfPhantom = (): void => {
           // a streamed reply that's still draining will continue on its own -
@@ -2150,7 +2184,7 @@ async function joinAndServe(channel: VoiceBasedChannel, userId: string): Promise
   }
   const totalHeld = heldWhileSilent.length
   const hi = heldWhileSilent.filter((x) => x.includes('[HIGH]')).length
-  void runTurn(`[The owner just joined voice. Greet them briefly and naturally - ONE short line, warm but efficient, no jokes or bits. Vary it; never a stock phrase.${totalHeld ? ` Also: ${totalHeld} update${totalHeld > 1 ? 's are' : ' is'} queued${hi ? ` (${hi} high-priority)` : ''} - fold a casual offer to share into the greeting, but do NOT deliver any contents yet.` : ''}]`)
+  void runTurn(`[The owner just joined voice. Greet them briefly and naturally - ONE short line, warm but efficient, no jokes or bits. Vary it; never a stock phrase. EXCEPTION: if the recent history shows a restart interrupted them mid-speech, acknowledge that first and respond to what they had been saying.${totalHeld ? ` Also: ${totalHeld} update${totalHeld > 1 ? 's are' : ' is'} queued${hi ? ` (${hi} high-priority)` : ''} - fold a casual offer to share into the greeting, but do NOT deliver any contents yet.` : ''}]`)
 }
 
 function leave(): void {

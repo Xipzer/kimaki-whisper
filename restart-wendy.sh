@@ -15,6 +15,13 @@ mkdir -p "$HOME/.kimaki-whisper"
 # kill prior SUPERVISOR first (or it respawns mid-restart and races us)
 [ -f "$SUPFILE" ] && kill -9 "$(cat "$SUPFILE")" 2>/dev/null
 for p in $(pgrep -f 'restart-wendy.sh'); do [ "$p" != "$$" ] && kill -9 "$p" 2>/dev/null; done  # orphan supervisors, excluding self
+# graceful drain first: TERM lets the sidecar finish + persist an in-flight
+# utterance (up to ~10s), then we hard-kill any survivor
+pkill -TERM -f 'kimaki-whisper/dist/cli.js' 2>/dev/null
+for i in $(seq 1 12); do
+  pgrep -f 'kimaki-whisper/dist/cli.js' >/dev/null || break
+  sleep 1
+done
 pkill -9 -f 'kimaki-whisper/dist/cli.js' 2>/dev/null
 for i in 1 2 3 4 5; do
   P=$(ss -ltnp 2>/dev/null | grep ':7071' | grep -oE 'pid=[0-9]+' | cut -d= -f2 | head -1)
