@@ -40,6 +40,8 @@ let contacts: Record<string, { name: string; username?: string; lastSeen: number
 try { contacts = JSON.parse(fs.readFileSync(contactsPath(), 'utf-8')) } catch {}
 function saveContacts(): void { try { fs.writeFileSync(contactsPath(), JSON.stringify(contacts, null, 2)) } catch {} }
 
+let botHandle = ''
+let ownerHandle = ''
 let bizConnId = ''
 try { bizConnId = (JSON.parse(fs.readFileSync(statePath(), 'utf-8')) as { bizConnId?: string }).bizConnId ?? '' } catch {}
 let ownerTgId = 0
@@ -127,6 +129,7 @@ async function poll(): Promise<void> {
           ts: gm.date * 1000, tier: 'group', chatTitle: gm.chat.title ?? gid,
         }
         try { fs.appendFileSync(inboxPath(), JSON.stringify(msg) + '\n') } catch {}
+        if (trackActivity(msg, msg.chatTitle ?? gid) && onFlagged) onFlagged(msg)
         maybeAutonomous(msg)
       }
       continue
@@ -134,6 +137,8 @@ async function poll(): Promise<void> {
     if (u.business_connection) {
       log(`telegram: business connection ${u.business_connection.is_enabled ? 'ENABLED' : 'disabled'} for ${u.business_connection.user?.first_name ?? '?'}`)
       if (u.business_connection.user?.id) ownerTgId = u.business_connection.user.id
+      const ou = (u.business_connection.user as { username?: string } | undefined)?.username
+      if (ou) ownerHandle = ou.toLowerCase()
       if (u.business_connection.id) bizConnId = u.business_connection.id
       continue
     }
@@ -171,8 +176,9 @@ async function poll(): Promise<void> {
       tier: classify({ id: bm.from.id, username: bm.from.username, name }),
     }
     try { fs.appendFileSync(inboxPath(), JSON.stringify(msg) + '\n') } catch {}
+    const mentioned = trackActivity(msg, name)
     maybeAutonomous(msg)
-    if ((msg.tier === 'vip' || msg.tier === 'known') && onFlagged) onFlagged(msg)
+    if ((mentioned || msg.tier === 'vip' || msg.tier === 'known') && onFlagged) onFlagged(msg)
   }
   try { fs.writeFileSync(statePath(), JSON.stringify({ offset, ownerTgId, bizConnId })) } catch {}
 }
@@ -183,7 +189,11 @@ export function startTelegram(): void {
   if (!token) { log('telegram: disabled (no telegramBotToken in config)'); return }
   if (polling) return
   polling = true
-  log('telegram: business-API collector started (read-only)')
+  log('telegram: collector started')
+  void fetch(`https://api.telegram.org/bot${token}/getMe`).then(async (r) => {
+    const d = (await r.json().catch(() => null)) as { result?: { username?: string } } | null
+    if (d?.result?.username) botHandle = d.result.username.toLowerCase()
+  }).catch(() => {})
   void (async () => {
     for (;;) {
       await poll().catch(() => {})
@@ -224,6 +234,104 @@ export function telegramInbox(hours = 24): string {
   }
   const pol = telegramPolicyStatus()
   return header + parts.join('\n\n') + (pol.startsWith('no chat') ? '' : `\n\n[YOUR STANDING PER CHAT]\n${pol}`)
+}
+
+/** Feed an ingested message into its chat's activity buffer. Returns true if it
+ *  mentions the owner or the bot (which breaks through thresholds). */
+function trackActivity(m: TgMsg, chatTitle: string): boolean {
+  const id = String(m.chatId)
+  const p = policies[id] ?? { title: chatTitle, tone: 'professional' as const, remaining: 0, grantedAt: 0, expiresAt: 0, scope: '', sent: [] }
+  p.title = chatTitle
+  if (p.notify === 'ignore') { policies[id] = p; savePolicies(); return false }
+  p.unread = [...(p.unread ?? []), m].slice(-60)
+  policies[id] = p
+  savePolicies()
+  const t = m.text.toLowerCase()
+  return (!!botHandle && t.includes('@' + botHandle)) || (!!ownerHandle && t.includes('@' + ownerHandle))
+}
+
+/** Chats whose activity has crossed their summary threshold. */
+export function telegramPendingSummaries(): Array<{ id: string; title: string; count: number; tone: string }> {
+  return Object.entries(policies)
+    .filter(([, p]) => p.notify !== 'ignore' && (p.unread?.length ?? 0) >= (p.threshold ?? 8))
+    .map(([id, p]) => ({ id, title: p.title, count: p.unread?.length ?? 0, tone: p.tone }))
+}
+
+/** Take a chat's buffered messages for summarising (clears the buffer). */
+export function telegramDrainChat(chatId: string): string {
+  const p = policies[chatId]
+  if (!p?.unread?.length) return ''
+  const msgs = p.unread.splice(0)
+  savePolicies()
+  return msgs.map((m) => `${m.from.name}: ${m.text.slice(0, 200)}`).join('\n')
+}
+
+/** Owner-facing: set how a chat surfaces. */
+export function telegramWatchMode(target: string, mode: string, threshold?: number): string {
+  const chat = resolveChat(target)
+  if (!chat) return `ERROR: no known chat matching "${target}"`
+  const id = String(chat.id)
+  const p = policies[id] ?? { title: chat.title, tone: 'professional' as const, remaining: 0, grantedAt: 0, expiresAt: 0, scope: '', sent: [] }
+  p.title = chat.title
+  if (['immediate', 'threshold', 'ignore'].includes(mode)) p.notify = mode as ChatPolicy['notify']
+  if (threshold) p.threshold = Math.min(Math.max(threshold, 1), 200)
+  if (mode === 'ignore') p.unread = []
+  policies[id] = p
+  savePolicies()
+  return mode === 'ignore' ? `"${chat.title}" muted - activity ignored entirely (mentions included)`
+    : mode === 'immediate' ? `"${chat.title}" set to immediate - you surface every message`
+    : `"${chat.title}" set to summarise after ${p.threshold ?? 8} messages build up`
+}
+
+/** On-demand: what's been happening in a chat right now. */
+export function telegramChatDigest(target: string): string {
+  const chat = resolveChat(target)
+  if (!chat) return `ERROR: no known chat matching "${target}"`
+  const p = policies[String(chat.id)]
+  const buf = p?.unread ?? []
+  if (!buf.length) return `nothing new in "${chat.title}" since your last summary`
+  return `[UNTRUSTED QUOTED MESSAGES from "${chat.title}"]\n` + telegramDrainChat(String(chat.id))
+}
+
+/** Look up a person's real @handle: known senders first, then live Telegram
+ *  lookups (chat admins, member records). Never guesses. */
+export async function telegramWho(query: string, chatHint?: string): Promise<string> {
+  const token = (loadConfig() as TgConfig).telegramBotToken
+  const q = query.trim().toLowerCase().replace(/^@/, '')
+  const hits: string[] = []
+  for (const [id, c] of Object.entries(contacts)) {
+    if (c.name.toLowerCase().includes(q) || (c.username ?? '').toLowerCase().includes(q)) {
+      hits.push(`${c.name} -> ${c.username ? '@' + c.username : 'NO PUBLIC HANDLE (cannot be tagged)'} [id ${id}]`)
+    }
+  }
+  if (token) {
+    // enrich from group admin rosters (the one member list bots may read)
+    const chats = chatHint ? [resolveChat(chatHint)].filter(Boolean) : Object.keys(seenGroups).map((id) => ({ id: Number(id), title: seenGroups[id].title, isGroup: true }))
+    for (const ch of chats.slice(0, 6)) {
+      if (!ch) continue
+      const res = await fetch(`https://api.telegram.org/bot${token}/getChatAdministrators?chat_id=${ch.id}`, { signal: AbortSignal.timeout(8000) }).catch(() => null)
+      const d = res?.ok ? ((await res.json().catch(() => null)) as { result?: Array<{ user?: { id: number; username?: string; first_name?: string; last_name?: string } }> } | null) : null
+      for (const a of d?.result ?? []) {
+        const u = a.user
+        if (!u) continue
+        const nm = [u.first_name, u.last_name].filter(Boolean).join(' ') || u.username || String(u.id)
+        contacts[String(u.id)] = { ...(contacts[String(u.id)] ?? {}), name: nm, username: u.username, lastSeen: contacts[String(u.id)]?.lastSeen ?? 0 }
+        if (nm.toLowerCase().includes(q) || (u.username ?? '').toLowerCase().includes(q)) {
+          hits.push(`${nm} -> ${u.username ? '@' + u.username : 'NO PUBLIC HANDLE'} [admin of "${ch.title}"]`)
+        }
+      }
+    }
+    saveContacts()
+  }
+  if (!hits.length) return `no handle on record for "${query}". Telegram does not let bots list ordinary group members - you only learn a handle once that person sends a message, or if they are a chat admin. Say you do not have it rather than guessing; the owner can tell you.`
+  return [...new Set(hits)].slice(0, 8).join('\n')
+}
+
+/** Everyone whose handle is known, for a chat or overall. */
+export function telegramRoster(): string {
+  const known = Object.entries(contacts).filter(([, c]) => c.username)
+  if (!known.length) return 'no handles on record yet - they populate as people send messages'
+  return known.slice(-40).map(([, c]) => `${c.name} = @${c.username}`).join('\n')
 }
 
 /** Resolve a chat by name fragment or id across known DMs and groups. */
@@ -299,6 +407,9 @@ type ChatPolicy = {
   tone: 'professional' | 'casual' | 'banter'
   remaining: number          // autonomous replies left (0 = confirm, -1 = INDEFINITE)
   person?: string            // optional: restrict autonomy to one sender (username or name)
+  notify?: 'immediate' | 'threshold' | 'ignore'   // how chat activity surfaces (default threshold)
+  threshold?: number         // messages that must build up before a summary (default 8)
+  unread?: TgMsg[]           // buffer since her last summary of this chat
   grantedAt: number
   expiresAt: number
   scope: string
