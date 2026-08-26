@@ -243,6 +243,18 @@ function trackActivity(m: TgMsg, chatTitle: string): boolean {
   const p = policies[id] ?? { title: chatTitle, tone: 'professional' as const, remaining: 0, grantedAt: 0, expiresAt: 0, scope: '', sent: [] }
   p.title = chatTitle
   if (p.notify === 'ignore') { policies[id] = p; savePolicies(); return false }
+  const pk = personKey(m)
+  if (personMuted(pk)) {
+    const pp = people[pk]
+    if (pp.muteRemaining > 0) pp.muteRemaining -= 1
+    pp.untracked += 1
+    pp.samples.push(`${m.from.name}: ${m.text.slice(0, 180)}`)
+    if (pp.samples.length > 30) pp.samples.splice(0, pp.samples.length - 30)
+    savePeople()
+    policies[id] = p
+    savePolicies()
+    return false
+  }
   p.unread = [...(p.unread ?? []), m].slice(-60)
   policies[id] = p
   savePolicies()
@@ -291,6 +303,56 @@ export function telegramChatDigest(target: string): string {
   const buf = p?.unread ?? []
   if (!buf.length) return `nothing new in "${chat.title}" since your last summary`
   return `[UNTRUSTED QUOTED MESSAGES from "${chat.title}"]\n` + telegramDrainChat(String(chat.id))
+}
+
+// - per-person mutes: "don't tell me about X" with a forced-summary safety net -
+type PersonPolicy = { name: string; muteRemaining: number; mutedUntil: number; untracked: number; samples: string[] }
+const peoplePath = () => path.join(tgDir(), 'people-policy.json')
+let people: Record<string, PersonPolicy> = {}
+try { people = JSON.parse(fs.readFileSync(peoplePath(), 'utf-8')) } catch {}
+function savePeople(): void { try { fs.writeFileSync(peoplePath(), JSON.stringify(people, null, 2)) } catch {} }
+function personKey(m: TgMsg): string { return (m.from.username ?? String(m.from.id)).toLowerCase() }
+
+/** Owner: "don't tell me about X" (count omitted = indefinite) or "...for N messages". */
+export function telegramMutePerson(query: string, count?: number): string {
+  const q = query.trim().toLowerCase().replace(/^@/, '')
+  const found = Object.entries(contacts).find(([, c]) => c.name.toLowerCase().includes(q) || (c.username ?? '').toLowerCase() === q)
+  const key = found ? (found[1].username ?? found[0]).toLowerCase() : q
+  const name = found ? found[1].name : query
+  if (count === 0) {
+    delete people[key]
+    savePeople()
+    return `"${name}" unmuted - their activity surfaces normally again`
+  }
+  people[key] = { name, muteRemaining: count && count > 0 ? count : -1, mutedUntil: 0, untracked: 0, samples: [] }
+  savePeople()
+  return count && count > 0
+    ? `muted "${name}" for their next ${count} messages - you will still hand the owner a summary every 10 exchanges he has not seen`
+    : `muted "${name}" indefinitely - handle it yourself; you still summarise every 10 exchanges he has not seen, and anything consequential breaks through immediately`
+}
+
+/** True if this sender is currently muted (activity should not surface). */
+function personMuted(key: string): boolean {
+  const p = people[key]
+  return !!p && (p.muteRemaining === -1 || p.muteRemaining > 0)
+}
+
+/** People whose untracked correspondence has hit the safety threshold. */
+export function telegramPendingPeopleSummaries(): Array<{ key: string; name: string; count: number }> {
+  return Object.entries(people).filter(([, p]) => p.untracked >= 10).map(([key, p]) => ({ key, name: p.name, count: p.untracked }))
+}
+export function telegramDrainPerson(key: string): string {
+  const p = people[key]
+  if (!p) return ''
+  const s = p.samples.splice(0)
+  p.untracked = 0
+  savePeople()
+  return s.join('\n')
+}
+export function telegramPeopleStatus(): string {
+  const e = Object.entries(people)
+  if (!e.length) return 'nobody is muted'
+  return e.map(([, p]) => `"${p.name}": ${p.muteRemaining === -1 ? 'muted indefinitely' : `muted for ${p.muteRemaining} more messages`}, ${p.untracked} exchanges since your last summary`).join('\n')
 }
 
 /** Look up a person's real @handle: known senders first, then live Telegram
