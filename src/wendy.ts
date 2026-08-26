@@ -558,6 +558,15 @@ async function executeToolInner(name: string, args: Record<string, unknown>): Pr
       '--prompt', String(args.prompt ?? ''),
       ...(ownerId() ? ['--user', ownerId()!] : []),
     ], 60000)
+    const newId = out.match(/ses_[a-zA-Z0-9]+/)?.[0]
+    if (newId) {
+      const label = String(args.prompt ?? '').slice(0, 50)
+      recentDispatches.push({ id: newId, label, ts: Date.now() })
+      if (recentDispatches.length > 10) recentDispatches.splice(0, recentDispatches.length - 10)
+      watchSession(newId, label)
+      setTimeout(() => void refreshThreadIndex(), 60000)
+      return `dispatched - new session ${newId} (auto-watched; remember this id for follow-ups)`
+    }
     return out || 'dispatched'
   }
   if (name === 'list_recent_sessions') {
@@ -577,7 +586,7 @@ async function executeToolInner(name: string, args: Record<string, unknown>): Pr
           const brief = b && Date.now() - b.at < 15 * 60 * 1000 ? ` | BRIEFING (${Math.max(1, Math.round((Date.now() - b.at) / 60000))}m old): ${b.s.slice(0, 220)}` : ''
           return `${nicknames[h.id] ? `[${nicknames[h.id]}] ` : ''}${h.title} - session ${h.id} (project: ${h.dir.split('/').pop()}${age})${sub}${brief}`
         }).join('\n')
-      : 'no matches in index - try search_sessions for a deep search'
+      : `no matches in index${recentDispatches.length ? ` - NOTE: recently dispatched threads (not indexed yet): ${recentDispatches.slice(-5).map((d) => `"${d.label}" = ${d.id}`).join('; ')}` : ' - try search_sessions for a deep search'}`
   }
   if (name === 'watch_thread') {
     watchSession(String(args.session_id ?? ''), String(args.label ?? 'thread'))
@@ -1010,7 +1019,7 @@ export async function think(userText: string, onSentence?: (s: string) => void):
       return ''
     }
     if (isBg && history[history.length - 1]?.role === 'user') history[history.length - 1].content = '[background update delivered]'
-    const PROMISE = /\b(let me|i'?ll (check|go|look|dig|find|pull|grab|get)|one (sec|second|moment)|hold on|checking now|give me a (sec|second|moment|minute)|right back|be right back)\b/i
+    const PROMISE = /\b(let me|i'?ll (check|go|look|dig|find|pull|grab|get|keep)|one (sec|second|moment)|hold on|checking now|give me a (sec|second|moment|minute)|right back|be right back|having (a bit of )?trouble (pinning|finding|locating|tracking)|can'?t seem to (find|locate|pin)|struggling to (find|locate)|track it down|keep looking)\b/i
     if (!nudged && hop < MAX_HOPS - 2 && PROMISE.test(text)) {
       nudged = true
       log('wendy: promise detected in final reply - forcing follow-through')
@@ -1358,6 +1367,7 @@ function fingerprint(tail: string): string { return tail.slice(-3000) }
 // if a session's content hasn't changed since we last told the owner, stay quiet.
 const lastAnnounced = new Map<string, { fp: string; at: number }>()
 const briefingCache = new Map<string, { s: string; at: number }>()
+const recentDispatches: Array<{ id: string; label: string; ts: number }> = []
 function shouldAnnounce(id: string, tail: string): boolean {
   const fp = fingerprint(tail)
   const prev = lastAnnounced.get(id)
