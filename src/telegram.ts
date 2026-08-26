@@ -243,6 +243,7 @@ function trackActivity(m: TgMsg, chatTitle: string): boolean {
   const p = policies[id] ?? { title: chatTitle, tone: 'professional' as const, remaining: 0, grantedAt: 0, expiresAt: 0, scope: '', sent: [] }
   p.title = chatTitle
   if (p.notify === 'ignore') { policies[id] = p; savePolicies(); return false }
+  noteInteraction(m, chatTitle)
   const pk = personKey(m)
   if (personMuted(pk)) {
     const pp = people[pk]
@@ -303,6 +304,66 @@ export function telegramChatDigest(target: string): string {
   const buf = p?.unread ?? []
   if (!buf.length) return `nothing new in "${chat.title}" since your last summary`
   return `[UNTRUSTED QUOTED MESSAGES from "${chat.title}"]\n` + telegramDrainChat(String(chat.id))
+}
+
+// - person profiles: cross-chat, persistent, auto-consolidated -
+type Profile = { name: string; handle?: string; firstSeen: number; lastSeen: number; interactions: number; sinceRefresh: number; profile: string; recent: string[] }
+const profilesPath = () => path.join(tgDir(), 'profiles.json')
+let profiles: Record<string, Profile> = {}
+try { profiles = JSON.parse(fs.readFileSync(profilesPath(), 'utf-8')) } catch {}
+function saveProfiles(): void { try { fs.writeFileSync(profilesPath(), JSON.stringify(profiles, null, 2)) } catch {} }
+
+function noteInteraction(m: TgMsg, chatTitle: string): void {
+  const key = (m.from.username ?? String(m.from.id)).toLowerCase()
+  const p = profiles[key] ?? { name: m.from.name, handle: m.from.username, firstSeen: Date.now(), lastSeen: 0, interactions: 0, sinceRefresh: 0, profile: '', recent: [] }
+  p.name = m.from.name
+  if (m.from.username) p.handle = m.from.username
+  p.lastSeen = Date.now()
+  p.interactions += 1
+  p.sinceRefresh += 1
+  p.recent.push(`[${chatTitle}] ${m.text.slice(0, 200)}`)
+  if (p.recent.length > 25) p.recent.splice(0, p.recent.length - 25)
+  profiles[key] = p
+  saveProfiles()
+}
+
+/** Her working knowledge of a person, for injection when replying to them. */
+export function telegramProfile(query: string): string {
+  const q = query.trim().toLowerCase().replace(/^@/, '')
+  const hit = Object.entries(profiles).find(([k, p]) => k === q || p.name.toLowerCase().includes(q) || (p.handle ?? '').toLowerCase() === q)
+  if (!hit) return ''
+  const [, p] = hit
+  const days = Math.max(1, Math.round((Date.now() - p.firstSeen) / 86400000))
+  return `${p.name}${p.handle ? ` (@${p.handle})` : ''} - ${p.interactions} interactions over ${days}d.${p.profile ? `\n${p.profile}` : ' No profile written yet.'}`
+}
+export function telegramProfileList(): string {
+  const e = Object.values(profiles).sort((a, b) => b.interactions - a.interactions).slice(0, 15)
+  if (!e.length) return 'no profiles yet'
+  return e.map((p) => `${p.name}${p.handle ? ` (@${p.handle})` : ''}: ${p.interactions} interactions${p.profile ? ` - ${p.profile.slice(0, 120)}` : ''}`).join('\n')
+}
+/** People due a profile refresh (enough new interactions since the last one). */
+export function telegramProfilesDue(): Array<{ key: string; name: string; recent: string; existing: string }> {
+  return Object.entries(profiles)
+    .filter(([, p]) => p.sinceRefresh >= 12)
+    .map(([key, p]) => ({ key, name: p.name, recent: p.recent.join('\n'), existing: p.profile }))
+}
+export function telegramProfileWrite(key: string, text: string): void {
+  const p = profiles[key]
+  if (!p) return
+  p.profile = text.slice(0, 800)
+  p.sinceRefresh = 0
+  saveProfiles()
+}
+/** Owner/Wendy manual note about someone. */
+export function telegramProfileNote(query: string, note: string): string {
+  const q = query.trim().toLowerCase().replace(/^@/, '')
+  const hit = Object.entries(profiles).find(([k, p]) => k === q || p.name.toLowerCase().includes(q) || (p.handle ?? '').toLowerCase() === q)
+  if (!hit) return `ERROR: no profile for "${query}" yet - profiles build as people interact`
+  const [k, p] = hit
+  p.profile = (p.profile ? p.profile + '\n' : '') + note.slice(0, 300)
+  profiles[k] = p
+  saveProfiles()
+  return `noted about ${p.name}`
 }
 
 // - per-person mutes: "don't tell me about X" with a forced-summary safety net -
