@@ -1118,16 +1118,16 @@ async function refreshThreadIndexInner(): Promise<void> {
       if (prevA && Date.now() - prevA.at < 10 * 60 * 1000) continue
       const label = labelFor(e.id, e.title)
       const tail = await runKimaki(['session', 'read', e.id], 45000, 500_000, true)
-      if (tail.startsWith('ERROR')) { announce(`[LOW] ${label} had activity.`, tierFor(e.id)); continue }
+      if (tail.startsWith('ERROR')) { announce(`[LOW] ${label} had activity.`, tierFor(e.id), e.id); continue }
       if (!shouldAnnounce(e.id, tail)) continue
       const brief = await summarizeForVoice(label, recentMessages(tail, 3))
       briefingCache.set(e.id, { s: brief, at: Date.now() })
-      announce(brief, tierFor(e.id))
+      announce(brief, tierFor(e.id), e.id)
     }
     for (const e of changed.slice(3, 5)) {
       const prev = lastAnnounced.get(e.id)
       if (prev && Date.now() - prev.at < 15 * 60 * 1000) continue
-      announce(`[LOW] ${labelFor(e.id, e.title)} also moved.`, tierFor(e.id))
+      announce(`[LOW] ${labelFor(e.id, e.title)} also moved.`, tierFor(e.id), e.id)
     }
     if (changed.length > 5) announce(`[LOW] Plus ${changed.length - 5} more threads had activity.`, 'digest')
     for (const e of fresh.slice(0, 3)) announce(`[LOW] New thread in ${path.basename(e.dir)}: ${e.title}.`, 'digest')
@@ -1148,7 +1148,7 @@ async function refreshThreadIndexInner(): Promise<void> {
       if (idleMs > 4 * 3600000 && idleMs < 48 * 3600000) {
         a.stallNotified = true
         a.hotStreak = 0
-        announce(`[MED] ${labelFor(e.id, e.title)} has gone quiet - no movement in about ${Math.round(idleMs / 3600000)} hours after working steadily.`, 'digest')
+        announce(`[MED] ${labelFor(e.id, e.title)} has gone quiet - no movement in about ${Math.round(idleMs / 3600000)} hours after working steadily.`, 'digest', e.id)
         diag('stall_notice', { id: e.id, title: e.title, idleH: Math.round(idleMs / 3600000) })
       }
     }
@@ -1217,7 +1217,7 @@ setInterval(() => {
           : shouldAnnounce(d.sessionId, out)
             ? await summarizeForVoice(labelFor(d.sessionId, d.note || 'that thread'), recentMessages(out, 3))
             : 'no real movement since my last update.'
-        announce(`Scheduled check${d.note ? ` on ${d.note}` : ''}: ${summary}`, 'interrupt')
+        announce(`Scheduled check${d.note ? ` on ${d.note}` : ''}: ${summary}`, 'interrupt', d.sessionId)
       } else {
         announce(`Reminder: ${d.note}`, 'interrupt')
       }
@@ -1337,7 +1337,9 @@ function tierFor(sessionId: string): NotifyTier {
   for (const r of Object.values(loadRoutes())) if (r.id === sessionId) return r.tier ?? 'digest'
   return 'digest'
 }
-function announce(text: string, tier: NotifyTier): void {
+function announce(text: string, tier: NotifyTier, srcId?: string): void {
+  const hm = new Date().toISOString().slice(11, 16)
+  text = `${text} [queued ${hm}Z${srcId ? ` src:${srcId}` : ''}]`
   diag('announce', { tier, text: text.slice(0, 300), inVc: !!connection })
   if (isSilenced()) {
     heldWhileSilent.push(text)
@@ -1415,7 +1417,7 @@ async function pollWatchlist(): Promise<void> {
       if (first && shouldAnnounce(w.id, tail)) {
         const brief = await summarizeForVoice(w.label, recentMessages(tail, 3))
         briefingCache.set(w.id, { s: brief, at: Date.now() })
-        announce(brief, 'interrupt')
+        announce(brief, 'interrupt', w.id)
       }
       else if (!first) w.more = true
     } else if (w.seen && (w.idle = (w.idle ?? 0) + 1) >= 2) {
@@ -1424,7 +1426,7 @@ async function pollWatchlist(): Promise<void> {
       if (w.more && shouldAnnounce(w.id, tail)) {
         const brief = await summarizeForVoice(w.label + ' (finished)', recentMessages(tail, 3))
         briefingCache.set(w.id, { s: brief, at: Date.now() })
-        announce(brief, 'interrupt')
+        announce(brief, 'interrupt', w.id)
       }
     }
   }
@@ -1658,7 +1660,7 @@ async function runTurn(text: string): Promise<void> {
     if ((heldWhileSilent.length || (dnd && (convoEvents.length || digestQueue.length))) && !text.startsWith('[')) {
       const held = [...heldWhileSilent.splice(0), ...(dnd ? [...convoEvents.splice(0), ...digestQueue.splice(0)] : [])]
       lastDeliveredAt = Date.now()
-      text = `[Context - updates queued while you were quiet or the owner was away (each tagged HIGH/MED/LOW): ${held.join(' | ')}. You may have offered a catch-up. Deliver HIGH items first, then MED; skip LOW unless they want everything. NO editorial framing or preamble ("two things worth knowing", "all polish, nothing structural") - open directly with the first item's substance; verdicts only if asked. If they dismiss ("not now", "later"), call snooze_updates and drop the subject instantly. If the owner wants everything, deliver it concisely. If they ask for the most urgent or most recent only, REASON over the list yourself, pick the single most important item (breakages and blockers beat progress notes; newest beats oldest), deliver just that one, and stop - no extra digging, no spillover into other updates unless asked.]\n${text}`
+      text = `[Context - updates queued while you were quiet or the owner was away (each tagged HIGH/MED/LOW): ${held.join(' | ')}. You may have offered a catch-up. Deliver HIGH items first, then MED; skip LOW unless they want everything. Items carry [queued HH:MMZ src:ses_...] - for items older than ~3 minutes, read_session the src first and deliver the CURRENT state, not the stale summary; never speak the bracketed metadata. NO editorial framing or preamble ("two things worth knowing", "all polish, nothing structural") - open directly with the first item's substance; verdicts only if asked. If they dismiss ("not now", "later"), call snooze_updates and drop the subject instantly. If the owner wants everything, deliver it concisely. If they ask for the most urgent or most recent only, REASON over the list yourself, pick the single most important item (breakages and blockers beat progress notes; newest beats oldest), deliver just that one, and stop - no extra digging, no spillover into other updates unless asked.]\n${text}`
     }
     log(`wendy heard: "${text.slice(0, 80)}"`)
     diag('owner_said', { text })
