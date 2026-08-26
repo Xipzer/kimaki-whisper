@@ -512,10 +512,10 @@ const TOOLS = [
     type: 'function',
     function: {
       name: 'snooze_updates',
-      description: 'Stop offering updates for a while (they keep accumulating). Call when the owner dismisses updates - "not now", "later", "stop asking".',
+      description: 'Stop offering updates for a while (they keep accumulating). Call when the owner genuinely dismisses updates - "not now", "later", "stop asking". Pass minutes: 0 to CANCEL an active snooze and restore normal flow.',
       parameters: {
         type: 'object',
-        properties: { minutes: { type: 'number', description: 'default 30' } },
+        properties: { minutes: { type: 'number', description: '0 cancels; default 30' } },
         required: [],
       },
     },
@@ -879,7 +879,12 @@ async function executeToolInner(name: string, args: Record<string, unknown>): Pr
     return dnd ? 'DND on - updates accumulate silently; only a 3+ high-priority stack will trigger a nudge' : 'DND off - normal update flow resumed'
   }
   if (name === 'snooze_updates') {
-    const mins = Math.min(Math.max(Number(args.minutes) || 30, 5), 480)
+    const raw = Number(args.minutes)
+    if (raw === 0) {
+      askSnoozedUntil = 0
+      return 'snooze cancelled - update offers flow normally again'
+    }
+    const mins = Math.min(Math.max(raw || 30, 5), 480)
     askSnoozedUntil = Date.now() + mins * 60_000
     return `snoozed - no update offers for ${mins} minutes`
   }
@@ -1898,7 +1903,7 @@ async function runTurn(text: string): Promise<void> {
     if ((heldWhileSilent.length || (dnd && (convoEvents.length || digestQueue.length))) && !text.startsWith('[')) {
       const held = [...heldWhileSilent.splice(0), ...(dnd ? [...convoEvents.splice(0), ...digestQueue.splice(0)] : [])]
       lastDeliveredAt = Date.now()
-      text = `[Context - updates queued while you were quiet or the owner was away (each tagged HIGH/MED/LOW): ${held.join(' | ')}. You may have offered a catch-up. Deliver HIGH items first, then MED; skip LOW unless they want everything. Items carry [queued HH:MMZ src:ses_...] - for items older than ~3 minutes, read_session the src first and deliver the CURRENT state, not the stale summary; never speak the bracketed metadata. NO editorial framing or preamble ("two things worth knowing", "all polish, nothing structural") - open directly with the first item's substance; verdicts only if asked. If they dismiss ("not now", "later"), call snooze_updates and drop the subject instantly. If the owner wants everything, deliver it concisely. If they ask for the most urgent or most recent only, REASON over the list yourself, pick the single most important item (breakages and blockers beat progress notes; newest beats oldest), deliver just that one, and stop - no extra digging, no spillover into other updates unless asked.]\n${text}`
+      text = `[Context - updates queued while you were quiet or the owner was away (each tagged HIGH/MED/LOW): ${held.join(' | ')}. You may have offered a catch-up. Deliver HIGH items first, then MED; skip LOW unless they want everything. Items carry [queued HH:MMZ src:ses_...] - for items older than ~3 minutes, read_session the src first and deliver the CURRENT state, not the stale summary; never speak the bracketed metadata. NO editorial framing or preamble ("two things worth knowing", "all polish, nothing structural") - open directly with the first item's substance; verdicts only if asked. Dismissal rule: ONLY treat their words as declining updates if you ACTUALLY offered updates and they are clearly responding to that offer - if you never offered, their words are about something else entirely: just answer them (the queued items are silent context, not the topic). A genuine dismissal -> snooze_updates and drop the subject instantly. If the owner wants everything, deliver it concisely. If they ask for the most urgent or most recent only, REASON over the list yourself, pick the single most important item (breakages and blockers beat progress notes; newest beats oldest), deliver just that one, and stop - no extra digging, no spillover into other updates unless asked.]\n${text}`
     }
     log(`wendy heard: "${text.slice(0, 80)}"`)
     diag('owner_said', { text })
@@ -2126,8 +2131,9 @@ async function joinAndServe(channel: VoiceBasedChannel, userId: string): Promise
     heldWhileSilent.push(...queued)
     if (heldWhileSilent.length > 12) heldWhileSilent.splice(0, heldWhileSilent.length - 12)
   }
-  const hi = queued.filter((x) => x.includes('[HIGH]')).length
-  void runTurn(`[The owner just joined voice. Greet them briefly and naturally - ONE short line, warm but efficient, no jokes or bits. Vary it; never a stock phrase.${queued.length ? ` Also: ${queued.length} update${queued.length > 1 ? 's are' : ' is'} queued${hi ? ` (${hi} high-priority)` : ''} - fold a casual offer to share into the greeting, but do NOT deliver any contents yet.` : ''}]`)
+  const totalHeld = heldWhileSilent.length
+  const hi = heldWhileSilent.filter((x) => x.includes('[HIGH]')).length
+  void runTurn(`[The owner just joined voice. Greet them briefly and naturally - ONE short line, warm but efficient, no jokes or bits. Vary it; never a stock phrase.${totalHeld ? ` Also: ${totalHeld} update${totalHeld > 1 ? 's are' : ' is'} queued${hi ? ` (${hi} high-priority)` : ''} - fold a casual offer to share into the greeting, but do NOT deliver any contents yet.` : ''}]`)
 }
 
 function leave(): void {
