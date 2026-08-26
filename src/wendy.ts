@@ -144,6 +144,7 @@ MODE 2 - ACTION (when asked to do or fetch something): reliability is everything
 - PARALLEL: fire multiple asks/dispatches in one turn - never serialize the owner's requests. ask_thread returns quick answers (about 10s) directly; longer work returns immediately and the result arrives later as a [BACKGROUND UPDATE] - when one lands, the conversation had a pause: mention it naturally, tied to what was asked, short. After dispatching long work the owner cares about, schedule_check as a safety net - the owner has ADHD and will NOT remember to ask; that is your job. "Remind me" → schedule_check. Keep tool prompts under 80 words.
 - FRESHNESS: a status update is the transcript you JUST read, never conversational memory - fresh reads override what you said minutes ago (lead with the correction: "actually, it's moved on…"). If the tail references decisions or bugs you don't understand, dig deeper - read_session with chars up to 30000, or the related threads it mentions - until you can say what is happening NOW and why, newest development first.
 - ERRORS: if a tool fails or your reasoning engine hiccups, TELL the owner plainly - what broke and what you're doing instead. Never gloss over a failure, never pretend a result came back, never silently retry into a different answer. If your history shows you errored last turn, acknowledge it before moving on ("sorry, I glitched there - here's the real answer").
+- YOUR OWN LONG WORK: when a task needs YOUR sustained effort (deep multi-repo analysis, org-wide research) rather than a thread's, self_task it - you'll work it autonomously between conversation and the result arrives as an update. Never grind long work in-turn; the foreground belongs to the owner. self_tasks_status shows progress if asked.
 - FOLLOW-THROUGH: never end a turn on a promise. Say → do → report in the SAME turn (use say to narrate while you work). If the owner repeats a request, never "I already told you" - re-verify and answer again, at most "quick recap:".
 
 UPDATES & PRIORITY: every queued update carries [HIGH]/[MED]/[LOW]. Deliver highs first; skip lows unless asked for everything. When you genuinely can't tell how much the owner cares about a topic, ask casually once ("want me to treat launcher stuff as high-priority?") and remember the answer (set_notify_tier or a route note). If the owner dismisses updates - "not now", "later", "stop asking" - snooze_updates immediately and drop the subject without comment.
@@ -353,6 +354,26 @@ const TOOLS = [
         properties: { session_id: { type: 'string', description: 'ses_… - copy exactly from lookup_thread output' } },
         required: ['session_id'],
       },
+    },
+  },
+  {
+    type: 'function',
+    function: {
+      name: 'self_task',
+      description: 'Queue a long-running task for YOURSELF (not a thread): multi-repo analysis, deep research across the organisation, anything needing your own sustained tool work. You will work it autonomously in background slices between conversation and announce the result when done. Accept, confirm briefly, move on - never attempt long work in-turn.',
+      parameters: {
+        type: 'object',
+        properties: { goal: { type: 'string', description: 'Complete, self-contained description of the task and what the result should contain' } },
+        required: ['goal'],
+      },
+    },
+  },
+  {
+    type: 'function',
+    function: {
+      name: 'self_tasks_status',
+      description: 'List your background self-tasks: goals, progress (slices worked), status, results.',
+      parameters: { type: 'object', properties: {} },
     },
   },
   {
@@ -676,6 +697,30 @@ async function executeToolInner(name: string, args: Record<string, unknown>): Pr
     return last
       ? `[latest reply in "${threadIdent(fid)}"]\n${last.slice(0, 4500)}`
       : `no assistant reply found in "${threadIdent(fid)}"`
+  }
+  if (name === 'self_task') {
+    if (selfTasks.filter((t) => t.status === 'active').length >= 5) return 'ERROR: 5 active self-tasks already - finish or fail some first'
+    const goal = String(args.goal ?? '').trim()
+    if (goal.length < 10) return 'ERROR: goal too vague - describe the task fully'
+    const t: SelfTask = {
+      id: `st_${Date.now().toString(36)}`,
+      goal,
+      status: 'active',
+      msgs: [{ role: 'system', content: WORKER_PROMPT }, { role: 'user', content: `TASK: ${goal}` }],
+      created: Date.now(), updated: Date.now(), slices: 0,
+    }
+    selfTasks.push(t)
+    if (selfTasks.length > 20) selfTasks = selfTasks.filter((x) => x.status === 'active').concat(selfTasks.filter((x) => x.status !== 'active').slice(-10))
+    saveSelfTasks()
+    diag('selftask_created', { id: t.id, goal: goal.slice(0, 100) })
+    return `accepted (${t.id}) - working on it in the background; result will arrive as an update`
+  }
+  if (name === 'self_tasks_status') {
+    if (!selfTasks.length) return 'no self-tasks yet'
+    return selfTasks.slice(-8).map((t) => {
+      const age = Math.round((Date.now() - t.created) / 60000)
+      return `[${t.status}] ${t.goal.slice(0, 70)} (${t.slices} slices, ${age}m old${t.result ? `; result: ${t.result.slice(0, 150)}` : ''})`
+    }).join('\n')
   }
   if (name === 'schedule_check') {
     if (schedules.length >= 20) return 'ERROR: too many pending schedules (20 max) - check schedules.json via bash'
@@ -1225,6 +1270,80 @@ setInterval(() => {
   })()
 }, 30000).unref()
 
+// - self-tasks: Wendy's own background workbench -
+type SelfTask = { id: string; goal: string; status: 'active' | 'done' | 'failed'; msgs: Msg[]; created: number; updated: number; slices: number; result?: string }
+const selfTasksPath = () => path.join(workspaceDir(), 'selftasks.json')
+let selfTasks: SelfTask[] = []
+try { selfTasks = JSON.parse(fs.readFileSync(selfTasksPath(), 'utf-8')) as SelfTask[] } catch {}
+function saveSelfTasks(): void { try { fs.writeFileSync(selfTasksPath(), JSON.stringify(selfTasks)) } catch {} }
+
+const WORKER_PROMPT = `You are Wendy's background worker, autonomously executing a long-running task for the owner while Wendy converses in the foreground. Work strictly with your tools; be systematic and persistent. Write intermediate findings to notes if useful. When the task is genuinely COMPLETE, reply starting with exactly "RESULT:" followed by a concise summary written for SPOKEN delivery (2-4 sentences, concrete findings). If the task is impossible or permanently stuck, reply "FAILED:" plus the reason. Otherwise, keep calling tools - plain text replies are treated as thinking notes and you will resume later.`
+
+let sliceRunning = false
+let sliceAbort: AbortController | null = null
+async function runTaskSlice(): Promise<void> {
+  if (sliceRunning || busy || capturing || isSilenced()) return
+  const t = selfTasks.find((x) => x.status === 'active')
+  if (!t) return
+  const url = brainUrl()
+  if (!url) return
+  sliceRunning = true
+  sliceAbort = new AbortController()
+  try {
+    for (let hop = 0; hop < 6; hop++) {
+      if (busy || capturing) break // foreground appeared - yield
+      const res = await fetch(`${url.replace(/\/$/, '')}/v1/chat/completions`, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json', connection: 'close' },
+        body: JSON.stringify({ model: 'local-fast', cache_prompt: true, messages: t.msgs, tools: TOOLS, max_tokens: 4000 }),
+        signal: AbortSignal.any([sliceAbort.signal, AbortSignal.timeout(120000)]),
+      }).catch(() => null)
+      if (!res?.ok) break
+      const d = (await res.json().catch(() => null)) as { choices?: Array<{ message?: { content?: string; tool_calls?: Array<{ id: string; type?: string; function: { name: string; arguments: string } }> } }> } | null
+      const m = d?.choices?.[0]?.message
+      if (!m) break
+      if (m.tool_calls?.length) {
+        for (const tc of m.tool_calls) { try { JSON.parse(tc.function.arguments || '{}') } catch { tc.function.arguments = '{}' } }
+        t.msgs.push({ role: 'assistant', content: m.content ?? null, tool_calls: m.tool_calls })
+        for (const tc of m.tool_calls) {
+          const name = tc.function.name
+          let result: string
+          if (['say', 'go_silent', 'set_dnd', 'snooze_updates', 'self_task'].includes(name)) {
+            result = 'ERROR: this tool is not available to background workers'
+          } else {
+            const args = ((): Record<string, unknown> => { try { return JSON.parse(tc.function.arguments) } catch { return {} } })()
+            result = await executeTool(name, args)
+          }
+          t.msgs.push({ role: 'tool', content: result, tool_call_id: tc.id, name })
+        }
+      } else {
+        const text = (m.content ?? '').trim()
+        t.msgs.push({ role: 'assistant', content: text })
+        if (/^RESULT:/i.test(text)) {
+          t.status = 'done'
+          t.result = text.replace(/^RESULT:\s*/i, '')
+          announce(`[MED] Background task finished - ${t.goal.slice(0, 60)}: ${t.result.slice(0, 400)}`, 'interrupt')
+          diag('selftask_done', { id: t.id, slices: t.slices })
+        } else if (/^FAILED:/i.test(text)) {
+          t.status = 'failed'
+          t.result = text.replace(/^FAILED:\s*/i, '')
+          announce(`[MED] Background task hit a wall - ${t.goal.slice(0, 60)}: ${t.result.slice(0, 300)}`, 'interrupt')
+          diag('selftask_failed', { id: t.id })
+        }
+        break
+      }
+    }
+  } catch {} finally {
+    t.slices++
+    t.updated = Date.now()
+    if (t.msgs.length > 60) t.msgs = [...t.msgs.slice(0, 2), ...t.msgs.slice(-50)]
+    saveSelfTasks()
+    sliceRunning = false
+    sliceAbort = null
+  }
+}
+setInterval(() => void runTaskSlice(), 20000).unref()
+
 // ── FEATURE A: watchlist - passive notifications on thread replies ──
 type Watch = { id: string; label: string; fp: string; baselined: boolean; expires: number; seen?: boolean; idle?: number; more?: boolean }
 const watchlist: Watch[] = []
@@ -1633,6 +1752,7 @@ async function runTurn(text: string): Promise<void> {
   }
   busy = true
   busyAckGiven = false
+  sliceAbort?.abort()
   turnStartedAt = Date.now()
   lastConvoActivity = Date.now()
   const watchdog = setTimeout(() => {
