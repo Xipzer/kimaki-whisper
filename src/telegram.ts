@@ -40,6 +40,8 @@ let contacts: Record<string, { name: string; lastSeen: number; ownerReplied?: bo
 try { contacts = JSON.parse(fs.readFileSync(contactsPath(), 'utf-8')) } catch {}
 function saveContacts(): void { try { fs.writeFileSync(contactsPath(), JSON.stringify(contacts, null, 2)) } catch {} }
 
+let bizConnId = ''
+try { bizConnId = (JSON.parse(fs.readFileSync(statePath(), 'utf-8')) as { bizConnId?: string }).bizConnId ?? '' } catch {}
 let ownerTgId = 0
 try { ownerTgId = (JSON.parse(fs.readFileSync(statePath(), 'utf-8')) as { ownerTgId?: number }).ownerTgId ?? 0 } catch {}
 let offset = 0
@@ -78,13 +80,14 @@ async function poll(): Promise<void> {
       }
       business_message?: {
         message_id: number
+        business_connection_id?: string
         chat: { id: number }
         from?: { id: number; username?: string; first_name?: string; last_name?: string }
         text?: string
         caption?: string
         date: number
       }
-      business_connection?: { is_enabled?: boolean; user?: { first_name?: string; id?: number } }
+      business_connection?: { id?: string; is_enabled?: boolean; user?: { first_name?: string; id?: number } }
       my_chat_member?: {
         chat: { id: number; type: string; title?: string }
         from?: { id: number }
@@ -116,6 +119,7 @@ async function poll(): Promise<void> {
     if (u.business_connection) {
       log(`telegram: business connection ${u.business_connection.is_enabled ? 'ENABLED' : 'disabled'} for ${u.business_connection.user?.first_name ?? '?'}`)
       if (u.business_connection.user?.id) ownerTgId = u.business_connection.user.id
+      if (u.business_connection.id) bizConnId = u.business_connection.id
       continue
     }
     const cm = u.my_chat_member
@@ -129,6 +133,7 @@ async function poll(): Promise<void> {
       continue
     }
     const bm = u.business_message
+    if (bm?.business_connection_id) bizConnId = bm.business_connection_id
     if (!bm?.from) continue
     const fromOwner = bm.from.id !== bm.chat.id // outgoing: owner replying inside a business chat
     const senderId = String(bm.from.id)
@@ -153,7 +158,7 @@ async function poll(): Promise<void> {
     try { fs.appendFileSync(inboxPath(), JSON.stringify(msg) + '\n') } catch {}
     if ((msg.tier === 'vip' || msg.tier === 'known') && onFlagged) onFlagged(msg)
   }
-  try { fs.writeFileSync(statePath(), JSON.stringify({ offset, ownerTgId })) } catch {}
+  try { fs.writeFileSync(statePath(), JSON.stringify({ offset, ownerTgId, bizConnId })) } catch {}
 }
 
 let polling = false
@@ -202,6 +207,49 @@ export function telegramInbox(hours = 24): string {
     parts.push(`EVERYTHING ELSE (${other.length} msgs from ${senders.size} senders - likely mostly spam):\n${[...senders.entries()].slice(0, 15).map(([n, c]) => `${n} (${c})`).join(', ')}`)
   }
   return header + parts.join('\n\n')
+}
+
+/** Resolve a chat by name fragment or id across known DMs and groups. */
+function resolveChat(query: string): { id: number; title: string; isGroup: boolean } | null {
+  const q = query.trim().toLowerCase().replace(/^@/, '')
+  if (/^-?\d{5,}$/.test(q)) {
+    const g = seenGroups[q]
+    return { id: Number(q), title: g?.title ?? q, isGroup: q.startsWith('-') }
+  }
+  for (const [id, g] of Object.entries(seenGroups)) {
+    if (g.title.toLowerCase().includes(q)) return { id: Number(id), title: g.title, isGroup: true }
+  }
+  for (const [id, c] of Object.entries(contacts)) {
+    if (c.name.toLowerCase().includes(q)) return { id: Number(id), title: c.name, isGroup: false }
+  }
+  return null
+}
+
+/** Send a message. DMs go through the business connection (as the owner);
+ *  groups go through the bot's own identity. HTML formatting supported. */
+export async function telegramSend(target: string, html: string): Promise<string> {
+  const token = (loadConfig() as TgConfig).telegramBotToken
+  if (!token) return 'ERROR: no telegram token configured'
+  const chat = resolveChat(target)
+  if (!chat) return `ERROR: no known chat matching "${target}" - use telegram_groups list or a numeric id`
+  const body: Record<string, unknown> = {
+    chat_id: chat.id,
+    text: html.slice(0, 4000),
+    parse_mode: 'HTML',
+    link_preview_options: { is_disabled: true },
+  }
+  if (!chat.isGroup && bizConnId) body.business_connection_id = bizConnId
+  const res = await fetch(`https://api.telegram.org/bot${token}/sendMessage`, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify(body),
+    signal: AbortSignal.timeout(20000),
+  }).catch(() => null)
+  if (!res) return 'ERROR: network failure reaching Telegram'
+  const d = (await res.json().catch(() => null)) as { ok?: boolean; description?: string } | null
+  if (!d?.ok) return `ERROR: Telegram refused - ${d?.description ?? 'unknown'}`
+  log(`telegram: sent to "${chat.title}" (${chat.isGroup ? 'group, as bot' : 'DM, as owner'})`)
+  return `sent to "${chat.title}"${chat.isGroup ? ' (as the bot)' : ' (as you, via business connection)'}`
 }
 
 /** Group management surface for Wendy's tooling. */
