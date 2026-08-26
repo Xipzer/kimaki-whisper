@@ -145,6 +145,7 @@ MODE 2 - ACTION (when asked to do or fetch something): reliability is everything
 - FRESHNESS: a status update is the transcript you JUST read, never conversational memory - fresh reads override what you said minutes ago (lead with the correction: "actually, it's moved on…"). If the tail references decisions or bugs you don't understand, dig deeper - read_session with chars up to 30000, or the related threads it mentions - until you can say what is happening NOW and why, newest development first.
 - ERRORS: if a tool fails or your reasoning engine hiccups, TELL the owner plainly - what broke and what you're doing instead. Never gloss over a failure, never pretend a result came back, never silently retry into a different answer. If your history shows you errored last turn, acknowledge it before moving on ("sorry, I glitched there - here's the real answer").
 - YOUR OWN LONG WORK: when a task needs YOUR sustained effort (deep multi-repo analysis, org-wide research) rather than a thread's, self_task it - you'll work it autonomously between conversation and the result arrives as an update. Never grind long work in-turn; the foreground belongs to the owner. self_tasks_status shows progress if asked.
+- SPAWNING AGENTS: spawn_agent creates full agents in the #wendy Discord channel - the owner can read every thread and reply into them directly (your watchers will pick up their input). Hard cap on concurrent agents; check spawns_status before spawning, collect before expanding. The spawn ledger is your authoritative memory of everything you've delegated - you can never lose track of an agent.
 - FOLLOW-THROUGH: never end a turn on a promise. Say → do → report in the SAME turn (use say to narrate while you work). If the owner repeats a request, never "I already told you" - re-verify and answer again, at most "quick recap:".
 
 UPDATES & PRIORITY: every queued update carries [HIGH]/[MED]/[LOW]. Deliver highs first; skip lows unless asked for everything. When you genuinely can't tell how much the owner cares about a topic, ask casually once ("want me to treat launcher stuff as high-priority?") and remember the answer (set_notify_tier or a route note). If the owner dismisses updates - "not now", "later", "stop asking" - snooze_updates immediately and drop the subject without comment.
@@ -354,6 +355,29 @@ const TOOLS = [
         properties: { session_id: { type: 'string', description: 'ses_… - copy exactly from lookup_thread output' } },
         required: ['session_id'],
       },
+    },
+  },
+  {
+    type: 'function',
+    function: {
+      name: 'spawn_agent',
+      description: 'Spawn a full agent (opencode, local model) in the #wendy Discord channel where the owner can read and reply. For delegating substantial subtasks. Concurrency-capped: check spawns_status first; collect finished work before spawning more. Every spawn is ledgered and auto-watched - results arrive as updates.',
+      parameters: {
+        type: 'object',
+        properties: {
+          goal: { type: 'string', description: 'Complete self-contained task for the agent' },
+          label: { type: 'string', description: 'Short spoken name for this agent, e.g. "repo scanner"' },
+        },
+        required: ['goal'],
+      },
+    },
+  },
+  {
+    type: 'function',
+    function: {
+      name: 'spawns_status',
+      description: 'Your spawn ledger: every agent you have spawned - running/done/stale, ages, results. THE authoritative record; check it before spawning more.',
+      parameters: { type: 'object', properties: {} },
     },
   },
   {
@@ -582,11 +606,10 @@ async function executeToolInner(name: string, args: Record<string, unknown>): Pr
     const newId = out.match(/ses_[a-zA-Z0-9]+/)?.[0]
     if (newId) {
       const label = String(args.prompt ?? '').slice(0, 50)
-      recentDispatches.push({ id: newId, label, ts: Date.now() })
-      if (recentDispatches.length > 10) recentDispatches.splice(0, recentDispatches.length - 10)
+      ledgerAdd(newId, label, String(args.prompt ?? ''))
       watchSession(newId, label)
       setTimeout(() => void refreshThreadIndex(), 60000)
-      return `dispatched - new session ${newId} (auto-watched; remember this id for follow-ups)`
+      return `dispatched - new session ${newId} (auto-watched and in your spawn ledger)`
     }
     return out || 'dispatched'
   }
@@ -607,7 +630,7 @@ async function executeToolInner(name: string, args: Record<string, unknown>): Pr
           const brief = b && Date.now() - b.at < 15 * 60 * 1000 ? ` | BRIEFING (${Math.max(1, Math.round((Date.now() - b.at) / 60000))}m old): ${b.s.slice(0, 220)}` : ''
           return `${nicknames[h.id] ? `[${nicknames[h.id]}] ` : ''}${h.title} - session ${h.id} (project: ${h.dir.split('/').pop()}${age})${sub}${brief}`
         }).join('\n')
-      : `no matches in index${recentDispatches.length ? ` - NOTE: recently dispatched threads (not indexed yet): ${recentDispatches.slice(-5).map((d) => `"${d.label}" = ${d.id}`).join('; ')}` : ' - try search_sessions for a deep search'}`
+      : `no matches in index${runningSpawns().length ? ` - NOTE: your running spawned agents (may not be indexed yet): ${runningSpawns().slice(-5).map((d) => `"${d.label}" = ${d.id}`).join('; ')}` : ' - try search_sessions for a deep search'}`
   }
   if (name === 'watch_thread') {
     watchSession(String(args.session_id ?? ''), String(args.label ?? 'thread'))
@@ -698,6 +721,35 @@ async function executeToolInner(name: string, args: Record<string, unknown>): Pr
       ? `[latest reply in "${threadIdent(fid)}"]\n${last.slice(0, 4500)}`
       : `no assistant reply found in "${threadIdent(fid)}"`
   }
+  if (name === 'spawn_agent') {
+    const cfg = loadConfig() as { wendyChannelId?: string; maxSpawnedAgents?: number }
+    if (!cfg.wendyChannelId) return 'ERROR: no wendyChannelId configured'
+    const cap = cfg.maxSpawnedAgents ?? 3
+    const running = runningSpawns()
+    if (running.length >= cap) {
+      return `ERROR: ${running.length}/${cap} agents already running (${running.map((r) => r.label).join(', ')}) - collect results or wait before spawning more`
+    }
+    const goal = String(args.goal ?? '').trim()
+    if (goal.length < 10) return 'ERROR: goal too vague'
+    const label = String(args.label ?? goal.slice(0, 40))
+    const out = await runKimaki([
+      'send', '--channel', cfg.wendyChannelId, '--prompt', goal,
+      ...(ownerId() ? ['--user', ownerId()!] : []),
+    ], 60000)
+    const newId = out.match(/ses_[a-zA-Z0-9]+/)?.[0]
+    if (!newId) return `ERROR: spawn failed - ${out.slice(0, 150)}`
+    ledgerAdd(newId, label, goal)
+    watchSession(newId, label)
+    setTimeout(() => void refreshThreadIndex(), 60000)
+    return `spawned "${label}" (${newId}) in the wendy channel - ledgered, watched, owner can see it`
+  }
+  if (name === 'spawns_status') {
+    if (!spawns.length) return 'no spawned agents yet'
+    return spawns.slice(-10).map((sp) => {
+      const age = Math.round((Date.now() - sp.at) / 60000)
+      return `[${sp.status}] "${sp.label}" ${sp.id} (${age}m old${sp.result ? `; result: ${sp.result.slice(0, 120)}` : ''})`
+    }).join('\n')
+  }
   if (name === 'self_task') {
     if (selfTasks.filter((t) => t.status === 'active').length >= 5) return 'ERROR: 5 active self-tasks already - finish or fail some first'
     const goal = String(args.goal ?? '').trim()
@@ -767,6 +819,9 @@ async function executeToolInner(name: string, args: Record<string, unknown>): Pr
       `ACTIVE NOW (last hour): ${activeNow.length ? activeNow.map((x) => `${labelFor(x.e.id, x.e.title).slice(0, 50)} [${path.basename(x.e.dir)}, ${Math.max(1, Math.round(x.age / 60000))}m ago, ${x.e.id}]`).join('; ') : 'nothing'}`,
       `WORKED TODAY: ${today.length} threads across: ${projLine || 'none'}`,
       stalled.length ? `WENT QUIET MID-TASK: ${stalled.map((e) => labelFor(e.id, e.title).slice(0, 50)).join('; ')}` : '',
+      runningSpawns().length || selfTasks.some((t) => t.status === 'active')
+        ? `ORCHESTRATION: ${runningSpawns().map((sp) => `"${sp.label}" running ${Math.round((Date.now() - sp.at) / 60000)}m`).join('; ') || 'no agents'}${selfTasks.some((t) => t.status === 'active') ? `; ${selfTasks.filter((t) => t.status === 'active').length} self-task(s) active` : ''}`
+        : '',
     ].filter(Boolean).join('\n')
   }
   if (name === 'index_stats') {
@@ -1277,7 +1332,7 @@ let selfTasks: SelfTask[] = []
 try { selfTasks = JSON.parse(fs.readFileSync(selfTasksPath(), 'utf-8')) as SelfTask[] } catch {}
 function saveSelfTasks(): void { try { fs.writeFileSync(selfTasksPath(), JSON.stringify(selfTasks)) } catch {} }
 
-const WORKER_PROMPT = `You are Wendy's background worker, autonomously executing a long-running task for the owner while Wendy converses in the foreground. Work strictly with your tools; be systematic and persistent. Write intermediate findings to notes if useful. For heavy or parallelizable subtasks, DELEGATE: dispatch_task/send_to_session spin up full opencode agents (running on the same local model) - you can fan out several, keep working yourself, and collect their results via read_session/fetch_reply. You are an orchestrator with your own hands, not just a worker. When the task is genuinely COMPLETE, reply starting with exactly "RESULT:" followed by a concise summary written for SPOKEN delivery (2-4 sentences, concrete findings). If the task is impossible or permanently stuck, reply "FAILED:" plus the reason. Otherwise, keep calling tools - plain text replies are treated as thinking notes and you will resume later.`
+const WORKER_PROMPT = `You are Wendy's background worker, autonomously executing a long-running task for the owner while Wendy converses in the foreground. Work strictly with your tools; be systematic and persistent. Write intermediate findings to notes if useful. For heavy or parallelizable subtasks, DELEGATE with spawn_agent (full opencode agents on the local model, visible to the owner in the #wendy channel). Respect the concurrency cap - check spawns_status, collect finished work before spawning more, and never lose track: the ledger is authoritative. Collect results via read_session/fetch_reply. You are an orchestrator with your own hands, not just a worker. When the task is genuinely COMPLETE, reply starting with exactly "RESULT:" followed by a concise summary written for SPOKEN delivery (2-4 sentences, concrete findings). If the task is impossible or permanently stuck, reply "FAILED:" plus the reason. Otherwise, keep calling tools - plain text replies are treated as thinking notes and you will resume later.`
 
 let sliceRunning = false
 let sliceAbort: AbortController | null = null
@@ -1500,7 +1555,31 @@ function fingerprint(tail: string): string { return tail.slice(-3000) }
 // if a session's content hasn't changed since we last told the owner, stay quiet.
 const lastAnnounced = new Map<string, { fp: string; at: number }>()
 const briefingCache = new Map<string, { s: string; at: number }>()
-const recentDispatches: Array<{ id: string; label: string; ts: number }> = []
+
+// - spawn ledger: authoritative record of every agent Wendy has spawned -
+type Spawn = { id: string; label: string; goal: string; at: number; status: 'running' | 'done' | 'stale'; result?: string }
+const spawnsPath = () => path.join(workspaceDir(), 'spawns.json')
+let spawns: Spawn[] = []
+try { spawns = JSON.parse(fs.readFileSync(spawnsPath(), 'utf-8')) as Spawn[] } catch {}
+function saveSpawns(): void { try { fs.writeFileSync(spawnsPath(), JSON.stringify(spawns, null, 2)) } catch {} }
+function ledgerAdd(id: string, label: string, goal: string): void {
+  spawns.push({ id, label, goal: goal.slice(0, 300), at: Date.now(), status: 'running' })
+  if (spawns.length > 40) spawns = spawns.filter((x) => x.status === 'running').concat(spawns.filter((x) => x.status !== 'running').slice(-25))
+  saveSpawns()
+  diag('spawn_registered', { id, label })
+}
+function ledgerComplete(id: string, result?: string): void {
+  const sp = spawns.find((x) => x.id === id && x.status === 'running')
+  if (!sp) return
+  sp.status = 'done'
+  if (result) sp.result = result.slice(0, 300)
+  saveSpawns()
+}
+function runningSpawns(): Spawn[] {
+  const now = Date.now()
+  for (const sp of spawns) if (sp.status === 'running' && now - sp.at > 2 * 3600000) { sp.status = 'stale'; saveSpawns() }
+  return spawns.filter((x) => x.status === 'running')
+}
 function shouldAnnounce(id: string, tail: string): boolean {
   const fp = fingerprint(tail)
   const prev = lastAnnounced.get(id)
@@ -1542,6 +1621,7 @@ async function pollWatchlist(): Promise<void> {
     } else if (w.seen && (w.idle = (w.idle ?? 0) + 1) >= 2) {
       watchlist.splice(i, 1)
       diag('watch_done', { id: w.id, label: w.label, hadMore: !!w.more })
+      ledgerComplete(w.id, briefingCache.get(w.id)?.s)
       if (w.more && shouldAnnounce(w.id, tail)) {
         const brief = await summarizeForVoice(w.label + ' (finished)', recentMessages(tail, 3))
         briefingCache.set(w.id, { s: brief, at: Date.now() })
