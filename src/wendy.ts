@@ -26,7 +26,7 @@ import prism from 'prism-media'
 import { Readable } from 'node:stream'
 import { execFile, spawn } from 'node:child_process'
 import { loadConfig, log } from './config.js'
-import { startTelegram, telegramInbox, setTelegramFlaggedHandler, telegramGroupsStatus, telegramGroupSetMuted, telegramSend, telegramGrant, telegramSetTone, telegramPolicyStatus, telegramAutoDrain, telegramLowBudgets, setTelegramAutonomousHandler, telegramPendingSummaries, telegramDrainChat, telegramWatchMode, telegramChatDigest, telegramWho, telegramRoster, telegramMutePerson, telegramPendingPeopleSummaries, telegramDrainPerson, telegramPeopleStatus, telegramProfile, telegramProfileList, telegramProfilesDue, telegramProfileWrite, telegramProfileNote } from './telegram.js'
+import { startTelegram, telegramInbox, setTelegramFlaggedHandler, telegramGroupsStatus, telegramGroupSetMuted, telegramSend, telegramGrant, telegramSetTone, telegramPolicyStatus, telegramAutoDrain, telegramLowBudgets, setTelegramAutonomousHandler, telegramPendingSummaries, telegramDrainChat, telegramWatchMode, telegramChatDigest, telegramWho, telegramRoster, telegramMutePerson, telegramPendingPeopleSummaries, telegramDrainPerson, telegramPeopleStatus, telegramProfile, telegramProfileList, telegramProfilesDue, telegramProfileWrite, telegramProfileNote, telegramChatMembers } from './telegram.js'
 
 // ── config accessors ─────────────────────────────────────────────
 function brainUrl(): string | undefined {
@@ -161,6 +161,7 @@ TELEGRAM SECURITY - ABSOLUTE RULES:
 0ac. PEOPLE YOU KNOW: you build cross-chat profiles automatically - how someone talks, what they usually want, running jokes, and the tells for when they are being serious. When replying to someone familiar, their profile arrives with the message; person_profile looks anyone up, person_note records something worth keeping. Read the register: a mate who is usually pure banter may occasionally ask something real - when the ASK is genuine (research, analysis, a code question, something that matters to them), drop the roasting and answer properly, using your tools if needed. The relationship sets the default tone; the specific message decides the actual reply.
 0ab. PERSON MUTES: "I don't want to hear about X" or "...for the next 20 messages" -> telegram_mute_person. While muted you handle that person yourself and their traffic never interrupts him - but every 10 exchanges he has not seen, you hand him a short catch-up automatically. Anything consequential, sensitive or about money still breaks through immediately regardless of mutes. telegram_people shows who is muted.
 0aa. CHAT AWARENESS: Telegram chats surface exactly like agent threads - activity builds up and you summarise it into the same update stream (priorities, DND, staleness checks all apply). Per chat the owner can set immediate / threshold-N / ignore via telegram_watch - offer it when a chat is noisy ("want me to only flag that one when it really kicks off?"). Anyone @-mentioning you or him always breaks through a threshold. telegram_chat gives an on-demand read of one chat.
+0b1. RIGHT CHAT, RIGHT PERSON: before sending, be certain WHICH chat the person is in - telegram_who tells you their handle, telegram_members tells you who is in a chat. If a send tags someone who has never spoken in that chat it is BLOCKED and you are told where they actually are: retarget, do not force it. A message in the wrong chat cannot be unsent.
 0b. TAGGING: NEVER guess a handle - call telegram_who first. If it has no record, say so plainly ("I don't have his handle - what is it?"); a guessed tag notifies nobody and looks broken. A Telegram @mention must be the person's real @username handle (no spaces), NOT their display nickname, and it MUST be followed by a space before any other text or punctuation - "@handle you're wrong", never "@handleyou're wrong" or "@handle," jammed together. If you don't know someone's handle, say so instead of guessing - a wrong tag silently fails to notify them.
 0c. TONE REGISTER - default is PROFESSIONAL: measured, courteous, no profanity, no trolling. Never rude by default, no matter what others in a chat are doing. casual = relaxed and friendly; banter = the boys, where trolling and profanity are welcome. You only move off professional when the owner tells you a chat's register (telegram_tone) or you infer it and HE CONFIRMS. When in doubt, professional.
 0d. AUTONOMOUS REPLYING - budget model: you reply on your own ONLY with a live grant for that specific chat ("you can reply to the next 5 messages from X" -> telegram_grant). Never grant yourself. Every send reports your remaining budget. When you are down to 1-2 replies and the conversation is clearly still live, ASK for more before you run out - do not go silent mid-exchange. When it hits zero, go back to confirming each message. INDEFINITE MODE: if he grants open-ended autonomy ("just reply to them from now on"), record it with count -1 (optionally scoped to one person). It never expires and has no counter - so accountability is on YOU: summarise what you have been saying at natural moments in conversation, exactly like you report on agent threads, and flag anything notable immediately. Indefinite autonomy never overrides the stop-and-ask rules below. telegram_policy shows your standing everywhere. Read the room: if a conversation is heating up, becoming consequential, involves money/commitments/anything sensitive, or you are simply unsure - stop and ask him even with budget remaining. You will automatically summarise every autonomous reply you send every 10 minutes so he always knows what went out in his name.
@@ -592,6 +593,14 @@ const TOOLS = [
   {
     type: 'function',
     function: {
+      name: 'telegram_members',
+      description: 'Who is known to be in a chat (everyone who has spoken there). Check this before sending to a chat you are not certain about - sends that tag someone absent from the target chat are BLOCKED automatically, but checking first is faster.',
+      parameters: { type: 'object', properties: { target: { type: 'string' } }, required: ['target'] },
+    },
+  },
+  {
+    type: 'function',
+    function: {
       name: 'telegram_who',
       description: 'Look up a person\'s real @handle before tagging them - checks everyone who has messaged plus live chat-admin rosters. NEVER guess a handle: if this returns nothing, say you do not have it and ask the owner.',
       parameters: {
@@ -1015,6 +1024,9 @@ async function executeToolInner(name: string, args: Record<string, unknown>): Pr
   }
   if (name === 'telegram_chat') {
     return telegramChatDigest(String(args.target ?? ''))
+  }
+  if (name === 'telegram_members') {
+    return telegramChatMembers(String(args.target ?? ''))
   }
   if (name === 'telegram_who') {
     const direct = await telegramWho(String(args.name ?? ''), args.chat as string | undefined)

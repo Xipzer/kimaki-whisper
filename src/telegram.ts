@@ -244,6 +244,7 @@ function trackActivity(m: TgMsg, chatTitle: string): boolean {
   p.title = chatTitle
   if (p.notify === 'ignore') { policies[id] = p; savePolicies(); return false }
   noteInteraction(m, chatTitle)
+  noteMember(String(m.chatId), m)
   const pk = personKey(m)
   if (personMuted(pk)) {
     const pp = people[pk]
@@ -308,6 +309,27 @@ export function telegramChatDigest(target: string): string {
 
 // - person profiles: cross-chat, persistent, auto-consolidated -
 type Profile = { name: string; handle?: string; firstSeen: number; lastSeen: number; interactions: number; sinceRefresh: number; profile: string; recent: string[] }
+const membersPath = () => path.join(tgDir(), 'chat-members.json')
+let chatMembers: Record<string, Record<string, { name: string; username?: string }>> = {}
+try { chatMembers = JSON.parse(fs.readFileSync(membersPath(), 'utf-8')) } catch {}
+function saveMembers(): void { try { fs.writeFileSync(membersPath(), JSON.stringify(chatMembers)) } catch {} }
+function noteMember(chatId: string, m: TgMsg): void {
+  const c = chatMembers[chatId] ?? {}
+  c[String(m.from.id)] = { name: m.from.name, username: m.from.username }
+  chatMembers[chatId] = c
+  saveMembers()
+}
+/** Which known chats has this handle actually spoken in? */
+function chatsForHandle(handle: string): Array<{ id: string; title: string }> {
+  const h = handle.toLowerCase().replace(/^@/, '')
+  const out: Array<{ id: string; title: string }> = []
+  for (const [cid, members] of Object.entries(chatMembers)) {
+    if (Object.values(members).some((u) => (u.username ?? '').toLowerCase() === h)) {
+      out.push({ id: cid, title: seenGroups[cid]?.title ?? policies[cid]?.title ?? cid })
+    }
+  }
+  return out
+}
 const profilesPath = () => path.join(tgDir(), 'profiles.json')
 let profiles: Record<string, Profile> = {}
 try { profiles = JSON.parse(fs.readFileSync(profilesPath(), 'utf-8')) } catch {}
@@ -344,7 +366,7 @@ export function telegramProfileList(): string {
 /** People due a profile refresh (enough new interactions since the last one). */
 export function telegramProfilesDue(): Array<{ key: string; name: string; recent: string; existing: string }> {
   return Object.entries(profiles)
-    .filter(([, p]) => p.sinceRefresh >= 12)
+    .filter(([, p]) => p.sinceRefresh >= 6)
     .map(([key, p]) => ({ key, name: p.name, recent: p.recent.join('\n'), existing: p.profile }))
 }
 export function telegramProfileWrite(key: string, text: string): void {
@@ -450,6 +472,16 @@ export async function telegramWho(query: string, chatHint?: string): Promise<str
   return [...new Set(hits)].slice(0, 8).join('\n')
 }
 
+/** Who is known to be in a given chat (people who have spoken there). */
+export function telegramChatMembers(target: string): string {
+  const chat = resolveChat(target)
+  if (!chat) return `ERROR: no known chat matching "${target}"`
+  const m = chatMembers[String(chat.id)] ?? {}
+  const list = Object.values(m)
+  if (!list.length) return `nobody has spoken in "${chat.title}" since I started watching - I cannot confirm who is in there`
+  return `Known in "${chat.title}": ` + list.map((u) => `${u.name}${u.username ? ` (@${u.username})` : ' (no handle)'}`).join(', ')
+}
+
 /** Everyone whose handle is known, for a chat or overall. */
 export function telegramRoster(): string {
   const known = Object.entries(contacts).filter(([, c]) => c.username)
@@ -501,6 +533,16 @@ export async function telegramSend(target: string, html: string): Promise<string
     const rest = words.slice(1).join(' ')
     return `@${words[0]}${rest ? ' ' + rest : ''}`
   })
+  // MISDIRECTION GUARD: if the message tags someone, make sure they are actually
+  // in this chat - a wrong-chat send cannot be unsent.
+  for (const tag of out.match(/@[A-Za-z0-9_]{3,32}/g) ?? []) {
+    const h = tag.slice(1).toLowerCase()
+    if (h === botHandle || h === ownerHandle) continue
+    const where = chatsForHandle(h)
+    if (where.length && !where.some((w) => w.id === String(chat.id))) {
+      return `BLOCKED: you tagged ${tag} but they have never spoken in "${chat.title}" - they are in ${where.map((w) => `"${w.title}"`).join(', ')}. Retarget the send or confirm with the owner; a wrong-chat message cannot be unsent.`
+    }
+  }
   const body: Record<string, unknown> = {
     chat_id: chat.id,
     text: out.slice(0, 4000),
