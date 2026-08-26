@@ -961,7 +961,7 @@ export async function think(userText: string, onSentence?: (s: string) => void):
     // closed server-side and the first reuse fails instantly with a reset.
     let out: BrainOut = { content: '', toolCalls: [], error: 'unreachable' }
     for (let attempt = 0; attempt < 2; attempt++) {
-      out = await brainRequest(url.replace(/\/$/, ''), { model: 'local-fast', cache_prompt: true, messages, ...(lastLap ? {} : { tools: TOOLS }), max_tokens: 4000 }, onSentence)
+      out = await brainRequest(url.replace(/\/$/, ''), { model: 'local-fast', cache_prompt: true, messages, ...(lastLap ? {} : { tools: TOOLS }), max_tokens: 16384 }, onSentence)
       if (!out.error) break
       log(`wendy brain attempt ${attempt + 1} failed: ${out.error}`)
       await new Promise((r) => setTimeout(r, 1500))
