@@ -46,6 +46,10 @@ let bizConnId = ''
 try { bizConnId = (JSON.parse(fs.readFileSync(statePath(), 'utf-8')) as { bizConnId?: string }).bizConnId ?? '' } catch {}
 let ownerTgId = 0
 try { ownerTgId = (JSON.parse(fs.readFileSync(statePath(), 'utf-8')) as { ownerTgId?: number }).ownerTgId ?? 0 } catch {}
+function ownerIdentity(): { id: number; handle: string } {
+  const cfg = loadConfig() as { telegramOwnerId?: number; telegramOwnerHandle?: string }
+  return { id: ownerTgId || Number(cfg.telegramOwnerId ?? 0), handle: (ownerHandle || String(cfg.telegramOwnerHandle ?? '')).toLowerCase().replace(/^@/, '') }
+}
 let offset = 0
 try { offset = (JSON.parse(fs.readFileSync(statePath(), 'utf-8')) as { offset?: number }).offset ?? 0 } catch {}
 
@@ -56,13 +60,16 @@ export function setTelegramAutonomousHandler(fn: (m: TgMsg, p: { tone: string; r
 /** True only for the real owner - verified by immutable Telegram user id,
  *  never by display name or handle text (both are trivially spoofed). */
 export function isVerifiedOwner(m: TgMsg): boolean {
-  return !!ownerTgId && m.from.id === ownerTgId
+  const o = ownerIdentity()
+  return !!o.id && m.from.id === o.id
 }
 function maybeAutonomous(m: TgMsg): void {
   // the owner @-mentioning her is standing authority to reply to HIM, anywhere
   if (isVerifiedOwner(m) && onAutonomous) {
     const t = m.text.toLowerCase()
-    if ((botHandle && t.includes('@' + botHandle)) || /\bwendy\b/.test(t)) {
+    const tagged = (botHandle && t.includes('@' + botHandle)) || /\bwendy\b/.test(t)
+    log(`telegram: owner message${tagged ? ' TAGGING YOU - replying' : ' (not tagged)'}`)
+    if (tagged) {
       onAutonomous(m, { tone: policies[String(m.chatId)]?.tone ?? 'casual', remaining: -1, scope: 'owner asked you directly', title: policies[String(m.chatId)]?.title ?? 'chat' })
       return
     }
@@ -171,6 +178,8 @@ async function poll(): Promise<void> {
     const fromOwner = bm.from.id !== bm.chat.id // outgoing: owner replying inside a business chat
     const senderId = String(bm.from.id)
     if (fromOwner) {
+      if (!ownerTgId) { ownerTgId = bm.from.id; try { const st = JSON.parse(fs.readFileSync(statePath(), 'utf-8')) as Record<string, unknown>; fs.writeFileSync(statePath(), JSON.stringify({ ...st, ownerTgId })) } catch {} }
+      if (!ownerHandle && bm.from.username) ownerHandle = bm.from.username.toLowerCase()
       // the owner replied to this chat -> promote the counterparty to "known"
       const counterId = String(bm.chat.id)
       contacts[counterId] = { ...(contacts[counterId] ?? { name: '?', lastSeen: 0 }), ownerReplied: true, lastSeen: Date.now() }
@@ -274,7 +283,8 @@ function trackActivity(m: TgMsg, chatTitle: string): boolean {
   policies[id] = p
   savePolicies()
   const t = m.text.toLowerCase()
-  return (!!botHandle && t.includes('@' + botHandle)) || (!!ownerHandle && t.includes('@' + ownerHandle))
+  const o = ownerIdentity()
+  return (!!botHandle && t.includes('@' + botHandle)) || (!!o.handle && t.includes('@' + o.handle))
 }
 
 /** Chats whose activity has crossed their summary threshold. */
