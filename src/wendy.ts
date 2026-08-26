@@ -1518,6 +1518,7 @@ async function speak(text: string): Promise<void> {
       .replace(/\s*\n+\s*/g, '. ')
       .replace(/\.{2,}/g, '.')
       .trim()
+      .replace(/[,;:\-]\s*$/, '')
       .replace(/([^.!?])$/, '$1.')
     const wav = await tts(speakable)
     if (!wav) { log('wendy: TTS failed'); return }
@@ -1558,6 +1559,7 @@ function recordAcceptedRms(rms: number): void {
 let capturing = false
 let pendingUtterance: string | null = null
 let inputSeq = 0
+let streamDrains = 0
 let busyAckGiven = false
 let turnStartedAt = 0
 let lastBusyAck = 0
@@ -1640,12 +1642,15 @@ async function runTurn(text: string): Promise<void> {
     const drain = async (): Promise<void> => {
       if (draining) return
       draining = true
+      streamDrains++
       try {
         while (sentBuf.length) {
-          const chunk = sentBuf.splice(0).join(' ')
+          // superseded by newer input, or silenced -> stop talking entirely
+          if (seq !== inputSeq || isSilenced()) { sentBuf.length = 0; break }
+          const chunk = sentBuf.splice(0, 3).join(' ') // cap: bounded synth time per chunk
           await speak(chunk) // awaits playback - later sentences coalesce into one prosody unit
         }
-      } finally { draining = false }
+      } finally { draining = false; streamDrains-- }
     }
     const streamer = text.startsWith('[') ? undefined : (sent: string): void => {
       if (seq !== inputSeq || isSilenced()) return
@@ -1723,6 +1728,9 @@ function listenTo(channel: VoiceBasedChannel, userId: string): void {
       capturing = false
       void (async () => {
         const resumeIfPhantom = (): void => {
+          // a streamed reply that's still draining will continue on its own -
+          // replaying the cut chunk now would land AFTER the next chunk (scrambled)
+          if (streamDrains > 0) { cutSpeech = []; return }
           if (interrupted && cutSpeech.length) {
             log('wendy: barge-in was a phantom - resuming what I was saying')
             diag('barge_in_resumed', { sentences: cutSpeech.length })
