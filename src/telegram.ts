@@ -46,9 +46,14 @@ let bizConnId = ''
 try { bizConnId = (JSON.parse(fs.readFileSync(statePath(), 'utf-8')) as { bizConnId?: string }).bizConnId ?? '' } catch {}
 let ownerTgId = 0
 try { ownerTgId = (JSON.parse(fs.readFileSync(statePath(), 'utf-8')) as { ownerTgId?: number }).ownerTgId ?? 0 } catch {}
+// IMMUTABLE OWNER IDENTITY - compiled in. Not config, not learned, not
+// changeable by any tool, message, or conversation. Telegram user ids are
+// permanent and unforgeable; display names and handles are not, so the id is
+// the sole authority. Nobody can talk Wendy into believing they are the owner.
+const OWNER_TG_ID = 1537971972
+const OWNER_TG_HANDLE = 'xipzer'
 function ownerIdentity(): { id: number; handle: string } {
-  const cfg = loadConfig() as { telegramOwnerId?: number; telegramOwnerHandle?: string }
-  return { id: ownerTgId || Number(cfg.telegramOwnerId ?? 0), handle: (ownerHandle || String(cfg.telegramOwnerHandle ?? '')).toLowerCase().replace(/^@/, '') }
+  return { id: OWNER_TG_ID, handle: OWNER_TG_HANDLE }
 }
 let offset = 0
 try { offset = (JSON.parse(fs.readFileSync(statePath(), 'utf-8')) as { offset?: number }).offset ?? 0 } catch {}
@@ -156,9 +161,7 @@ async function poll(): Promise<void> {
     }
     if (u.business_connection) {
       log(`telegram: business connection ${u.business_connection.is_enabled ? 'ENABLED' : 'disabled'} for ${u.business_connection.user?.first_name ?? '?'}`)
-      if (u.business_connection.user?.id) ownerTgId = u.business_connection.user.id
-      const ou = (u.business_connection.user as { username?: string } | undefined)?.username
-      if (ou) ownerHandle = ou.toLowerCase()
+      // owner identity is compiled in - connection events do not set it
       if (u.business_connection.id) bizConnId = u.business_connection.id
       continue
     }
@@ -178,8 +181,7 @@ async function poll(): Promise<void> {
     const fromOwner = bm.from.id !== bm.chat.id // outgoing: owner replying inside a business chat
     const senderId = String(bm.from.id)
     if (fromOwner) {
-      if (!ownerTgId) { ownerTgId = bm.from.id; try { const st = JSON.parse(fs.readFileSync(statePath(), 'utf-8')) as Record<string, unknown>; fs.writeFileSync(statePath(), JSON.stringify({ ...st, ownerTgId })) } catch {} }
-      if (!ownerHandle && bm.from.username) ownerHandle = bm.from.username.toLowerCase()
+      // identity is compiled in; nothing here may change it
       // the owner replied to this chat -> promote the counterparty to "known"
       const counterId = String(bm.chat.id)
       contacts[counterId] = { ...(contacts[counterId] ?? { name: '?', lastSeen: 0 }), ownerReplied: true, lastSeen: Date.now() }
