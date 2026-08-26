@@ -19,7 +19,8 @@ type TgMsg = {
 type TgConfig = {
   telegramBotToken?: string
   telegramVips?: string[] // usernames (no @) or numeric ids, always-flagged
-  telegramGroups?: string[] // allowlisted group chat ids to ingest
+  telegramGroups?: string[] // legacy allowlist (ignored - all seen groups ingest now)
+  telegramGroupsBlocklist?: string[] // group ids Wendy/owner have muted
 }
 
 function tgDir(): string {
@@ -99,8 +100,8 @@ async function poll(): Promise<void> {
       const gid = String(gm.chat.id)
       seenGroups[gid] = { title: gm.chat.title ?? gid, lastSeen: Date.now() }
       try { fs.writeFileSync(seenGroupsPath(), JSON.stringify(seenGroups, null, 2)) } catch {}
-      const allowed = ((loadConfig() as TgConfig).telegramGroups ?? []).map(String)
-      if (allowed.includes(gid) && gm.from && (gm.text || gm.caption)) {
+      const blocked = ((loadConfig() as TgConfig).telegramGroupsBlocklist ?? []).map(String)
+      if (!blocked.includes(gid) && gm.from && (gm.text || gm.caption)) {
         const name = [gm.from.first_name, gm.from.last_name].filter(Boolean).join(' ') || gm.from.username || String(gm.from.id)
         const msg: TgMsg = {
           id: gm.message_id, chatId: gm.chat.id,
@@ -122,14 +123,8 @@ async function poll(): Promise<void> {
       const gid = String(cm.chat.id)
       seenGroups[gid] = { title: cm.chat.title ?? gid, lastSeen: Date.now() }
       try { fs.writeFileSync(seenGroupsPath(), JSON.stringify(seenGroups, null, 2)) } catch {}
-      const joined = ['member', 'administrator'].includes(cm.new_chat_member?.status ?? '')
-      if (joined && cm.from && ownerTgId && cm.from.id === ownerTgId) {
-        const cfg = loadConfig() as { telegramGroups?: string[] }
-        const groups = (cfg.telegramGroups ?? []).map(String)
-        if (!groups.includes(gid)) {
-          saveConfig({ telegramGroups: [...groups, gid] } as never)
-          log(`telegram: owner added bot to "${cm.chat.title}" - auto-allowlisted (${gid})`)
-        }
+      if (['member', 'administrator'].includes(cm.new_chat_member?.status ?? '')) {
+        log(`telegram: bot joined group "${cm.chat.title}" (${gid}) - ingesting automatically`)
       }
       continue
     }
@@ -206,7 +201,23 @@ export function telegramInbox(hours = 24): string {
     for (const m of other) senders.set(m.from.name, (senders.get(m.from.name) ?? 0) + 1)
     parts.push(`EVERYTHING ELSE (${other.length} msgs from ${senders.size} senders - likely mostly spam):\n${[...senders.entries()].slice(0, 15).map(([n, c]) => `${n} (${c})`).join(', ')}`)
   }
-  const unlisted = Object.entries(seenGroups).filter(([id]) => !(((loadConfig() as TgConfig).telegramGroups ?? []).map(String)).includes(id))
-  const footer = unlisted.length ? `\n\n[Groups the bot can see but that are NOT allowlisted for ingestion: ${unlisted.map(([id, g]) => `"${g.title}" (id ${id})`).join(', ')} - the owner can allowlist them in config telegramGroups.]` : ''
-  return header + parts.join('\n\n') + footer
+  return header + parts.join('\n\n')
+}
+
+/** Group management surface for Wendy's tooling. */
+export function telegramGroupsStatus(): string {
+  const blocked = ((loadConfig() as TgConfig).telegramGroupsBlocklist ?? []).map(String)
+  const entries = Object.entries(seenGroups)
+  if (!entries.length) return 'the bot is not in any groups yet (or none have had activity)'
+  return entries.map(([id, g]) => `"${g.title}" (${id}) - ${blocked.includes(id) ? 'MUTED' : 'ingesting'}`).join('\n')
+}
+export function telegramGroupSetMuted(idOrName: string, muted: boolean): string {
+  const q = idOrName.toLowerCase().replace(/^@/, '')
+  const hit = Object.entries(seenGroups).find(([id, g]) => id === idOrName || g.title.toLowerCase().includes(q))
+  if (!hit) return `ERROR: no known group matching "${idOrName}" - telegram_groups list shows what exists`
+  const [gid, g] = hit
+  const blocked = new Set((((loadConfig() as TgConfig).telegramGroupsBlocklist ?? []).map(String)))
+  if (muted) blocked.add(gid); else blocked.delete(gid)
+  saveConfig({ telegramGroupsBlocklist: [...blocked] } as never)
+  return `"${g.title}" is now ${muted ? 'MUTED (messages discarded)' : 'ingesting again'}`
 }

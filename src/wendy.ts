@@ -26,7 +26,7 @@ import prism from 'prism-media'
 import { Readable } from 'node:stream'
 import { execFile, spawn } from 'node:child_process'
 import { loadConfig, log } from './config.js'
-import { startTelegram, telegramInbox, setTelegramFlaggedHandler } from './telegram.js'
+import { startTelegram, telegramInbox, setTelegramFlaggedHandler, telegramGroupsStatus, telegramGroupSetMuted } from './telegram.js'
 
 // ── config accessors ─────────────────────────────────────────────
 function brainUrl(): string | undefined {
@@ -467,6 +467,21 @@ const TOOLS = [
   {
     type: 'function',
     function: {
+      name: 'telegram_groups',
+      description: 'Manage Telegram group ingestion yourself: list shows every group the bot is in and whether it is ingesting; mute/unmute toggles a group by name or id. Groups ingest automatically when the owner adds the bot - mute is the exception, not the rule.',
+      parameters: {
+        type: 'object',
+        properties: {
+          action: { type: 'string', enum: ['list', 'mute', 'unmute'] },
+          group: { type: 'string', description: 'group name fragment or id (for mute/unmute)' },
+        },
+        required: ['action'],
+      },
+    },
+  },
+  {
+    type: 'function',
+    function: {
       name: 'brain_health',
       description: 'Measure your own reasoning speed right now: runs a timed probe and reports tokens/sec with a verdict (full speed / degraded / likely spilled into system memory). Use when the owner asks if you are slow, laggy, or overflowing.',
       parameters: { type: 'object', properties: {} },
@@ -840,6 +855,11 @@ async function executeToolInner(name: string, args: Record<string, unknown>): Pr
     return hits.length
       ? hits.map((e) => `[${new Date(e.ts).toISOString().slice(0, 10)}] ${e.s}`).join('\n')
       : 'nothing in the journal matches - it may predate my memory system or genuinely never came up'
+  }
+  if (name === 'telegram_groups') {
+    const action = String(args.action ?? 'list')
+    if (action === 'list') return telegramGroupsStatus()
+    return telegramGroupSetMuted(String(args.group ?? ''), action === 'mute')
   }
   if (name === 'telegram_inbox') {
     return telegramInbox(Math.min(Math.max(Number(args.hours) || 24, 1), 168))
