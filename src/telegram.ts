@@ -36,7 +36,7 @@ let seenGroups: Record<string, { title: string; lastSeen: number }> = {}
 try { seenGroups = JSON.parse(fs.readFileSync(seenGroupsPath(), 'utf-8')) } catch {}
 
 // contacts.json: learned "known" tier - anyone the owner has replied to
-let contacts: Record<string, { name: string; lastSeen: number; ownerReplied?: boolean }> = {}
+let contacts: Record<string, { name: string; username?: string; lastSeen: number; ownerReplied?: boolean }> = {}
 try { contacts = JSON.parse(fs.readFileSync(contactsPath(), 'utf-8')) } catch {}
 function saveContacts(): void { try { fs.writeFileSync(contactsPath(), JSON.stringify(contacts, null, 2)) } catch {} }
 
@@ -106,6 +106,8 @@ async function poll(): Promise<void> {
       const blocked = ((loadConfig() as TgConfig).telegramGroupsBlocklist ?? []).map(String)
       if (!blocked.includes(gid) && gm.from && (gm.text || gm.caption)) {
         const name = [gm.from.first_name, gm.from.last_name].filter(Boolean).join(' ') || gm.from.username || String(gm.from.id)
+        contacts[String(gm.from.id)] = { ...(contacts[String(gm.from.id)] ?? {}), name, username: gm.from.username, lastSeen: Date.now() }
+        saveContacts()
         const msg: TgMsg = {
           id: gm.message_id, chatId: gm.chat.id,
           from: { id: gm.from.id, username: gm.from.username, name },
@@ -145,7 +147,7 @@ async function poll(): Promise<void> {
       continue
     }
     const name = [bm.from.first_name, bm.from.last_name].filter(Boolean).join(' ') || bm.from.username || senderId
-    contacts[senderId] = { name, lastSeen: Date.now(), ownerReplied: contacts[senderId]?.ownerReplied }
+    contacts[senderId] = { name, username: bm.from.username, lastSeen: Date.now(), ownerReplied: contacts[senderId]?.ownerReplied }
     saveContacts()
     const msg: TgMsg = {
       id: bm.message_id,
@@ -232,9 +234,17 @@ export async function telegramSend(target: string, html: string): Promise<string
   if (!token) return 'ERROR: no telegram token configured'
   const chat = resolveChat(target)
   if (!chat) return `ERROR: no known chat matching "${target}" - use telegram_groups list or a numeric id`
+  // never emit LLM-smell punctuation
+  let out = html.replace(/\u2014/g, '-').replace(/\u2013/g, '-')
+  // fix @mentions: map display names to real @handles seen in this chat
+  out = out.replace(/@([A-Za-z][\w ]{1,30})/g, (m, name: string) => {
+    const n = String(name).trim().toLowerCase()
+    const hit = Object.values(contacts).find((c) => c.username && (c.name.toLowerCase() === n || c.name.toLowerCase().startsWith(n) || c.username.toLowerCase() === n.replace(/\s+/g, '')))
+    return hit?.username ? `@${hit.username}` : `@${String(name).replace(/\s+/g, '')}`
+  })
   const body: Record<string, unknown> = {
     chat_id: chat.id,
-    text: html.slice(0, 4000),
+    text: out.slice(0, 4000),
     parse_mode: 'HTML',
     link_preview_options: { is_disabled: true },
   }
@@ -249,7 +259,33 @@ export async function telegramSend(target: string, html: string): Promise<string
   const d = (await res.json().catch(() => null)) as { ok?: boolean; description?: string } | null
   if (!d?.ok) return `ERROR: Telegram refused - ${d?.description ?? 'unknown'}`
   log(`telegram: sent to "${chat.title}" (${chat.isGroup ? 'group, as bot' : 'DM, as owner'})`)
+  if (autoReply.until > Date.now()) {
+    autoReply.sent.push({ at: Date.now(), target: chat.title, text: out.slice(0, 200) })
+    if (autoReply.sent.length > 40) autoReply.sent.splice(0, autoReply.sent.length - 40)
+    saveAuto()
+  }
   return `sent to "${chat.title}"${chat.isGroup ? ' (as the bot)' : ' (as you, via business connection)'}`
+}
+
+// - autoreply mode: owner-granted, time-boxed, audited -
+const autoPath = () => path.join(tgDir(), 'autoreply.json')
+let autoReply: { until: number; scope: string; sent: Array<{ at: number; target: string; text: string }> } = { until: 0, scope: '', sent: [] }
+try { autoReply = JSON.parse(fs.readFileSync(autoPath(), 'utf-8')) } catch {}
+function saveAuto(): void { try { fs.writeFileSync(autoPath(), JSON.stringify(autoReply)) } catch {} }
+export function telegramAutoReply(on: boolean, minutes = 60, scope = 'all'): string {
+  autoReply = { until: on ? Date.now() + Math.min(Math.max(minutes, 5), 480) * 60000 : 0, scope, sent: on ? [] : autoReply.sent }
+  saveAuto()
+  return on ? `autoreply ON for ${minutes} min (scope: ${scope}) - you will summarise what you sent periodically` : 'autoreply OFF'
+}
+export function telegramAutoState(): { active: boolean; minsLeft: number; scope: string; unreported: typeof autoReply.sent } {
+  const active = autoReply.until > Date.now()
+  return { active, minsLeft: active ? Math.round((autoReply.until - Date.now()) / 60000) : 0, scope: autoReply.scope, unreported: autoReply.sent }
+}
+export function telegramAutoDrain(): string {
+  const s = autoReply.sent.splice(0)
+  saveAuto()
+  if (!s.length) return 'nothing sent since the last summary'
+  return s.map((x) => `to ${x.target}: "${x.text.slice(0, 120)}"`).join('\n')
 }
 
 /** Group management surface for Wendy's tooling. */
