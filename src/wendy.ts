@@ -843,7 +843,9 @@ async function brainRequest(url: string, body: Record<string, unknown>, onSenten
   let usage: BrainOut['usage']
   const flush = (final: boolean): void => {
     for (;;) {
-      const idx = sentenceBuf.search(/[.!?](\s|$)/)
+      // Mid-stream: require whitespace AFTER punctuation - buffer ends at chunk
+      // boundaries ("...and 18.") and decimals must never fake a sentence end.
+      const idx = sentenceBuf.search(final ? /[.!?](\s|$)/ : /[.!?]\s/)
       if (idx === -1) break
       const sent = sentenceBuf.slice(0, idx + 1).trim()
       const rest = sentenceBuf.slice(idx + 1).replace(/^\s+/, '')
