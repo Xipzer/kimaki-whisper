@@ -1191,7 +1191,7 @@ export async function think(userText: string, onSentence?: (s: string) => void):
       return ''
     }
     if (isBg && history[history.length - 1]?.role === 'user') history[history.length - 1].content = '[background update delivered]'
-    const PROMISE = /\b(let me|i'?ll (check|go|look|dig|find|pull|grab|get|keep)|one (sec|second|moment)|hold on|checking now|give me a (sec|second|moment|minute)|right back|be right back|having (a bit of )?trouble (pinning|finding|locating|tracking)|can'?t seem to (find|locate|pin)|struggling to (find|locate)|track it down|keep looking)\b/i
+    const PROMISE = /\b(let me|i'?ll (check|go|look|dig|find|pull|grab|get|keep|tell|flag|send|pass|relay|forward|share|report|update|ask)|one (sec|second|moment)|hold on|checking now|give me a (sec|second|moment|minute)|right back|be right back|having (a bit of )?trouble (pinning|finding|locating|tracking)|can'?t seem to (find|locate|pin)|struggling to (find|locate)|track it down|keep looking|let (him|her|them|fred|you) know|pass (that|this|it) along)\b/i
     if (!nudged && hop < MAX_HOPS - 2 && PROMISE.test(text)) {
       nudged = true
       log('wendy: promise detected in final reply - forcing follow-through')

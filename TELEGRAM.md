@@ -14,9 +14,14 @@ revocable with one switch. There is nothing to ban.
   wanted, it goes through the business connection (with per-message owner
   approval as the default) - a product decision, not a ToS risk. Currently NOT
   implemented: this build is strictly read-only.
-- **Groups**: invisible to a Business connection (Telegram limitation). The
-  safe pattern for select groups later is a separate expendable account on
-  MTProto, read-only, folder-scoped. Not built yet.
+- **Groups**: handled via the regular Bot API (still sanctioned, zero risk):
+  add @XipzWendyBot to a group, then either promote it to admin there (any
+  admin sees all messages; give it a single harmless right) OR turn Group
+  Privacy off in BotFather (/setprivacy) so it sees all messages in groups
+  it joins. Ingestion is ALLOWLIST-gated regardless: only chat ids listed in
+  config `telegramGroups` are stored; everything else is discarded at the
+  door. telegram_inbox lists seen-but-unlisted groups with their ids for
+  easy allowlisting.
 - Other limits: no history from before the connection; replies (if ever
   enabled) only within 24h of an incoming message.
 

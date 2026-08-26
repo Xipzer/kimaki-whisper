@@ -12,12 +12,14 @@ type TgMsg = {
   from: { id: number; username?: string; name: string }
   text: string
   ts: number
-  tier: 'vip' | 'known' | 'other'
+  tier: 'vip' | 'known' | 'other' | 'group'
+  chatTitle?: string
 }
 
 type TgConfig = {
   telegramBotToken?: string
   telegramVips?: string[] // usernames (no @) or numeric ids, always-flagged
+  telegramGroups?: string[] // allowlisted group chat ids to ingest
 }
 
 function tgDir(): string {
@@ -28,6 +30,9 @@ function tgDir(): string {
 const inboxPath = () => path.join(tgDir(), 'inbox.jsonl')
 const contactsPath = () => path.join(tgDir(), 'contacts.json')
 const statePath = () => path.join(tgDir(), 'state.json')
+const seenGroupsPath = () => path.join(tgDir(), 'groups-seen.json')
+let seenGroups: Record<string, { title: string; lastSeen: number }> = {}
+try { seenGroups = JSON.parse(fs.readFileSync(seenGroupsPath(), 'utf-8')) } catch {}
 
 // contacts.json: learned "known" tier - anyone the owner has replied to
 let contacts: Record<string, { name: string; lastSeen: number; ownerReplied?: boolean }> = {}
@@ -52,7 +57,7 @@ function classify(m: { id: number; username?: string; name: string }): TgMsg['ti
 async function poll(): Promise<void> {
   const token = (loadConfig() as TgConfig).telegramBotToken
   if (!token) return
-  const res = await fetch(`https://api.telegram.org/bot${token}/getUpdates?timeout=25&offset=${offset}&allowed_updates=["business_message","business_connection"]`, {
+  const res = await fetch(`https://api.telegram.org/bot${token}/getUpdates?timeout=25&offset=${offset}&allowed_updates=["business_message","business_connection","message"]`, {
     signal: AbortSignal.timeout(35000),
   }).catch(() => null)
   if (!res?.ok) return
@@ -60,6 +65,14 @@ async function poll(): Promise<void> {
     ok?: boolean
     result?: Array<{
       update_id: number
+      message?: {
+        message_id: number
+        chat: { id: number; type: string; title?: string }
+        from?: { id: number; username?: string; first_name?: string; last_name?: string }
+        text?: string
+        caption?: string
+        date: number
+      }
       business_message?: {
         message_id: number
         chat: { id: number }
@@ -74,6 +87,24 @@ async function poll(): Promise<void> {
   if (!d?.ok || !d.result?.length) return
   for (const u of d.result) {
     offset = u.update_id + 1
+    const gm = u.message
+    if (gm?.chat && (gm.chat.type === 'group' || gm.chat.type === 'supergroup')) {
+      const gid = String(gm.chat.id)
+      seenGroups[gid] = { title: gm.chat.title ?? gid, lastSeen: Date.now() }
+      try { fs.writeFileSync(seenGroupsPath(), JSON.stringify(seenGroups, null, 2)) } catch {}
+      const allowed = ((loadConfig() as TgConfig).telegramGroups ?? []).map(String)
+      if (allowed.includes(gid) && gm.from && (gm.text || gm.caption)) {
+        const name = [gm.from.first_name, gm.from.last_name].filter(Boolean).join(' ') || gm.from.username || String(gm.from.id)
+        const msg: TgMsg = {
+          id: gm.message_id, chatId: gm.chat.id,
+          from: { id: gm.from.id, username: gm.from.username, name },
+          text: (gm.text ?? gm.caption ?? '').slice(0, 1000),
+          ts: gm.date * 1000, tier: 'group', chatTitle: gm.chat.title ?? gid,
+        }
+        try { fs.appendFileSync(inboxPath(), JSON.stringify(msg) + '\n') } catch {}
+      }
+      continue
+    }
     if (u.business_connection) {
       log(`telegram: business connection ${u.business_connection.is_enabled ? 'ENABLED' : 'disabled'} for ${u.business_connection.user?.first_name ?? '?'}`)
       continue
@@ -139,10 +170,19 @@ export function telegramInbox(hours = 24): string {
   const vip = byTier('vip'); const known = byTier('known'); const other = byTier('other')
   if (vip.length) parts.push(`VIP (${vip.length}):\n${vip.map(fmt).join('\n')}`)
   if (known.length) parts.push(`KNOWN CONTACTS (${known.length}):\n${known.slice(-10).map(fmt).join('\n')}`)
+  const grp = recent.filter((m) => m.tier === 'group')
+  if (grp.length) {
+    const byChat = new Map<string, TgMsg[]>()
+    for (const m of grp) { const k = m.chatTitle ?? String(m.chatId); byChat.set(k, [...(byChat.get(k) ?? []), m]) }
+    parts.push([...byChat.entries()].map(([title, ms]) =>
+      `GROUP "${title}" (${ms.length}):\n${ms.slice(-6).map(fmt).join('\n')}`).join('\n'))
+  }
   if (other.length) {
     const senders = new Map<string, number>()
     for (const m of other) senders.set(m.from.name, (senders.get(m.from.name) ?? 0) + 1)
     parts.push(`EVERYTHING ELSE (${other.length} msgs from ${senders.size} senders - likely mostly spam):\n${[...senders.entries()].slice(0, 15).map(([n, c]) => `${n} (${c})`).join(', ')}`)
   }
-  return header + parts.join('\n\n')
+  const unlisted = Object.entries(seenGroups).filter(([id]) => !(((loadConfig() as TgConfig).telegramGroups ?? []).map(String)).includes(id))
+  const footer = unlisted.length ? `\n\n[Groups the bot can see but that are NOT allowlisted for ingestion: ${unlisted.map(([id, g]) => `"${g.title}" (id ${id})`).join(', ')} - the owner can allowlist them in config telegramGroups.]` : ''
+  return header + parts.join('\n\n') + footer
 }
