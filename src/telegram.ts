@@ -409,6 +409,7 @@ function pushRing(m: TgMsg): void {
   const r = roomRing.get(k) ?? []
   r.push(m)
   if (r.length > 40) r.splice(0, r.length - 40)
+  roomRing.delete(k)      // re-insert so Map order == recency (true LRU eviction)
   roomRing.set(k, r)
   if (roomRing.size > 60) roomRing.delete(roomRing.keys().next().value as string)
 }
@@ -592,10 +593,13 @@ export async function telegramWho(query: string, chatHint?: string): Promise<str
   if (token) {
     // enrich from group admin rosters (the one member list bots may read)
     const chats = chatHint ? [resolveChat(chatHint)].filter(Boolean) : Object.keys(seenGroups).map((id) => ({ id: Number(id), title: seenGroups[id].title, isGroup: true }))
-    for (const ch of chats.slice(0, 6)) {
-      if (!ch) continue
-      const res = await fetch(`https://api.telegram.org/bot${token}/getChatAdministrators?chat_id=${ch.id}`, { signal: AbortSignal.timeout(8000) }).catch(() => null)
+    const targets = chats.slice(0, 6).filter(Boolean)
+    const responses = await Promise.all(targets.map(async (ch) => {
+      const res = await fetch(`https://api.telegram.org/bot${token}/getChatAdministrators?chat_id=${ch!.id}`, { signal: AbortSignal.timeout(6000) }).catch(() => null)
       const d = res?.ok ? ((await res.json().catch(() => null)) as { result?: Array<{ user?: { id: number; username?: string; first_name?: string; last_name?: string } }> } | null) : null
+      return { ch: ch!, d }
+    }))
+    for (const { ch, d } of responses) {
       for (const a of d?.result ?? []) {
         const u = a.user
         if (!u) continue
@@ -777,7 +781,12 @@ export async function telegramSend(target: string, html: string): Promise<string
     parse_mode: 'HTML',
     link_preview_options: { is_disabled: true },
   }
-  if (!chat.isGroup && bizConnId) body.business_connection_id = bizConnId
+  if (!chat.isGroup) {
+    if (!bizConnId) {
+      return `BLOCKED: no business connection is active, so a DM would go out from the BOT rather than from Xipz himself - a visible identity change. Nothing was sent. Tell him the business connection needs re-enabling in Telegram settings.`
+    }
+    body.business_connection_id = bizConnId
+  }
   const res = await fetch(`https://api.telegram.org/bot${token}/sendMessage`, {
     method: 'POST',
     headers: { 'content-type': 'application/json' },

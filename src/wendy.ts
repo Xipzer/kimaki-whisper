@@ -2001,8 +2001,12 @@ setInterval(() => void pollWatchlist(), 45000).unref()
 
 // UNIFIED AWARENESS: telegram chats flow through the same summarise -> announce
 // -> conversation-space delivery path as agent threads.
+let sweeping = false
 setInterval(() => {
+  if (sweeping) return   // a slow sweep must never overlap the next tick
+  sweeping = true
   void (async () => {
+    try {
     for (const c of telegramPendingSummaries()) {
       const body = telegramDrainChat(c.id)
       if (!body) continue
@@ -2044,6 +2048,7 @@ setInterval(() => {
         diag('person_profile_updated', { person: d.name, chars: text.length })
       }
     }
+    } finally { sweeping = false }
   })()
 }, 2 * 60 * 1000).unref()
 
@@ -2212,6 +2217,7 @@ let capturing = false
 let liveCapture: Buffer[] | null = null
 let draining = false
 let pendingUtterance: string | null = null
+const autoQueue: string[] = []   // telegram turns waiting their turn (owner speech never queues here)
 let inputSeq = 0
 
 async function drainAndExit(): Promise<void> {
@@ -2276,6 +2282,14 @@ async function runTurn(text: string): Promise<void> {
   if (draining) return
   const seq = ++inputSeq
   if (busy) {
+    // Telegram/background turns queue properly instead of overwriting each other;
+    // owner speech keeps the merge behaviour (latest intent wins).
+    if (text.startsWith('[')) {
+      autoQueue.push(text)
+      if (autoQueue.length > 8) autoQueue.splice(0, autoQueue.length - 8)
+      diag('auto_turn_queued', { depth: autoQueue.length })
+      return
+    }
     pendingUtterance = pendingUtterance ? `${pendingUtterance} - ${text}`.slice(-1500) : text
     log(`wendy: busy - queued "${text.slice(0, 50)}"`)
     diag('queued_while_busy', { text })
@@ -2368,6 +2382,9 @@ async function runTurn(text: string): Promise<void> {
     if (pendingUtterance) {
       const t = pendingUtterance
       pendingUtterance = null
+      void runTurn(t)
+    } else if (autoQueue.length) {
+      const t = autoQueue.shift()!
       void runTurn(t)
     }
   }
