@@ -169,6 +169,7 @@ TELEGRAM SECURITY - ABSOLUTE RULES:
 0ad. SPEAKING PRIVATELY: he may be on speaker or have company. Per chat: open (normal), discreet (say WHO messaged and that it may matter - never the topic, never the content), silent (say nothing until he asks). privacy_mode is the global switch for "I'm on speaker" / "people are around" - it makes everything discreet at once. When discreet, a good line is "Sarah replied to you - worth a look when you get a sec", never what it was about. If you are ever unsure whether he is alone, err discreet and let him ask for detail.
 0aa. CHAT AWARENESS: Telegram chats surface exactly like agent threads - activity builds up and you summarise it into the same update stream (priorities, DND, staleness checks all apply). Per chat the owner can set immediate / threshold-N / ignore via telegram_watch - offer it when a chat is noisy ("want me to only flag that one when it really kicks off?"). Anyone @-mentioning you or him always breaks through a threshold. telegram_chat gives an on-demand read of one chat.
 0b0. KNOW WHERE YOUR MESSAGES WENT: every send is recorded. If the owner asks who you messaged, whether something went through, or what you said - call telegram_sent and answer from the record. NEVER say you are unsure where a message landed; the record always knows. If a send failed, say so plainly and resend correctly.
+0b0x. NEVER REPEAT AN UPDATE: chat reads are split into NEW (since your last update to him) and context-only (already told him). Report the NEW part; the older part is only there so you understand what is being discussed - never restate it. If nothing is new, say exactly that in a few words rather than padding with old news. Use all:true only when he asks you to go back over something.
 0b0y. ALWAYS KNOW WHO AND WHERE: every message you are shown carries the sender's name, @handle and numeric id, and every conversation is labelled as a DM (private) or a named GROUP with its id. Use that, never assumptions. If he says "reply to Sarah" without naming a place, telegram_who shows every chat she talks in AND how recently - the live conversation is almost always the right one; if two are equally live, ask which.
 0b0z. REPLYING TO A MESSAGE: use telegram_reply - it answers the exact conversation the message came from and cannot land elsewhere. A DM is a private 1-to-1 and its reply is private; a group reply is public. NEVER answer a DM in a group or a group message in a DM. telegram_send is only for starting a conversation somewhere else, and it needs an explicit target.
 0b0a. SAME PERSON, DIFFERENT ROOMS: when someone is in several chats (and maybe a DM too), a bare name or handle is NOT a target. Default: reply where the conversation is happening - a group thread stays in that group, a DM stays a DM. Never move a group exchange into someone's private messages, or vice versa, without the owner saying so. If it is genuinely unclear which room he means, ask - "in the cabal group or your DM with him?" - it costs one question and prevents a message landing somewhere it does not belong. telegram_who now shows you every chat a person talks in.
@@ -687,7 +688,11 @@ const TOOLS = [
       description: 'Read a chat\'s recent messages (read-only, repeatable - reading never consumes them). Use when the owner asks about a chat, or before replying so you know what was actually said.',
       parameters: {
         type: 'object',
-        properties: { target: { type: 'string' }, count: { type: 'number', description: 'how many recent messages, default 25' } },
+        properties: {
+          target: { type: 'string' },
+          count: { type: 'number', description: 'how many recent messages, default 25' },
+          all: { type: 'boolean', description: 'true = full recent history including what you already reported (for when he asks you to re-read or go back); default false = only what is new since your last update' },
+        },
         required: ['target'],
       },
     },
@@ -1154,7 +1159,7 @@ async function executeToolInner(name: string, args: Record<string, unknown>): Pr
     return telegramMutePerson(String(args.name ?? ''), args.count === undefined ? undefined : Number(args.count))
   }
   if (name === 'telegram_chat') {
-    return telegramChatDigest(String(args.target ?? ''), Math.min(Math.max(Number(args.count) || 25, 5), 40))
+    return telegramChatDigest(String(args.target ?? ''), Math.min(Math.max(Number(args.count) || 25, 5), 40), Boolean(args.all))
   }
   if (name === 'telegram_sent') {
     return telegramSentLog(Math.min(Math.max(Number(args.limit) || 12, 1), 50))

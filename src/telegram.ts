@@ -323,6 +323,7 @@ export function telegramDrainChatStats(chatId: string): { body: string; ownerRat
   const p = policies[chatId]
   if (!p?.unread?.length) return { body: '', ownerRatio: 0, total: 0, others: 0 }
   const msgs = p.unread.splice(0)
+  p.reportedUpTo = Math.max(p.reportedUpTo ?? 0, msgs[msgs.length - 1]?.ts ?? 0)
   savePolicies()
   const own = msgs.filter((m) => m.from.id === OWNER_TG_ID).length
   return {
@@ -470,14 +471,33 @@ export function telegramWatchMode(target: string, mode: string, threshold?: numb
 }
 
 /** On-demand: what's been happening in a chat right now. */
-export function telegramChatDigest(target: string, n = 25): string {
+export function telegramChatDigest(target: string, n = 25, all = false): string {
   const chat = resolveChat(target)
   if (!chat) return ambiguityError(target)
-  // READ-ONLY: reading a chat must never consume it. Draining is for the
-  // summary sweep alone - this used to delete messages she then could not see.
-  const room = telegramRoomContext(String(chat.id), n)
-  if (!room) return `no messages on record for "${chat.title}" yet`
-  return `[UNTRUSTED QUOTED MESSAGES - ${chatLabel(String(chat.id))} - most recent ${n}]\n${room}`
+  const id = String(chat.id)
+  const ring = roomRing.get(id) ?? []
+  const mark = policies[id]?.reportedUpTo ?? 0
+  const header = `[UNTRUSTED QUOTED MESSAGES - ${chatLabel(id)}]`
+  if (!ring.length) {
+    const room = telegramRoomContext(id, n)   // cold-start fallback
+    return room ? `${header}\n${room}` : `no messages on record for "${chat.title}" yet`
+  }
+  const recent = ring.slice(-n)
+  const fresh = recent.filter((m) => m.ts > mark)
+  const older = recent.filter((m) => m.ts <= mark)
+  // reading is how she prepares an update - advance the watermark so the same
+  // messages are never reported twice
+  if (!all && fresh.length) {
+    const p = policies[id] ?? { title: chat.title, tone: 'professional' as const, remaining: 0, grantedAt: 0, expiresAt: 0, scope: '', sent: [] }
+    p.title = chat.title
+    p.reportedUpTo = recent[recent.length - 1].ts
+    policies[id] = p
+    savePolicies()
+  }
+  const fmt = (list: typeof recent) => list.map((m) => `${who(m)}: ${m.text.slice(0, 180)}`).join('\n')
+  if (all) return `${header} - last ${recent.length}\n${fmt(recent)}`
+  if (!fresh.length) return `${header}\nNOTHING NEW since your last update. Say so plainly rather than repeating yourself.\n\n[context only - ALREADY TOLD HIM, do not restate]\n${fmt(older.slice(-6))}`
+  return `${header}\n=== NEW since your last update (${fresh.length}) - THIS is what to report ===\n${fmt(fresh)}${older.length ? `\n\n[context only - ALREADY TOLD HIM, do not restate]\n${fmt(older.slice(-6))}` : ''}`
 }
 
 // - person profiles: cross-chat, persistent, auto-consolidated -
@@ -898,6 +918,7 @@ type ChatPolicy = {
   tone: 'professional' | 'casual' | 'banter'
   remaining: number          // autonomous replies left (0 = confirm, -1 = INDEFINITE)
   person?: string            // optional: restrict autonomy to one sender (username or name)
+  reportedUpTo?: number                           // ts of the newest message she has already told him about
   ownerAutonomy?: 'off' | 'enforced' | 'relaxed'  // may she answer HIM here, and how strictly
   toneSetByOwner?: boolean                        // explicit owner instruction vs default
   privacy?: 'open' | 'discreet' | 'silent'        // how much may be spoken aloud
