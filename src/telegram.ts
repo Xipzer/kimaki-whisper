@@ -638,6 +638,17 @@ export function telegramRoster(): string {
 
 /** Resolve a chat by name fragment or id across known DMs and groups. */
 type ChatRef = { id: number; title: string; isGroup: boolean }
+/** Punctuation/spacing-insensitive key for chat titles. */
+function norm(x: string): string { return x.toLowerCase().replace(/[^a-z0-9]/g, '') }
+function editDistance(a: string, b: string): number {
+  if (Math.abs(a.length - b.length) > 3) return 99
+  const dp = Array.from({ length: a.length + 1 }, (_, i) => [i, ...Array(b.length).fill(0)])
+  for (let j = 0; j <= b.length; j++) dp[0][j] = j
+  for (let i = 1; i <= a.length; i++) for (let j = 1; j <= b.length; j++) {
+    dp[i][j] = Math.min(dp[i - 1][j] + 1, dp[i][j - 1] + 1, dp[i - 1][j - 1] + (a[i - 1] === b[j - 1] ? 0 : 1))
+  }
+  return dp[a.length][b.length]
+}
 function resolveChatAll(query: string): ChatRef[] {
   const q = query.trim().toLowerCase().replace(/^@/, '')
   if (/^-?\d{5,}$/.test(q)) {
@@ -656,10 +667,16 @@ function resolveChatAll(query: string): ChatRef[] {
     return groupsWithThem.length ? [...byHandle.map((b) => ({ ...b, title: `DM with ${b.title}` })), ...groupsWithThem] : byHandle
   }
   // exact title match always wins - "BaseStonk" must not silently become "BaseStonk Gang Gang"
-  const exact = all.filter((c) => c.title.toLowerCase() === q)
-  if (exact.length === 1) return exact
-  if (exact.length > 1) return exact
-  return all.filter((c) => c.title.toLowerCase().includes(q))
+  const nq = norm(q)
+  // spacing/punctuation-insensitive exact match: "Trenches Final Boss" == "Trenches Finalboss"
+  const exact = all.filter((c) => norm(c.title) === nq)
+  if (exact.length) return exact
+  const sub = all.filter((c) => norm(c.title).includes(nq) || nq.includes(norm(c.title)))
+  if (sub.length) return sub
+  // near-miss typo tolerance: "Nigger Cabal Shit" -> "NIGGER CABAL SHI"
+  const near = all.map((c) => ({ c, d: editDistance(nq, norm(c.title)) })).filter((x) => x.d <= 2).sort((a, b) => a.d - b.d)
+  if (near.length) return near.filter((x) => x.d === near[0].d).map((x) => x.c)
+  return []
 }
 function resolveChat(query: string): ChatRef | null {
   const hits = resolveChatAll(query)
@@ -815,6 +832,10 @@ export function telegramGrant(target: string, count: number, tone?: string, scop
   const id = String(chat.id)
   const prev = policies[id]
   const t = (['professional', 'casual', 'banter'].includes(String(tone)) ? String(tone) : prev?.tone ?? 'professional') as ChatPolicy['tone']
+  if (count === 0) {
+    if (prev) { prev.remaining = 0; prev.expiresAt = 0; prev.person = undefined; prev.scope = ''; savePolicies() }
+    return `revoked: autonomous replies are OFF in "${chat.title}" - every message needs his confirmation again`
+  }
   policies[id] = {
     title: chat.title,
     tone: t,

@@ -1451,7 +1451,9 @@ export async function think(userText: string, onSentence?: (s: string) => void):
         // firing a garbage CLI call (seen live: ask_thread({})).
         const spec = TOOLS.find((t) => t.function.name === tc.function.name)
         const required: string[] = (spec?.function.parameters as { required?: string[] })?.required ?? []
-        const missing = required.filter((k) => !args[k] || String(args[k]).trim() === '')
+        // 0 and false are VALID values - only absent/blank counts as missing
+        // (this rejected telegram_grant count:0 revokes and privacy_mode on:false)
+        const missing = required.filter((k) => args[k] === undefined || args[k] === null || (typeof args[k] === 'string' && args[k].trim() === ''))
         if (!missing.length && (tc.function.name === 'ask_thread' || tc.function.name === 'dispatch_task') && Date.now() - lastRelayAck > 60000) {
           lastRelayAck = Date.now()
           void speak('One moment - passing that along.')
