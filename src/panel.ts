@@ -49,8 +49,8 @@ export function buildPanel(): { embeds: EmbedBuilder[]; components: ActionRowBui
       },
       {
         name: '🗂️ Knows',
-        value: `**${s.index.threads}** threads / ${s.index.projects} projects\n**${s.telegram.chats}** chats · **${s.telegram.profiles}** people\nindex ${s.index.ageMin >= 0 ? `${s.index.ageMin}m old` : 'pending'}`,
-        inline: true,
+        value: `**${s.index.threads}** threads / ${s.index.projects} projects · **${s.telegram.chats}** chats · **${s.telegram.profiles}** people · index ${s.index.ageMin >= 0 ? `${s.index.ageMin}m` : 'pending'}`,
+        inline: false,
       },
     )
   if (s.errors.length) {
@@ -83,20 +83,28 @@ export function buildPanel(): { embeds: EmbedBuilder[]; components: ActionRowBui
   return { embeds: [embed], components: [buttons, menu] }
 }
 
+/** Phone-friendly block: no code fences (they scroll sideways on mobile),
+ *  every line clipped so it wraps instead of overflowing. */
+function lines(text: string, max = 14, width = 58): string {
+  const out = text.split('\n').filter(Boolean).slice(0, max)
+    .map((l) => (l.length > width ? l.slice(0, width - 1) + '…' : l))
+  return out.length ? out.map((l) => `· ${l}`).join('\n') : '· nothing yet'
+}
+
 async function detail(kind: string): Promise<string> {
   const s = wendySnapshot()
   if (kind === 'tasks') {
-    const t = s.selfTasks.list.map((x) => `\`${x.status}\` ${x.goal} — ${x.slices} slices`).join('\n') || 'no self-tasks'
+    const t = s.selfTasks.list.map((x) => `\`${x.status}\` ${x.goal.slice(0, 52)} · ${x.slices} slices`).join('\n') || 'no self-tasks'
     const a = s.spawns.map((x) => `\`${x.status}\` **${x.label}** (${x.ageMin}m)${x.result ? `\n   ↳ ${x.result}` : ''}`).join('\n') || 'no spawned agents'
     return `**Self-tasks**\n${t}\n\n**Spawned agents**\n${a}\n\n**Watching** ${s.watching} threads · **${s.schedules}** scheduled checks`
   }
-  if (kind === 'chats') return `**Per-chat policy**\n\`\`\`\n${telegramPolicyStatus().slice(0, 1500)}\n\`\`\`\n**Privacy**\n\`\`\`\n${telegramPrivacyStatus().slice(0, 400)}\n\`\`\``
-  if (kind === 'sent') return `**Recent sends**\n\`\`\`\n${telegramSentLog(15).slice(0, 1800)}\n\`\`\``
-  if (kind === 'people') return `**Profiles**\n\`\`\`\n${telegramProfileList().slice(0, 1400)}\n\`\`\`\n**Muted**\n\`\`\`\n${telegramPeopleStatus().slice(0, 400)}\n\`\`\``
-  if (kind === 'inbox') return `**Telegram triage (24h)**\n\`\`\`\n${telegramInbox(24).slice(0, 1800)}\n\`\`\``
+  if (kind === 'chats') return `**Per-chat policy**\n${lines(telegramPolicyStatus(), 12)}\n\n**Privacy**\n${lines(telegramPrivacyStatus(), 6)}`
+  if (kind === 'sent') return `**Recent sends**\n${lines(telegramSentLog(14), 14, 70)}`
+  if (kind === 'people') return `**Profiles**\n${lines(telegramProfileList(), 12, 62)}\n\n**Muted**\n${lines(telegramPeopleStatus(), 5)}`
+  if (kind === 'inbox') return `**Telegram triage (24h)**\n${lines(telegramInbox(24).replace(/\[.*?\]\n/, ''), 16, 66)}`
   if (kind === 'errors') {
     const e = s.errors.map((x) => `\`${new Date(x.at).toLocaleTimeString('en-GB')}\` **${x.ev}** ${x.detail}`).join('\n') || 'no issues in the last 6 hours ✅'
-    return `**Issues (6h)**\n${e}\n\n**Groups**\n\`\`\`\n${telegramGroupsStatus().slice(0, 800)}\n\`\`\``
+    return `**Issues (6h)**\n${e}\n\n**Groups**\n${lines(telegramGroupsStatus(), 8)}`
   }
   return 'unknown view'
 }
