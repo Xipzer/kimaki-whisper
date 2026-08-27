@@ -18,6 +18,7 @@ import { spawn } from 'node:child_process'
 import { loadConfig, saveConfig, DEFAULT_PORT, log } from './config.js'
 import { MODEL_TIERS, tierById, recommendTier, installRuntime, getPipeline } from './transcribe/local-onnx.js'
 import { transcribeAudioBytes, startServer, isServerRunning, stopServer } from './server.js'
+import { sendPanel, handlePanelInteraction } from './panel.js'
 import { initWendy, wendySleep, wendyWake, wendySetDnd, wendySilence, wendyUnsilence, wendyStatus } from './wendy.js'
 
 function prefix(): string {
@@ -54,6 +55,9 @@ function buildCommands() {
     new SlashCommandBuilder().setName('wendy-brain').setDescription('Control the LLM brain on the GPU host')
       .addStringOption((o) => o.setName('action').setDescription('what to do').setRequired(true)
         .addChoices({ name: 'start', value: 'start' }, { name: 'stop', value: 'stop' }, { name: 'restart', value: 'restart' })).setDMPermission(false).toJSON(),
+    new SlashCommandBuilder().setName('wendy').setDescription('Wendy control panel - status, queues, agents, logs, controls').setDMPermission(false).toJSON(),
+    new SlashCommandBuilder().setName('wendy-start').setDescription('Start Wendy (wake from sleep)').setDMPermission(false).toJSON(),
+    new SlashCommandBuilder().setName('wendy-stop').setDescription('Stop Wendy (sleep - no voice, no replies; updates keep accumulating)').setDMPermission(false).toJSON(),
     new SlashCommandBuilder().setName('wendy-restart').setDescription('Restart the Wendy process (supervisor respawns it)').setDMPermission(false).toJSON(),
   ]
 }
@@ -63,7 +67,8 @@ async function handleWendyCommand(i: ChatInputCommandInteraction): Promise<void>
   if (owner && i.user.id !== owner) return safeReply(i, 'Wendy only answers to her owner.')
   try { await i.deferReply({ flags: MessageFlags.Ephemeral }) } catch { return }
   const name = i.commandName
-  if (name === 'wendy-wake') return safeReply(i, wendyWake())
+  if (name === 'wendy-wake' || name === 'wendy-start') return safeReply(i, wendyWake())
+  if (name === 'wendy-stop') return safeReply(i, wendySleep())
   if (name === 'wendy-sleep') return safeReply(i, wendySleep())
   if (name === 'wendy-status') return safeReply(i, await wendyStatus())
   if (name === 'wendy-dnd') return safeReply(i, wendySetDnd(Boolean(i.options.getBoolean('on'))))
@@ -202,12 +207,14 @@ export async function startDiscord(token: string): Promise<void> {
   })
 
   client.on('interactionCreate', (i) => {
+    if ((i.isButton() || i.isStringSelectMenu()) && i.customId.startsWith('wp:')) return void handlePanelInteraction(i)
     if (!i.isChatInputCommand()) return
     const p = prefix()
     if (i.commandName === `${p}-setup`) return void handleSetup(i)
     if (i.commandName === `${p}-start`) return void handleLifecycle(i, 'start')
     if (i.commandName === `${p}-stop`) return void handleLifecycle(i, 'stop')
     if (i.commandName === `${p}-status`) return void handleLifecycle(i, 'status')
+    if (i.commandName === 'wendy') return void sendPanel(i)
     if (i.commandName.startsWith('wendy-')) return void handleWendyCommand(i)
   })
 

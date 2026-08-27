@@ -1822,6 +1822,64 @@ export function wendyUnsilence(): string {
   saveModeState()
   return 'Silence lifted.'
 }
+export type Snapshot = {
+  mode: string; inVc: boolean; dnd: boolean; silencedMin: number
+  brainUp: boolean; tps: number; ctxPct: number
+  selfTasks: { active: number; done: number; list: Array<{ goal: string; status: string; slices: number }> }
+  spawns: Array<{ label: string; status: string; ageMin: number; result?: string }>
+  watching: number; schedules: number
+  updates: { queued: number; high: number }
+  index: { threads: number; projects: number; ageMin: number }
+  telegram: { chats: number; unread: number; grants: number; muted: number; profiles: number }
+  errors: Array<{ ev: string; at: number; detail: string }>
+  history: number
+}
+export function wendySnapshot(): Snapshot {
+  const now = Date.now()
+  let errors: Snapshot['errors'] = []
+  try {
+    const f = path.join(configDir(), 'diagnostics', new Date().toISOString().slice(0, 10) + '.jsonl')
+    const raw = fs.readFileSync(f, 'utf-8').trim().split('\n').slice(-4000)
+    for (const l of raw) {
+      try {
+        const e = JSON.parse(l) as { ev: string; ts: number; text?: string; err?: string; name?: string }
+        if (['brain_error_ack', 'turn_crash', 'turn_watchdog', 'tool_error', 'capture_stuck_released', 'tool_call_truncated'].includes(e.ev) && now - e.ts < 6 * 3600000) {
+          errors.push({ ev: e.ev, at: e.ts, detail: (e.err ?? e.text ?? e.name ?? '').slice(0, 90) })
+        }
+      } catch {}
+    }
+  } catch {}
+  errors = errors.slice(-8)
+  let tgChats = 0, tgUnread = 0, tgGrants = 0, tgMuted = 0, tgProfiles = 0
+  try {
+    const d = path.join(configDir(), 'telegram')
+    const pol = JSON.parse(fs.readFileSync(path.join(d, 'chat-policy.json'), 'utf-8')) as Record<string, { unread?: unknown[]; remaining?: number }>
+    tgChats = Object.keys(pol).length
+    for (const p of Object.values(pol)) { tgUnread += p.unread?.length ?? 0; if ((p.remaining ?? 0) !== 0) tgGrants++ }
+    tgProfiles = Object.keys(JSON.parse(fs.readFileSync(path.join(d, 'profiles.json'), 'utf-8')) as object).length
+    tgMuted = Object.keys(JSON.parse(fs.readFileSync(path.join(d, 'people-policy.json'), 'utf-8')) as object).length
+  } catch {}
+  const allHeld = [...digestQueue, ...convoEvents, ...pendingAnnouncements, ...heldWhileSilent]
+  return {
+    mode: dormant ? 'ASLEEP' : connection ? 'IN VOICE' : 'AWAKE',
+    inVc: !!connection, dnd, silencedMin: silencedUntil > now ? Math.ceil((silencedUntil - now) / 60000) : 0,
+    brainUp: !!lastBrainTps && now - lastBrainTpsAt < 30 * 60000, tps: lastBrainTps,
+    ctxPct: lastPromptTokens ? Math.round((lastPromptTokens / 196608) * 1000) / 10 : 0,
+    selfTasks: {
+      active: selfTasks.filter((t) => t.status === 'active').length,
+      done: selfTasks.filter((t) => t.status === 'done').length,
+      list: selfTasks.slice(-6).map((t) => ({ goal: t.goal.slice(0, 70), status: t.status, slices: t.slices })),
+    },
+    spawns: spawns.slice(-6).map((sp) => ({ label: sp.label.slice(0, 40), status: sp.status, ageMin: Math.round((now - sp.at) / 60000), result: sp.result?.slice(0, 90) })),
+    watching: watchlist.length, schedules: schedules.length,
+    updates: { queued: allHeld.length, high: allHeld.filter((x) => x.includes('[HIGH]')).length },
+    index: { threads: threadIndex.length, projects: indexProjectCount, ageMin: lastIndexRefresh ? Math.round((now - lastIndexRefresh) / 60000) : -1 },
+    telegram: { chats: tgChats, unread: tgUnread, grants: tgGrants, muted: tgMuted, profiles: tgProfiles },
+    errors, history: history.length,
+  }
+}
+export function wendyIsDormant(): boolean { return dormant }
+
 export async function wendyStatus(): Promise<string> {
   const brain = await fetch(`${(brainUrl() ?? '').replace(/\/$/, '')}/v1/models`, { signal: AbortSignal.timeout(4000) })
     .then((r) => r.ok).catch(() => false)
