@@ -1785,23 +1785,37 @@ try {
 } catch {}
 
 // - external control surface (Discord slash commands) -
-export function wendySleep(): string {
+export function wendySleep(stopBrain = true): string {
   dormant = true
   saveModeState()
   leave()
+  let brainNote = ''
+  if (stopBrain) {
+    const wake = loadConfig().brainWakeCommand
+    const stop = (wake ?? '').replace(/start\s+\w+/, 'stop')
+    if (wake && stop !== wake) {
+      execFile('bash', ['-c', stop], { timeout: 60000, killSignal: 'SIGKILL' }, () => {})
+      brainNote = ' GPU brain stopped - VRAM released.'
+      log('wendy: dormant - brain stop issued')
+    }
+  }
   log('wendy: dormant (slash command)')
-  return 'Wendy is asleep - she will not join voice or speak until woken. Updates keep accumulating.'
+  return `Wendy is asleep - no voice, no replies.${brainNote} Updates keep accumulating; /wendy-start brings her back.`
 }
 export function wendyWake(): string {
   dormant = false
   saveModeState()
-  log('wendy: woken (slash command)')
+  const wake = loadConfig().brainWakeCommand
+  if (wake) {
+    execFile('bash', ['-c', wake], { timeout: 120000, killSignal: 'SIGKILL' }, () => {})
+    log('wendy: woken - brain start issued')
+  }
   // if the owner is in a VC right now, join them
   const owner = ownerId()
   if (clientRef && owner) {
     for (const [, g] of clientRef.guilds.cache) {
       const vs = g.voiceStates.cache.get(owner)
-      if (vs?.channel) { void joinAndServe(vs.channel, owner); return 'Wendy is awake - joining your voice channel now.' }
+      if (vs?.channel) { void joinAndServe(vs.channel, owner); return 'Wendy is awake, GPU brain starting (~40s) - joining your voice channel now.' }
     }
   }
   return 'Wendy is awake - she will follow you into voice when you join.'
