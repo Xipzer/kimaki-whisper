@@ -1781,7 +1781,9 @@ try {
   const st = JSON.parse(fs.readFileSync(statePath(), 'utf-8')) as { silencedUntil?: number; dnd?: boolean; dormant?: boolean }
   if (st.silencedUntil && st.silencedUntil > Date.now()) silencedUntil = st.silencedUntil
   dnd = Boolean(st.dnd)
-  dormant = Boolean(st.dormant)
+  // dormant is deliberately NOT restored: starting the process IS the start
+  // command. /wendy-stop parks her (and the GPU) until someone starts her again.
+  dormant = false
 } catch {}
 
 // - external control surface (Discord slash commands) -
