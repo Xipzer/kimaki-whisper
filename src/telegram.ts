@@ -343,6 +343,24 @@ export function telegramPrivacyStatus(): string {
   return `${globalDiscreet ? 'GLOBAL DISCREET MODE: ON (everything is discreet)' : 'global discreet mode: off'}${rows.length ? '\n' + rows.join('\n') : '\nno per-chat privacy overrides'}`
 }
 
+/** Last N messages in a chat, WITHOUT consuming the summary buffer.
+ *  This is "what is this room actually talking about right now". */
+export function telegramRoomContext(chatId: string, n = 12): string {
+  let lines: TgMsg[] = []
+  try {
+    lines = fs.readFileSync(inboxPath(), 'utf-8').trim().split('\n').filter(Boolean)
+      .map((l) => JSON.parse(l) as TgMsg).filter((m) => String(m.chatId) === chatId)
+  } catch { return '' }
+  return lines.slice(-n).map((m) => `${m.from.name}: ${m.text.slice(0, 180)}`).join('\n')
+}
+/** A person's running thread with her, across every chat. */
+export function telegramPersonThread(query: string, n = 10): string {
+  const q = query.trim().toLowerCase().replace(/^@/, '')
+  const hit = Object.entries(profiles).find(([k, p]) => k === q || p.name.toLowerCase().includes(q) || (p.handle ?? '').toLowerCase() === q)
+  if (!hit) return ''
+  return hit[1].recent.slice(-n).join('\n')
+}
+
 /** Owner-facing: set how a chat surfaces. */
 export function telegramWatchMode(target: string, mode: string, threshold?: number): string {
   const chat = resolveChat(target)
