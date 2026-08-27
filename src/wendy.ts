@@ -1834,6 +1834,7 @@ export type Snapshot = {
   errors: Array<{ ev: string; at: number; detail: string }>
   history: number
 }
+const BOOT_AT = Date.now()
 export function wendySnapshot(): Snapshot {
   const now = Date.now()
   let errors: Snapshot['errors'] = []
@@ -1843,7 +1844,7 @@ export function wendySnapshot(): Snapshot {
     for (const l of raw) {
       try {
         const e = JSON.parse(l) as { ev: string; ts: number; text?: string; err?: string; name?: string }
-        if (['brain_error_ack', 'turn_crash', 'turn_watchdog', 'tool_error', 'capture_stuck_released', 'tool_call_truncated'].includes(e.ev) && now - e.ts < 6 * 3600000) {
+        if (['brain_error_ack', 'turn_crash', 'turn_watchdog', 'tool_error', 'capture_stuck_released', 'tool_call_truncated'].includes(e.ev) && e.ts >= BOOT_AT) {
           errors.push({ ev: e.ev, at: e.ts, detail: (e.err ?? e.text ?? e.name ?? '').slice(0, 90) })
         }
       } catch {}
@@ -1863,7 +1864,7 @@ export function wendySnapshot(): Snapshot {
   return {
     mode: dormant ? 'ASLEEP' : connection ? 'IN VOICE' : 'AWAKE',
     inVc: !!connection, dnd, silencedMin: silencedUntil > now ? Math.ceil((silencedUntil - now) / 60000) : 0,
-    brainUp: !!lastBrainTps && now - lastBrainTpsAt < 30 * 60000, tps: lastBrainTps,
+    brainUp: !lastBrainTpsAt || now - lastBrainTpsAt < 30 * 60000, tps: lastBrainTps,
     ctxPct: lastPromptTokens ? Math.round((lastPromptTokens / 196608) * 1000) / 10 : 0,
     selfTasks: {
       active: selfTasks.filter((t) => t.status === 'active').length,

@@ -34,7 +34,7 @@ export function buildPanel(): { embeds: EmbedBuilder[]; components: ActionRowBui
     .setColor(s.mode === 'ASLEEP' ? 0x555555 : s.errors.length ? 0xe0a030 : 0x2ecc71)
     .setTitle(`Wendy — ${mode}${flags ? `  ${flags}` : ''}`)
     .setDescription(
-      `${dot(s.brainUp)} brain ${s.tps ? `**${s.tps}** tok/s` : 'idle'}  ·  ctx ${bar(s.ctxPct)} **${s.ctxPct}%**  ·  memory ${s.history} msgs`,
+      `${dot(s.brainUp)} brain ${s.tps ? `**${s.tps}** tok/s` : 'ready'}  ·  ctx ${s.ctxPct ? `${bar(s.ctxPct)} **${s.ctxPct}%**` : '—'}  ·  memory ${s.history} msgs`,
     )
     .addFields(
       {
@@ -55,8 +55,8 @@ export function buildPanel(): { embeds: EmbedBuilder[]; components: ActionRowBui
     )
   if (s.errors.length) {
     embed.addFields({
-      name: `⚠️ Issues (${s.errors.length} in 6h)`,
-      value: s.errors.slice(-3).map((e) => `\`${e.ev}\` ${e.detail.slice(0, 60) || '—'}`).join('\n') || '—',
+      name: `⚠️ Issues since restart (${s.errors.length})`,
+      value: s.errors.slice(-3).map((e) => `\`${new Date(e.at).toLocaleTimeString('en-GB').slice(0, 5)}\` **${e.ev}** ${e.detail.slice(0, 48) || '—'}`).join('\n') || '—',
     })
   }
   embed.setFooter({ text: `updated ${new Date().toLocaleTimeString('en-GB')}` })
@@ -103,8 +103,8 @@ async function detail(kind: string): Promise<string> {
   if (kind === 'people') return `**Profiles**\n${lines(telegramProfileList(), 12, 62)}\n\n**Muted**\n${lines(telegramPeopleStatus(), 5)}`
   if (kind === 'inbox') return `**Telegram triage (24h)**\n${lines(telegramInbox(24).replace(/\[.*?\]\n/, ''), 16, 66)}`
   if (kind === 'errors') {
-    const e = s.errors.map((x) => `\`${new Date(x.at).toLocaleTimeString('en-GB')}\` **${x.ev}** ${x.detail}`).join('\n') || 'no issues in the last 6 hours ✅'
-    return `**Issues (6h)**\n${e}\n\n**Groups**\n${lines(telegramGroupsStatus(), 8)}`
+    const e = s.errors.map((x) => `\`${new Date(x.at).toLocaleTimeString('en-GB')}\` **${x.ev}** ${x.detail.slice(0, 60)}`).join('\n') || 'nothing since restart ✅'
+    return `**Issues since restart**\n${e}\n\n**Groups**\n${lines(telegramGroupsStatus(), 8)}`
   }
   return 'unknown view'
 }
