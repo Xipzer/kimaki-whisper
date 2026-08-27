@@ -269,6 +269,8 @@ function trackActivity(m: TgMsg, chatTitle: string): boolean {
   if (p.notify === 'ignore') { policies[id] = p; savePolicies(); return false }
   noteInteraction(m, chatTitle)
   noteMember(String(m.chatId), m)
+  pushRing(m)
+  rotateInboxIfHuge()
   const pk = personKey(m)
   if (personMuted(pk)) {
     const pp = people[pk]
@@ -346,12 +348,21 @@ export function telegramPrivacyStatus(): string {
 /** Last N messages in a chat, WITHOUT consuming the summary buffer.
  *  This is "what is this room actually talking about right now". */
 export function telegramRoomContext(chatId: string, n = 12): string {
-  let lines: TgMsg[] = []
+  const ring = roomRing.get(chatId)
+  if (ring?.length) return ring.slice(-n).map((m) => `${m.from.name}: ${m.text.slice(0, 180)}`).join('\n')
+  // cold start only: seek the tail of the log rather than parsing all of it
   try {
-    lines = fs.readFileSync(inboxPath(), 'utf-8').trim().split('\n').filter(Boolean)
-      .map((l) => JSON.parse(l) as TgMsg).filter((m) => String(m.chatId) === chatId)
+    const st = fs.statSync(inboxPath())
+    const window = Math.min(st.size, 120_000)
+    const buf = Buffer.alloc(window)
+    const fd = fs.openSync(inboxPath(), 'r')
+    fs.readSync(fd, buf, 0, window, st.size - window)
+    fs.closeSync(fd)
+    const lines = buf.toString().split('\n').slice(1).filter(Boolean)
+      .map((l) => { try { return JSON.parse(l) as TgMsg } catch { return null } })
+      .filter((m): m is TgMsg => !!m && String(m.chatId) === chatId)
+    return lines.slice(-n).map((m) => `${m.from.name}: ${m.text.slice(0, 180)}`).join('\n')
   } catch { return '' }
-  return lines.slice(-n).map((m) => `${m.from.name}: ${m.text.slice(0, 180)}`).join('\n')
 }
 /** A person's running thread with her, across every chat. */
 export function telegramPersonThread(query: string, n = 10): string {
@@ -390,9 +401,34 @@ export function telegramChatDigest(target: string): string {
 
 // - person profiles: cross-chat, persistent, auto-consolidated -
 type Profile = { name: string; handle?: string; firstSeen: number; lastSeen: number; interactions: number; sinceRefresh: number; profile: string; recent: string[]; tone?: 'professional' | 'casual' | 'banter' }
+// hot per-chat tails, bounded - keeps room context O(1) as the log grows
+const roomRing = new Map<string, TgMsg[]>()
+function pushRing(m: TgMsg): void {
+  const k = String(m.chatId)
+  const r = roomRing.get(k) ?? []
+  r.push(m)
+  if (r.length > 40) r.splice(0, r.length - 40)
+  roomRing.set(k, r)
+  if (roomRing.size > 60) roomRing.delete(roomRing.keys().next().value as string)
+}
 const membersPath = () => path.join(tgDir(), 'chat-members.json')
 let chatMembers: Record<string, Record<string, { name: string; username?: string }>> = {}
 try { chatMembers = JSON.parse(fs.readFileSync(membersPath(), 'utf-8')) } catch {}
+let ingestCount = 0
+function rotateInboxIfHuge(): void {
+  if (++ingestCount % 200 !== 0) return
+  try {
+    const st = fs.statSync(inboxPath())
+    if (st.size < 4_000_000) return
+    const buf = Buffer.alloc(1_500_000)
+    const fd = fs.openSync(inboxPath(), 'r')
+    fs.readSync(fd, buf, 0, 1_500_000, st.size - 1_500_000)
+    fs.closeSync(fd)
+    const keep = buf.toString().split('\n').slice(1).join('\n')
+    fs.writeFileSync(inboxPath(), keep)
+    log('telegram: inbox log rotated (kept most recent ~1.5MB)')
+  } catch {}
+}
 function saveMembers(): void { try { fs.writeFileSync(membersPath(), JSON.stringify(chatMembers)) } catch {} }
 function noteMember(chatId: string, m: TgMsg): void {
   const c = chatMembers[chatId] ?? {}
@@ -475,7 +511,7 @@ export function telegramProfilesDue(): Array<{ key: string; name: string; recent
 export function telegramProfileWrite(key: string, text: string): void {
   const p = profiles[key]
   if (!p) return
-  p.profile = text.slice(0, 800)
+  p.profile = text.slice(0, 700)
   p.sinceRefresh = 0
   saveProfiles()
 }
