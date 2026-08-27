@@ -553,6 +553,14 @@ export async function telegramWho(query: string, chatHint?: string): Promise<str
     }
     saveContacts()
   }
+  // where does this person actually talk?
+  const handles = [...new Set(hits.map((h) => (h.match(/@([A-Za-z0-9_]+)/) ?? [])[1]).filter(Boolean))]
+  const places: string[] = []
+  for (const h of handles) {
+    const where = chatsForHandle(h)
+    if (where.length) places.push(`@${h} talks in: ${where.map((w) => `"${w.title}"`).join(', ')}${contacts[Object.keys(contacts).find((k) => (contacts[k].username ?? '').toLowerCase() === h.toLowerCase()) ?? ''] ? ' (and has a DM with Xipz)' : ''}`)
+  }
+  if (hits.length && places.length) hits.push(...places, 'To reply, name the CHAT you mean - a bare handle is ambiguous when someone is in several places.')
   if (!hits.length) return `no handle on record for "${query}". Telegram does not let bots list ordinary group members - you only learn a handle once that person sends a message, or if they are a chat admin. Say you do not have it rather than guessing; the owner can tell you.`
   return [...new Set(hits)].slice(0, 8).join('\n')
 }
@@ -586,9 +594,13 @@ function resolveChatAll(query: string): ChatRef[] {
   const groups = Object.entries(seenGroups).map(([id, g]) => ({ id: Number(id), title: g.title, isGroup: true }))
   const dms = Object.entries(contacts).map(([id, c]) => ({ id: Number(id), title: c.name, isGroup: false, handle: (c.username ?? '').toLowerCase() }))
   const all = [...groups, ...dms] as Array<ChatRef & { handle?: string }>
-  // exact @handle match is the strongest possible signal
+  // exact @handle match: but if that person also talks in groups, a bare handle
+  // is AMBIGUOUS - a group conversation must never silently become a private DM
   const byHandle = all.filter((c) => c.handle && c.handle === q)
-  if (byHandle.length) return byHandle
+  if (byHandle.length) {
+    const groupsWithThem = chatsForHandle(q).map((g) => ({ id: Number(g.id), title: g.title, isGroup: true }))
+    return groupsWithThem.length ? [...byHandle.map((b) => ({ ...b, title: `DM with ${b.title}` })), ...groupsWithThem] : byHandle
+  }
   // exact title match always wins - "BaseStonk" must not silently become "BaseStonk Gang Gang"
   const exact = all.filter((c) => c.title.toLowerCase() === q)
   if (exact.length === 1) return exact
