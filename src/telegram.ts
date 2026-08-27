@@ -76,8 +76,11 @@ function maybeAutonomous(m: TgMsg): void {
     log(`telegram: owner message${tagged ? ' TAGGING YOU - replying' : ' (not tagged)'}`)
     if (tagged) {
       onAutonomous(m, { tone: policies[String(m.chatId)]?.tone ?? 'casual', remaining: -1, scope: 'owner asked you directly', title: policies[String(m.chatId)]?.title ?? 'chat' })
-      return
     }
+    // Untagged owner message = he is talking to OTHER people, not to her. A chat
+    // grant authorises replying to THEM, never to him: she must not jump into
+    // his conversation as if she were another participant.
+    return
   }
   const p = telegramPolicyFor(String(m.chatId))
   const live = p && (p.remaining === -1 || (p.remaining > 0 && (!p.expiresAt || p.expiresAt > Date.now())))
@@ -842,7 +845,11 @@ function savePolicies(): void { try { fs.writeFileSync(policyPath(), JSON.string
 export function telegramPolicyFor(chatId: string): ChatPolicy | null {
   const p = policies[chatId]
   if (!p) return null
-  if (p.expiresAt && p.expiresAt < Date.now()) { p.remaining = 0 }
+  if (p.expiresAt && p.expiresAt < Date.now() && p.remaining !== 0) {
+    p.remaining = 0
+    p.expiresAt = 0
+    savePolicies()   // keep disk and memory consistent so the panel never lies
+  }
   return p
 }
 
