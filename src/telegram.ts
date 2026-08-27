@@ -580,11 +580,15 @@ function resolveChatAll(query: string): ChatRef[] {
   const q = query.trim().toLowerCase().replace(/^@/, '')
   if (/^-?\d{5,}$/.test(q)) {
     const g = seenGroups[q]
-    return [{ id: Number(q), title: g?.title ?? q, isGroup: q.startsWith('-') }]
+    const c = contacts[q]
+    return [{ id: Number(q), title: g?.title ?? c?.name ?? q, isGroup: q.startsWith('-') }]
   }
   const groups = Object.entries(seenGroups).map(([id, g]) => ({ id: Number(id), title: g.title, isGroup: true }))
-  const dms = Object.entries(contacts).map(([id, c]) => ({ id: Number(id), title: c.name, isGroup: false }))
-  const all = [...groups, ...dms]
+  const dms = Object.entries(contacts).map(([id, c]) => ({ id: Number(id), title: c.name, isGroup: false, handle: (c.username ?? '').toLowerCase() }))
+  const all = [...groups, ...dms] as Array<ChatRef & { handle?: string }>
+  // exact @handle match is the strongest possible signal
+  const byHandle = all.filter((c) => c.handle && c.handle === q)
+  if (byHandle.length) return byHandle
   // exact title match always wins - "BaseStonk" must not silently become "BaseStonk Gang Gang"
   const exact = all.filter((c) => c.title.toLowerCase() === q)
   if (exact.length === 1) return exact
@@ -600,6 +604,20 @@ function ambiguityError(query: string): string {
   const hits = resolveChatAll(query)
   if (!hits.length) return `ERROR: no known chat matching "${query}" - telegram_groups list shows what exists`
   return `AMBIGUOUS: "${query}" matches ${hits.length} chats - ${hits.map((h) => `"${h.title}"`).join(', ')}. Name the exact chat (or use its id); nothing was sent.`
+}
+
+// - send ledger: an auditable record of every message she has sent -
+type SentRec = { at: number; chatId: number; title: string; as: 'you' | 'bot'; text: string }
+const sentLogPath = () => path.join(tgDir(), 'sent-log.jsonl')
+function logSent(r: SentRec): void { try { fs.appendFileSync(sentLogPath(), JSON.stringify(r) + '\n') } catch {} }
+export function telegramSentLog(limit = 12): string {
+  let rows: SentRec[] = []
+  try { rows = fs.readFileSync(sentLogPath(), 'utf-8').trim().split('\n').filter(Boolean).map((l) => JSON.parse(l) as SentRec) } catch { return 'you have not sent anything yet' }
+  if (!rows.length) return 'you have not sent anything yet'
+  return rows.slice(-limit).map((r) => {
+    const mins = Math.round((Date.now() - r.at) / 60000)
+    return `${mins}m ago -> "${r.title}" (${r.as === 'you' ? 'as Xipz' : 'as you, the bot'}): "${r.text.slice(0, 110)}"`
+  }).join('\n')
 }
 
 /** Hard outbound scrubber. Doctrine can be social-engineered; this cannot.
@@ -685,11 +703,15 @@ export async function telegramSend(target: string, html: string): Promise<string
   if (!res) return 'ERROR: network failure reaching Telegram'
   const d = (await res.json().catch(() => null)) as { ok?: boolean; description?: string } | null
   if (!d?.ok) return `ERROR: Telegram refused - ${d?.description ?? 'unknown'}`
-  log(`telegram: sent to "${chat.title}" (${chat.isGroup ? 'group, as bot' : 'DM, as owner'})`)
+  // resolve a bare numeric title to a real name for the record
+  const known = contacts[String(chat.id)]?.name ?? seenGroups[String(chat.id)]?.title
+  const title = /^-?\d+$/.test(chat.title) && known ? known : chat.title
+  logSent({ at: Date.now(), chatId: chat.id, title, as: chat.isGroup ? 'bot' : 'you', text: out })
+  log(`telegram: sent to "${title}" (${chat.isGroup ? 'group, as bot' : 'DM, as owner'})`)
   const left = consumeGrant(String(chat.id), out)
   const budget = left === -1 ? ' [indefinite autonomy active - keep the owner in the loop]'
     : left >= 0 ? ` [autonomous budget: ${left} replies left${left <= 2 ? ' - ask the owner for more if the conversation is still going' : ''}]` : ''
-  return `sent to "${chat.title}"${chat.isGroup ? ' (as the bot)' : ' (as you, via business connection)'}${budget}`
+  return `sent to "${title}"${chat.isGroup ? ' (as the bot in that group)' : ' (as Xipz himself, in his DM with them)'}${budget}`
 }
 
 // - per-chat policy: tone register + reply-budget grants -

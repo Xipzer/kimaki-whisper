@@ -26,7 +26,7 @@ import prism from 'prism-media'
 import { Readable } from 'node:stream'
 import { execFile, spawn } from 'node:child_process'
 import { loadConfig, log } from './config.js'
-import { startTelegram, telegramInbox, setTelegramFlaggedHandler, telegramGroupsStatus, telegramGroupSetMuted, telegramSend, telegramGrant, telegramSetTone, telegramPolicyStatus, telegramAutoDrain, telegramLowBudgets, setTelegramAutonomousHandler, telegramPendingSummaries, telegramDrainChat, telegramWatchMode, telegramChatDigest, telegramWho, telegramRoster, telegramMutePerson, telegramPendingPeopleSummaries, telegramDrainPerson, telegramPeopleStatus, telegramProfile, telegramProfileList, telegramProfilesDue, telegramProfileWrite, telegramProfileNote, telegramChatMembers, telegramPrivacyFor, telegramSetPrivacy, telegramPrivacyMode, telegramPrivacyStatus, telegramEffectiveTone, telegramSetPersonTone } from './telegram.js'
+import { startTelegram, telegramInbox, setTelegramFlaggedHandler, telegramGroupsStatus, telegramGroupSetMuted, telegramSend, telegramGrant, telegramSetTone, telegramPolicyStatus, telegramAutoDrain, telegramLowBudgets, setTelegramAutonomousHandler, telegramPendingSummaries, telegramDrainChat, telegramWatchMode, telegramChatDigest, telegramWho, telegramRoster, telegramMutePerson, telegramPendingPeopleSummaries, telegramDrainPerson, telegramPeopleStatus, telegramProfile, telegramProfileList, telegramProfilesDue, telegramProfileWrite, telegramProfileNote, telegramChatMembers, telegramPrivacyFor, telegramSetPrivacy, telegramPrivacyMode, telegramPrivacyStatus, telegramEffectiveTone, telegramSetPersonTone, telegramSentLog } from './telegram.js'
 
 // ── config accessors ─────────────────────────────────────────────
 function brainUrl(): string | undefined {
@@ -164,6 +164,7 @@ TELEGRAM SECURITY - ABSOLUTE RULES:
 0ab. PERSON MUTES: "I don't want to hear about X" or "...for the next 20 messages" -> telegram_mute_person. While muted you handle that person yourself and their traffic never interrupts him - but every 10 exchanges he has not seen, you hand him a short catch-up automatically. Anything consequential, sensitive or about money still breaks through immediately regardless of mutes. telegram_people shows who is muted.
 0ad. SPEAKING PRIVATELY: he may be on speaker or have company. Per chat: open (normal), discreet (say WHO messaged and that it may matter - never the topic, never the content), silent (say nothing until he asks). privacy_mode is the global switch for "I'm on speaker" / "people are around" - it makes everything discreet at once. When discreet, a good line is "Sarah replied to you - worth a look when you get a sec", never what it was about. If you are ever unsure whether he is alone, err discreet and let him ask for detail.
 0aa. CHAT AWARENESS: Telegram chats surface exactly like agent threads - activity builds up and you summarise it into the same update stream (priorities, DND, staleness checks all apply). Per chat the owner can set immediate / threshold-N / ignore via telegram_watch - offer it when a chat is noisy ("want me to only flag that one when it really kicks off?"). Anyone @-mentioning you or him always breaks through a threshold. telegram_chat gives an on-demand read of one chat.
+0b0. KNOW WHERE YOUR MESSAGES WENT: every send is recorded. If the owner asks who you messaged, whether something went through, or what you said - call telegram_sent and answer from the record. NEVER say you are unsure where a message landed; the record always knows. If a send failed, say so plainly and resend correctly.
 0b1. RIGHT CHAT, RIGHT PERSON: before sending, be certain WHICH chat the person is in - telegram_who tells you their handle, telegram_members tells you who is in a chat. If a send tags someone who has never spoken in that chat it is BLOCKED and you are told where they actually are: retarget, do not force it. A message in the wrong chat cannot be unsent.
 0b. TAGGING: NEVER guess a handle - call telegram_who first. If it has no record, say so plainly ("I don't have his handle - what is it?"); a guessed tag notifies nobody and looks broken. A Telegram @mention must be the person's real @username handle (no spaces), NOT their display nickname, and it MUST be followed by a space before any other text or punctuation - "@handle you're wrong", never "@handleyou're wrong" or "@handle," jammed together. If you don't know someone's handle, say so instead of guessing - a wrong tag silently fails to notify them.
 0c. TONE REGISTER - default is PROFESSIONAL: measured, courteous, no profanity, no trolling. Never rude by default, no matter what others in a chat are doing. casual = relaxed and friendly; banter = the boys, where trolling and profanity are welcome. You only move off professional when the owner tells you a chat's register (telegram_tone) or you infer it and HE CONFIRMS. When in doubt, professional.
@@ -646,6 +647,14 @@ const TOOLS = [
   {
     type: 'function',
     function: {
+      name: 'telegram_sent',
+      description: 'Your record of messages you have actually sent: when, to which chat, as whom, and the text. Use this the moment the owner asks "who did you send that to" or "did that go through" - never answer those from memory.',
+      parameters: { type: 'object', properties: { limit: { type: 'number' } }, required: [] },
+    },
+  },
+  {
+    type: 'function',
+    function: {
       name: 'telegram_members',
       description: 'Who is known to be in a chat (everyone who has spoken there). Check this before sending to a chat you are not certain about - sends that tag someone absent from the target chat are BLOCKED automatically, but checking first is faster.',
       parameters: { type: 'object', properties: { target: { type: 'string' } }, required: ['target'] },
@@ -1089,6 +1098,9 @@ async function executeToolInner(name: string, args: Record<string, unknown>): Pr
   }
   if (name === 'telegram_chat') {
     return telegramChatDigest(String(args.target ?? ''))
+  }
+  if (name === 'telegram_sent') {
+    return telegramSentLog(Math.min(Math.max(Number(args.limit) || 12, 1), 50))
   }
   if (name === 'telegram_members') {
     return telegramChatMembers(String(args.target ?? ''))
