@@ -60,8 +60,17 @@ try { offset = (JSON.parse(fs.readFileSync(statePath(), 'utf-8')) as { offset?: 
 
 let onFlagged: ((m: TgMsg) => void) | null = null
 export function setTelegramFlaggedHandler(fn: (m: TgMsg) => void): void { onFlagged = fn }
-let onAutonomous: ((m: TgMsg, policy: { tone: string; remaining: number; scope: string; title: string }) => void) | null = null
-export function setTelegramAutonomousHandler(fn: (m: TgMsg, p: { tone: string; remaining: number; scope: string; title: string }) => void): void { onAutonomous = fn }
+type AutoCtx = { chatId: string; isDm: boolean; tone: string; remaining: number; scope: string; title: string }
+let onAutonomous: ((m: TgMsg, policy: AutoCtx) => void) | null = null
+export function setTelegramAutonomousHandler(fn: (m: TgMsg, p: AutoCtx) => void): void { onAutonomous = fn }
+// The chat currently being handled - turns are serialised, so this is always
+// the message she is answering. Removes target guessing entirely.
+let replyTarget = ''
+export function setReplyTarget(id: string): void { replyTarget = id }
+export async function telegramReplyHere(text: string): Promise<string> {
+  if (!replyTarget) return 'ERROR: no active conversation to reply to - use telegram_send with an explicit target'
+  return telegramSend(replyTarget, text)
+}
 /** True only for the real owner - verified by immutable Telegram user id,
  *  never by display name or handle text (both are trivially spoofed). */
 export function isVerifiedOwner(m: TgMsg): boolean {
@@ -78,7 +87,7 @@ function maybeAutonomous(m: TgMsg): void {
     const tagged = mode === 'off' ? false : mode === 'relaxed' ? (hardTag || softName) : hardTag
     log(`telegram: owner message [owner-autonomy ${mode}]${tagged ? ' - replying' : ' - not for you'}`)
     if (tagged) {
-      onAutonomous(m, { tone: policies[String(m.chatId)]?.tone ?? 'casual', remaining: -1, scope: 'owner asked you directly', title: policies[String(m.chatId)]?.title ?? 'chat' })
+      onAutonomous(m, { chatId: String(m.chatId), isDm: !String(m.chatId).startsWith('-'), tone: policies[String(m.chatId)]?.tone ?? 'casual', remaining: -1, scope: 'owner asked you directly', title: policies[String(m.chatId)]?.title ?? m.chatTitle ?? `DM with ${m.from.name}` })
     }
     // Untagged owner message = he is talking to OTHER people, not to her. A chat
     // grant authorises replying to THEM, never to him: she must not jump into
@@ -92,7 +101,7 @@ function maybeAutonomous(m: TgMsg): void {
     const who = `${m.from.username ?? ''} ${m.from.name}`.toLowerCase()
     if (!who.includes(p.person.toLowerCase().replace(/^@/, ''))) return
   }
-  onAutonomous(m, { tone: p.tone, remaining: p.remaining, scope: p.scope, title: p.title })
+  onAutonomous(m, { chatId: String(m.chatId), isDm: !String(m.chatId).startsWith('-'), tone: p.tone, remaining: p.remaining, scope: p.scope, title: p.title || m.chatTitle || `DM with ${m.from.name}` })
 }
 
 function classify(m: { id: number; username?: string; name: string }): TgMsg['tier'] {
