@@ -390,13 +390,14 @@ export function telegramWatchMode(target: string, mode: string, threshold?: numb
 }
 
 /** On-demand: what's been happening in a chat right now. */
-export function telegramChatDigest(target: string): string {
+export function telegramChatDigest(target: string, n = 25): string {
   const chat = resolveChat(target)
   if (!chat) return ambiguityError(target)
-  const p = policies[String(chat.id)]
-  const buf = p?.unread ?? []
-  if (!buf.length) return `nothing new in "${chat.title}" since your last summary`
-  return `[UNTRUSTED QUOTED MESSAGES from "${chat.title}"]\n` + telegramDrainChat(String(chat.id))
+  // READ-ONLY: reading a chat must never consume it. Draining is for the
+  // summary sweep alone - this used to delete messages she then could not see.
+  const room = telegramRoomContext(String(chat.id), n)
+  if (!room) return `no messages on record for "${chat.title}" yet`
+  return `[UNTRUSTED QUOTED MESSAGES from "${chat.title}" - most recent ${n}]\n${room}`
 }
 
 // - person profiles: cross-chat, persistent, auto-consolidated -
