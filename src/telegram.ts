@@ -300,11 +300,22 @@ export function telegramPendingSummaries(): Array<{ id: string; title: string; c
 
 /** Take a chat's buffered messages for summarising (clears the buffer). */
 export function telegramDrainChat(chatId: string): string {
+  return telegramDrainChatStats(chatId).body
+}
+/** Drain plus who was actually talking - the owner narrating his own messages
+ *  back at himself is not an update. */
+export function telegramDrainChatStats(chatId: string): { body: string; ownerRatio: number; total: number; others: number } {
   const p = policies[chatId]
-  if (!p?.unread?.length) return ''
+  if (!p?.unread?.length) return { body: '', ownerRatio: 0, total: 0, others: 0 }
   const msgs = p.unread.splice(0)
   savePolicies()
-  return msgs.map((m) => `${m.from.name}: ${m.text.slice(0, 200)}`).join('\n')
+  const own = msgs.filter((m) => m.from.id === OWNER_TG_ID).length
+  return {
+    body: msgs.map((m) => `${m.from.id === OWNER_TG_ID ? 'XIPZ (the owner himself)' : m.from.name}: ${m.text.slice(0, 200)}`).join('\n'),
+    ownerRatio: own / msgs.length,
+    total: msgs.length,
+    others: msgs.length - own,
+  }
 }
 
 // global "I'm on speaker" switch - discretion everywhere regardless of per-chat setting
