@@ -72,8 +72,11 @@ function maybeAutonomous(m: TgMsg): void {
   // the owner @-mentioning her is standing authority to reply to HIM, anywhere
   if (isVerifiedOwner(m) && onAutonomous) {
     const t = m.text.toLowerCase()
-    const tagged = (botHandle && t.includes('@' + botHandle)) || /\bwendy\b/.test(t)
-    log(`telegram: owner message${tagged ? ' TAGGING YOU - replying' : ' (not tagged)'}`)
+    const mode = ownerAutonomyFor(String(m.chatId))
+    const hardTag = !!botHandle && t.includes('@' + botHandle)
+    const softName = /\bwendy\b/.test(t)
+    const tagged = mode === 'off' ? false : mode === 'relaxed' ? (hardTag || softName) : hardTag
+    log(`telegram: owner message [owner-autonomy ${mode}]${tagged ? ' - replying' : ' - not for you'}`)
     if (tagged) {
       onAutonomous(m, { tone: policies[String(m.chatId)]?.tone ?? 'casual', remaining: -1, scope: 'owner asked you directly', title: policies[String(m.chatId)]?.title ?? 'chat' })
     }
@@ -319,6 +322,52 @@ export function telegramDrainChatStats(chatId: string): { body: string; ownerRat
     total: msgs.length,
     others: msgs.length - own,
   }
+}
+
+// - owner autonomy: may she reply to HIM, and does he have to tag her -
+// global (when active) overrides every chat setting without erasing them.
+let ownerAutoGlobal: { active: boolean; mode: 'off' | 'enforced' | 'relaxed' } = { active: false, mode: 'enforced' }
+try {
+  const st = JSON.parse(fs.readFileSync(statePath(), 'utf-8')) as { ownerAutoGlobal?: typeof ownerAutoGlobal }
+  if (st.ownerAutoGlobal) ownerAutoGlobal = st.ownerAutoGlobal
+} catch {}
+function saveOwnerAuto(): void {
+  try {
+    const st = JSON.parse(fs.readFileSync(statePath(), 'utf-8')) as Record<string, unknown>
+    fs.writeFileSync(statePath(), JSON.stringify({ ...st, ownerAutoGlobal }))
+  } catch {}
+}
+/** Effective mode for a chat: global override > chat setting > enforced default. */
+export function ownerAutonomyFor(chatId: string): 'off' | 'enforced' | 'relaxed' {
+  if (ownerAutoGlobal.active) return ownerAutoGlobal.mode
+  return policies[chatId]?.ownerAutonomy ?? 'enforced'
+}
+export function setOwnerAutonomy(scope: string, mode: string, target?: string): string {
+  const m = (['off', 'enforced', 'relaxed'].includes(mode) ? mode : 'enforced') as 'off' | 'enforced' | 'relaxed'
+  if (scope === 'global') {
+    ownerAutoGlobal = { active: true, mode: m }
+    saveOwnerAuto()
+    return `GLOBAL owner-autonomy: ${m}${m === 'relaxed' ? ' (saying your name is enough, no tag needed)' : m === 'enforced' ? ' (you must @tag her)' : ' (she never replies to you unprompted)'}. This overrides every chat setting until you clear it; chat settings are kept and resume afterwards.`
+  }
+  if (scope === 'clear-global') {
+    ownerAutoGlobal = { active: false, mode: ownerAutoGlobal.mode }
+    saveOwnerAuto()
+    return 'global override cleared - per-chat owner-autonomy settings are back in force'
+  }
+  const chat = resolveChat(String(target ?? ''))
+  if (!chat) return ambiguityError(String(target ?? ''))
+  const id = String(chat.id)
+  const p = policies[id] ?? { title: chat.title, tone: 'professional' as const, remaining: 0, grantedAt: 0, expiresAt: 0, scope: '', sent: [] }
+  p.title = chat.title
+  p.ownerAutonomy = m
+  policies[id] = p
+  savePolicies()
+  const note = ownerAutoGlobal.active ? ' (saved, but the GLOBAL override is active right now)' : ''
+  return `owner-autonomy in "${chat.title}": ${m}${note}`
+}
+export function ownerAutonomyStatus(): string {
+  const rows = Object.entries(policies).filter(([, p]) => p.ownerAutonomy).map(([, p]) => `"${p.title}": ${p.ownerAutonomy}`)
+  return `global: ${ownerAutoGlobal.active ? `ACTIVE (${ownerAutoGlobal.mode}) - overriding all chats` : 'inactive'}\ndefault when unset: enforced (he must tag you)${rows.length ? '\n' + rows.join('\n') : '\nno per-chat settings'}`
 }
 
 // global "I'm on speaker" switch - discretion everywhere regardless of per-chat setting
@@ -827,6 +876,7 @@ type ChatPolicy = {
   tone: 'professional' | 'casual' | 'banter'
   remaining: number          // autonomous replies left (0 = confirm, -1 = INDEFINITE)
   person?: string            // optional: restrict autonomy to one sender (username or name)
+  ownerAutonomy?: 'off' | 'enforced' | 'relaxed'  // may she answer HIM here, and how strictly
   toneSetByOwner?: boolean                        // explicit owner instruction vs default
   privacy?: 'open' | 'discreet' | 'silent'        // how much may be spoken aloud
   notify?: 'immediate' | 'threshold' | 'ignore'   // how chat activity surfaces (default threshold)
