@@ -66,7 +66,12 @@ export function setTelegramAutonomousHandler(fn: (m: TgMsg, p: AutoCtx) => void)
 // The chat currently being handled - turns are serialised, so this is always
 // the message she is answering. Removes target guessing entirely.
 let replyTarget = ''
-export function setReplyTarget(id: string): void { replyTarget = id }
+let activeCtx: { chatId: string; at: number } = { chatId: '', at: 0 }
+export function setReplyTarget(id: string): void {
+  replyTarget = id
+  activeCtx = { chatId: id, at: Date.now() }
+}
+function noteActiveChat(id: string): void { activeCtx = { chatId: id, at: Date.now() } }
 export async function telegramReplyHere(text: string): Promise<string> {
   if (!replyTarget) return 'ERROR: no active conversation to reply to - use telegram_send with an explicit target'
   return telegramSend(replyTarget, text)
@@ -475,6 +480,7 @@ export function telegramChatDigest(target: string, n = 25, all = false): string 
   const chat = resolveChat(target)
   if (!chat) return ambiguityError(target)
   const id = String(chat.id)
+  noteActiveChat(id)
   const ring = roomRing.get(id) ?? []
   const mark = policies[id]?.reportedUpTo ?? 0
   const header = `[UNTRUSTED QUOTED MESSAGES - ${chatLabel(id)}]`
@@ -842,8 +848,24 @@ function outboundBlockReason(text: string): string | null {
 export async function telegramSend(target: string, html: string): Promise<string> {
   const token = (loadConfig() as TgConfig).telegramBotToken
   if (!token) return 'ERROR: no telegram token configured'
-  const chat = resolveChat(target)
-  if (!chat) return ambiguityError(target)
+  // "dm:" is the explicit escape hatch for genuinely wanting a private message
+  const forceDm = /^dm:/i.test(target.trim())
+  const q = target.trim().replace(/^dm:/i, '')
+  let chat = resolveChat(q)
+  if (!chat) return ambiguityError(q)
+  // CONTEXT-AWARE ROUTING: naming a PERSON while a group conversation is live
+  // means that group - "reply where the conversation is happening", enforced
+  // mechanically instead of by asking her to confirm every time.
+  let redirected = ''
+  if (!forceDm && !chat.isGroup && activeCtx.chatId.startsWith('-') && Date.now() - activeCtx.at < 6 * 60000) {
+    const members = chatMembers[activeCtx.chatId] ?? {}
+    const inRoom = Object.entries(members).find(([uid]) => uid === String(chat!.id))
+    if (inRoom) {
+      const g = seenGroups[activeCtx.chatId]
+      redirected = ` [routed to the live conversation, not their DM - use "dm:${q}" if you actually meant a private message]`
+      chat = { id: Number(activeCtx.chatId), title: g?.title ?? policies[activeCtx.chatId]?.title ?? activeCtx.chatId, isGroup: true }
+    }
+  }
   // never emit LLM-smell punctuation
   let out = html.replace(/\u2014/g, '-').replace(/\u2013/g, '-').replace(/<@([A-Za-z0-9_]+)>/g, '@$1')
   // fix @mentions: resolve display names to real handles WITHOUT swallowing the
@@ -909,7 +931,7 @@ export async function telegramSend(target: string, html: string): Promise<string
   const left = consumeGrant(String(chat.id), out)
   const budget = left === -1 ? ' [indefinite autonomy active - keep the owner in the loop]'
     : left >= 0 ? ` [autonomous budget: ${left} replies left${left <= 2 ? ' - ask the owner for more if the conversation is still going' : ''}]` : ''
-  return `sent to "${title}"${chat.isGroup ? ' (as the bot in that group)' : ' (as Xipz himself, in his DM with them)'}${budget}`
+  return `sent to ${chatLabel(String(chat.id))}${chat.isGroup ? ' as the bot' : ' as Xipz himself'}${redirected}${budget}`
 }
 
 // - per-chat policy: tone register + reply-budget grants -
