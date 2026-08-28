@@ -60,3 +60,21 @@ this must not become a second compulsive inbox.
 
 `~/.kimaki-whisper/telegram/`: `inbox.jsonl` (raw ingested DMs),
 `contacts.json` (learned known-tier), `state.json` (poll offset).
+
+## Media and image vision
+
+Every non-text message is ingested with its type and caption - `[PHOTO 1280x720]`,
+`[STICKER 😂 from "pack"]`, `[GIF]`, `[VOICE NOTE 12s]`, `[FILE "spec.pdf" (application/pdf)]`,
+`[POLL: ...]` - so she always knows *what* arrived and from whom.
+
+**Seeing inside images is optional and off by default.** The 5090's vision profile
+(C) cannot run alongside her text brain, so captioning needs a separate small
+endpoint (e.g. a Qwen2-VL served on the 4070S). Once one exists:
+
+```json
+{ "visionUrl": "http://127.0.0.1:8100", "visionModel": "local-vision" }
+```
+
+Photos are then downloaded and captioned asynchronously (never blocking ingestion),
+appending `- shows: ...` to the message. Without it she is explicitly instructed to
+say she cannot see the image rather than guess.

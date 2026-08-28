@@ -134,6 +134,15 @@ async function poll(): Promise<void> {
       update_id: number
       message?: {
         message_id: number
+        photo?: Array<{ file_id: string; width: number; height: number }>
+        sticker?: { emoji?: string; set_name?: string; is_animated?: boolean; is_video?: boolean; file_id: string }
+        animation?: { file_id: string; file_name?: string }
+        video?: { file_id: string; duration?: number }
+        voice?: { duration?: number }
+        video_note?: { duration?: number }
+        document?: { file_name?: string; mime_type?: string; file_id: string }
+        audio?: { title?: string; performer?: string }
+        poll?: { question?: string }
         chat: { id: number; type: string; title?: string }
         from?: { id: number; username?: string; first_name?: string; last_name?: string }
         text?: string
@@ -143,6 +152,12 @@ async function poll(): Promise<void> {
       }
       business_message?: {
         message_id: number
+        photo?: Array<{ file_id: string; width: number; height: number }>
+        sticker?: { emoji?: string; set_name?: string; file_id: string }
+        animation?: { file_id: string; file_name?: string }
+        video?: { file_id: string; duration?: number }
+        voice?: { duration?: number }
+        document?: { file_name?: string; mime_type?: string; file_id: string }
         business_connection_id?: string
         reply_to_message?: { message_id: number; text?: string; caption?: string; from?: { username?: string; first_name?: string; last_name?: string } }
         chat: { id: number }
@@ -168,7 +183,8 @@ async function poll(): Promise<void> {
       seenGroups[gid] = { title: gm.chat.title ?? gid, lastSeen: Date.now() }
       try { fs.writeFileSync(seenGroupsPath(), JSON.stringify(seenGroups, null, 2)) } catch {}
       const blocked = ((loadConfig() as TgConfig).telegramGroupsBlocklist ?? []).map(String)
-      if (!blocked.includes(gid) && gm.from && (gm.text || gm.caption)) {
+      const gmedia = describeMedia(gm as MediaMsg)
+      if (!blocked.includes(gid) && gm.from && (gm.text || gmedia.text)) {
         const name = [gm.from.first_name, gm.from.last_name].filter(Boolean).join(' ') || gm.from.username || String(gm.from.id)
         contacts[String(gm.from.id)] = { ...(contacts[String(gm.from.id)] ?? {}), name, username: gm.from.username, lastSeen: Date.now() }
         saveContacts()
@@ -176,11 +192,12 @@ async function poll(): Promise<void> {
         const msg: TgMsg = {
           id: gm.message_id, chatId: gm.chat.id,
           from: { id: gm.from.id, username: gm.from.username, name },
-          text: (gm.text ?? gm.caption ?? '').slice(0, 1000),
+          text: (gm.text ?? gmedia.text).slice(0, 1000),
           ts: gm.date * 1000, tier: 'group', chatTitle: gm.chat.title ?? gid,
           ...(r ? { replyTo: { id: r.message_id, who: `${[r.from?.first_name, r.from?.last_name].filter(Boolean).join(' ') || r.from?.username || 'someone'}${r.from?.username ? ` (@${r.from.username})` : ''}`, text: (r.text ?? r.caption ?? '').slice(0, 120) } } : {}),
         }
         try { fs.appendFileSync(inboxPath(), JSON.stringify(msg) + '\n') } catch {}
+        if (gmedia.fileId) void captionImage(gmedia.fileId).then((c) => { if (c) msg.text += c })
         if (trackActivity(msg, msg.chatTitle ?? gid) && onFlagged) onFlagged(msg)
         maybeAutonomous(msg)
       }
@@ -224,7 +241,7 @@ async function poll(): Promise<void> {
       id: bm.message_id,
       chatId: bm.chat.id,
       from: { id: bm.from.id, username: bm.from.username, name },
-      text: (bm.text ?? bm.caption ?? '(non-text message)').slice(0, 1000),
+      text: (bm.text ?? describeMedia(bm as MediaMsg).text).slice(0, 1000),
       ts: bm.date * 1000,
       tier: classify({ id: bm.from.id, username: bm.from.username, name }),
     }
@@ -287,6 +304,66 @@ export function telegramInbox(hours = 24): string {
   }
   const pol = telegramPolicyStatus()
   return header + parts.join('\n\n') + (pol.startsWith('no chat') ? '' : `\n\n[YOUR STANDING PER CHAT]\n${pol}`)
+}
+
+type MediaMsg = {
+  text?: string; caption?: string
+  photo?: Array<{ file_id: string; width: number; height: number }>
+  sticker?: { emoji?: string; set_name?: string; file_id: string }
+  animation?: { file_id: string; file_name?: string }
+  video?: { duration?: number }
+  voice?: { duration?: number }
+  video_note?: { duration?: number }
+  document?: { file_name?: string; mime_type?: string }
+  audio?: { title?: string; performer?: string }
+  poll?: { question?: string }
+}
+/** What actually arrived, in words - never a blank "(non-text message)". */
+function describeMedia(m: MediaMsg): { text: string; fileId?: string } {
+  const cap = (m.caption ?? '').trim()
+  const withCap = (label: string) => (cap ? `${label} with caption: "${cap}"` : label)
+  if (m.photo?.length) {
+    const big = m.photo[m.photo.length - 1]
+    return { text: withCap(`[PHOTO ${big.width}x${big.height}]`), fileId: big.file_id }
+  }
+  if (m.sticker) return { text: `[STICKER ${m.sticker.emoji ?? ''}${m.sticker.set_name ? ` from "${m.sticker.set_name}"` : ''}]`.replace(/\s+/g, ' '), fileId: m.sticker.file_id }
+  if (m.animation) return { text: withCap(`[GIF${m.animation.file_name ? ` "${m.animation.file_name}"` : ''}]`), fileId: m.animation.file_id }
+  if (m.video) return { text: withCap(`[VIDEO${m.video.duration ? ` ${m.video.duration}s` : ''}]`) }
+  if (m.video_note) return { text: `[VIDEO NOTE${m.video_note.duration ? ` ${m.video_note.duration}s` : ''}]` }
+  if (m.voice) return { text: `[VOICE NOTE${m.voice.duration ? ` ${m.voice.duration}s` : ''}]` }
+  if (m.document) return { text: withCap(`[FILE${m.document.file_name ? ` "${m.document.file_name}"` : ''}${m.document.mime_type ? ` (${m.document.mime_type})` : ''}]`) }
+  if (m.audio) return { text: withCap(`[AUDIO${m.audio.title ? ` "${m.audio.title}"` : ''}]`) }
+  if (m.poll) return { text: `[POLL: ${m.poll.question ?? ''}]` }
+  return { text: cap || '[non-text message]' }
+}
+
+/** Optional vision captioning: if a vision endpoint is configured, describe the
+ *  image so she genuinely knows what was sent rather than just that it was a photo. */
+async function captionImage(fileId: string): Promise<string> {
+  const cfg = loadConfig() as TgConfig & { visionUrl?: string; visionModel?: string }
+  const token = cfg.telegramBotToken
+  if (!cfg.visionUrl || !token) return ''
+  try {
+    const fr = await fetch(`https://api.telegram.org/bot${token}/getFile?file_id=${fileId}`, { signal: AbortSignal.timeout(8000) })
+    const fd = (await fr.json()) as { result?: { file_path?: string } }
+    if (!fd.result?.file_path) return ''
+    const img = await fetch(`https://api.telegram.org/file/bot${token}/${fd.result.file_path}`, { signal: AbortSignal.timeout(15000) })
+    const b64 = Buffer.from(await img.arrayBuffer()).toString('base64')
+    const res = await fetch(`${cfg.visionUrl.replace(/\/$/, '')}/v1/chat/completions`, {
+      method: 'POST', headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({
+        model: cfg.visionModel ?? 'local-vision', max_tokens: 120,
+        messages: [{ role: 'user', content: [
+          { type: 'text', text: 'Describe this image in one short sentence for someone who cannot see it. If it contains text, quote the key text.' },
+          { type: 'image_url', image_url: { url: `data:image/jpeg;base64,${b64}` } },
+        ] }],
+      }),
+      signal: AbortSignal.timeout(45000),
+    })
+    const d = (await res.json()) as { choices?: Array<{ message?: { content?: string } }> }
+    const c = d.choices?.[0]?.message?.content?.trim()
+    return c ? ` - shows: ${c.slice(0, 200)}` : ''
+  } catch { return '' }
 }
 
 /** Feed an ingested message into its chat's activity buffer. Returns true if it
