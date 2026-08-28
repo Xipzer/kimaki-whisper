@@ -14,6 +14,7 @@ type TgMsg = {
   ts: number
   tier: 'vip' | 'known' | 'other' | 'group'
   chatTitle?: string
+  replyTo?: { id: number; who: string; text: string }
 }
 
 type TgConfig = {
@@ -66,15 +67,17 @@ export function setTelegramAutonomousHandler(fn: (m: TgMsg, p: AutoCtx) => void)
 // The chat currently being handled - turns are serialised, so this is always
 // the message she is answering. Removes target guessing entirely.
 let replyTarget = ''
+let replyToMsgId = 0
 let activeCtx: { chatId: string; at: number } = { chatId: '', at: 0 }
-export function setReplyTarget(id: string): void {
+export function setReplyTarget(id: string, msgId = 0): void {
   replyTarget = id
+  replyToMsgId = msgId
   activeCtx = { chatId: id, at: Date.now() }
 }
 function noteActiveChat(id: string): void { activeCtx = { chatId: id, at: Date.now() } }
-export async function telegramReplyHere(text: string): Promise<string> {
+export async function telegramReplyHere(text: string, quote = true): Promise<string> {
   if (!replyTarget) return 'ERROR: no active conversation to reply to - use telegram_send with an explicit target'
-  return telegramSend(replyTarget, text)
+  return telegramSend(replyTarget, text, quote ? replyToMsgId : 0)
 }
 /** True only for the real owner - verified by immutable Telegram user id,
  *  never by display name or handle text (both are trivially spoofed). */
@@ -136,10 +139,12 @@ async function poll(): Promise<void> {
         text?: string
         caption?: string
         date: number
+        reply_to_message?: { message_id: number; text?: string; caption?: string; from?: { username?: string; first_name?: string; last_name?: string } }
       }
       business_message?: {
         message_id: number
         business_connection_id?: string
+        reply_to_message?: { message_id: number; text?: string; caption?: string; from?: { username?: string; first_name?: string; last_name?: string } }
         chat: { id: number }
         from?: { id: number; username?: string; first_name?: string; last_name?: string }
         text?: string
@@ -167,11 +172,13 @@ async function poll(): Promise<void> {
         const name = [gm.from.first_name, gm.from.last_name].filter(Boolean).join(' ') || gm.from.username || String(gm.from.id)
         contacts[String(gm.from.id)] = { ...(contacts[String(gm.from.id)] ?? {}), name, username: gm.from.username, lastSeen: Date.now() }
         saveContacts()
+        const r = gm.reply_to_message
         const msg: TgMsg = {
           id: gm.message_id, chatId: gm.chat.id,
           from: { id: gm.from.id, username: gm.from.username, name },
           text: (gm.text ?? gm.caption ?? '').slice(0, 1000),
           ts: gm.date * 1000, tier: 'group', chatTitle: gm.chat.title ?? gid,
+          ...(r ? { replyTo: { id: r.message_id, who: `${[r.from?.first_name, r.from?.last_name].filter(Boolean).join(' ') || r.from?.username || 'someone'}${r.from?.username ? ` (@${r.from.username})` : ''}`, text: (r.text ?? r.caption ?? '').slice(0, 120) } } : {}),
         }
         try { fs.appendFileSync(inboxPath(), JSON.stringify(msg) + '\n') } catch {}
         if (trackActivity(msg, msg.chatTitle ?? gid) && onFlagged) onFlagged(msg)
@@ -211,7 +218,9 @@ async function poll(): Promise<void> {
     const name = [bm.from.first_name, bm.from.last_name].filter(Boolean).join(' ') || bm.from.username || senderId
     contacts[senderId] = { name, username: bm.from.username, lastSeen: Date.now(), ownerReplied: contacts[senderId]?.ownerReplied }
     saveContacts()
+    const br = bm.reply_to_message
     const msg: TgMsg = {
+      ...(br ? { replyTo: { id: br.message_id, who: `${[br.from?.first_name, br.from?.last_name].filter(Boolean).join(' ') || br.from?.username || 'someone'}${br.from?.username ? ` (@${br.from.username})` : ''}`, text: (br.text ?? br.caption ?? '').slice(0, 120) } } : {}),
       id: bm.message_id,
       chatId: bm.chat.id,
       from: { id: bm.from.id, username: bm.from.username, name },
@@ -426,7 +435,8 @@ export function telegramPrivacyStatus(): string {
 /** Last N messages in a chat, WITHOUT consuming the summary buffer.
  *  This is "what is this room actually talking about right now". */
 function who(m: TgMsg): string {
-  return `${m.from.name}${m.from.username ? ` (@${m.from.username}` : ' (no handle'}, id ${m.from.id})`
+  const base = `${m.from.name}${m.from.username ? ` (@${m.from.username}` : ' (no handle'}, id ${m.from.id})`
+  return m.replyTo ? `${base} [↳ replying to ${m.replyTo.who}: "${m.replyTo.text}"]` : base
 }
 export function chatLabel(chatId: string): string {
   const isDm = !chatId.startsWith('-')
@@ -845,7 +855,7 @@ function outboundBlockReason(text: string): string | null {
 
 /** Send a message. DMs go through the business connection (as the owner);
  *  groups go through the bot's own identity. HTML formatting supported. */
-export async function telegramSend(target: string, html: string): Promise<string> {
+export async function telegramSend(target: string, html: string, replyToId?: number): Promise<string> {
   const token = (loadConfig() as TgConfig).telegramBotToken
   if (!token) return 'ERROR: no telegram token configured'
   // "dm:" is the explicit escape hatch for genuinely wanting a private message
@@ -906,6 +916,7 @@ export async function telegramSend(target: string, html: string): Promise<string
     chat_id: chat.id,
     text: out.slice(0, 4000),
     parse_mode: 'HTML',
+    ...(replyToId ? { reply_parameters: { message_id: replyToId, allow_sending_without_reply: true } } : {}),
     link_preview_options: { is_disabled: true },
   }
   if (!chat.isGroup) {
