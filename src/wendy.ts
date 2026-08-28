@@ -2154,6 +2154,14 @@ setInterval(() => {
       }
       const priv = telegramPrivacyFor(c.id)
       if (priv === 'silent') { diag('telegram_privacy_suppressed', { chat: c.title }); continue }
+      // Nobody is listening: queue a cheap pointer instead of spending a brain
+      // call on a summary that will age in a queue (and usually be dropped by
+      // the held-items cap). The staleness rule reads it fresh at delivery.
+      if (!connection) {
+        announce(`[LOW] "${c.title}" has ${st.total} new messages. <tg:${c.title}>`, 'digest', undefined)
+        diag('telegram_summary_deferred', { chat: c.title, msgs: st.total })
+        continue
+      }
       if (priv === 'discreet') {
         announce(`[LOW] "${c.title}" has been active - ${c.count} messages waiting whenever you want them. <tg:${c.title}>`, 'digest', undefined)
         continue
