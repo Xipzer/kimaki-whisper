@@ -235,17 +235,19 @@ async function poll(): Promise<void> {
     const name = [bm.from.first_name, bm.from.last_name].filter(Boolean).join(' ') || bm.from.username || senderId
     contacts[senderId] = { name, username: bm.from.username, lastSeen: Date.now(), ownerReplied: contacts[senderId]?.ownerReplied }
     saveContacts()
+    const bmedia = describeMedia(bm as MediaMsg)
     const br = bm.reply_to_message
     const msg: TgMsg = {
       ...(br ? { replyTo: { id: br.message_id, who: `${[br.from?.first_name, br.from?.last_name].filter(Boolean).join(' ') || br.from?.username || 'someone'}${br.from?.username ? ` (@${br.from.username})` : ''}`, text: (br.text ?? br.caption ?? '').slice(0, 120) } } : {}),
       id: bm.message_id,
       chatId: bm.chat.id,
       from: { id: bm.from.id, username: bm.from.username, name },
-      text: (bm.text ?? describeMedia(bm as MediaMsg).text).slice(0, 1000),
+      text: (bm.text ?? bmedia.text).slice(0, 1000),
       ts: bm.date * 1000,
       tier: classify({ id: bm.from.id, username: bm.from.username, name }),
     }
     try { fs.appendFileSync(inboxPath(), JSON.stringify(msg) + '\n') } catch {}
+    if (bmedia.fileId) void captionImage(bmedia.fileId).then((c) => { if (c) msg.text += c })
     const mentioned = trackActivity(msg, name)
     maybeAutonomous(msg)
     if ((mentioned || msg.tier === 'vip' || msg.tier === 'known') && onFlagged) onFlagged(msg)
