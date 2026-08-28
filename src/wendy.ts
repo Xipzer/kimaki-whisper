@@ -2700,7 +2700,14 @@ function listenTo(channel: VoiceBasedChannel, userId: string): void {
   })
 }
 
+let currentChannelId = ''
+let lastGreetedAt = 0
 async function joinAndServe(channel: VoiceBasedChannel, userId: string): Promise<void> {
+  if (connection && currentChannelId === channel.id) {
+    log('wendy: already in that channel - ignoring duplicate join')
+    return
+  }
+  currentChannelId = channel.id
   leave()
   capturing = false
   pendingUtterance = null
@@ -2738,6 +2745,11 @@ async function joinAndServe(channel: VoiceBasedChannel, userId: string): Promise
     heldWhileSilent.push(...queued)
     if (heldWhileSilent.length > 12) heldWhileSilent.splice(0, heldWhileSilent.length - 12)
   }
+  if (Date.now() - lastGreetedAt < 90000) {
+    log('wendy: greeting suppressed (already greeted moments ago)')
+    return
+  }
+  lastGreetedAt = Date.now()
   const totalHeld = heldWhileSilent.length
   const hi = heldWhileSilent.filter((x) => x.includes('[HIGH]')).length
   void runTurn(`[The owner just joined voice. Greet them briefly and naturally - ONE short line, warm but efficient, no jokes or bits. Vary it; never a stock phrase. EXCEPTION: if the recent history shows a restart interrupted them mid-speech, acknowledge that first and respond to what they had been saying.${totalHeld ? ` Also: ${totalHeld} update${totalHeld > 1 ? 's are' : ' is'} queued${hi ? ` (${hi} high-priority)` : ''} - fold a casual offer to share into the greeting, but do NOT deliver any contents yet.` : ''}]`)
@@ -2763,6 +2775,7 @@ export function initWendy(client: Client): void {
       void joinAndServe(newState.channel, owner)
     } else if (!newState.channel && connection) {
       log('wendy: owner left, standing down')
+      currentChannelId = ''
       leave()
     }
   })
