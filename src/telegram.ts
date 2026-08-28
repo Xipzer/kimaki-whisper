@@ -565,7 +565,7 @@ export function telegramWatchMode(target: string, mode: string, threshold?: numb
 }
 
 /** On-demand: what's been happening in a chat right now. */
-export function telegramChatDigest(target: string, n = 25, all = false): string {
+export function telegramChatDigest(target: string, n = 25, all = false, hours?: number): string {
   const chat = resolveChat(target)
   if (!chat) return ambiguityError(target)
   const id = String(chat.id)
@@ -576,6 +576,10 @@ export function telegramChatDigest(target: string, n = 25, all = false): string 
   if (!ring.length) {
     const room = telegramRoomContext(id, n)   // cold-start fallback
     return room ? `${header}\n${room}` : `no messages on record for "${chat.title}" yet`
+  }
+  if (all && (n > 120 || hours)) {
+    const deep = telegramDeepHistory(id, n, hours)
+    if (deep) return `${header} - archive${hours ? `, last ${hours}h` : `, last ${n}`}\n${deep}`
   }
   const recent = ring.slice(-n)
   const fresh = recent.filter((m) => m.ts > mark)
@@ -603,7 +607,7 @@ function pushRing(m: TgMsg): void {
   const k = String(m.chatId)
   const r = roomRing.get(k) ?? []
   r.push(m)
-  if (r.length > 40) r.splice(0, r.length - 40)
+  if (r.length > 120) r.splice(0, r.length - 120)
   roomRing.delete(k)      // re-insert so Map order == recency (true LRU eviction)
   roomRing.set(k, r)
   if (roomRing.size > 60) roomRing.delete(roomRing.keys().next().value as string)
@@ -772,6 +776,44 @@ export function telegramPeopleStatus(): string {
   const e = Object.entries(people)
   if (!e.length) return 'nobody is muted'
   return e.map(([, p]) => `"${p.name}": ${p.muteRemaining === -1 ? 'muted indefinitely' : `muted for ${p.muteRemaining} more messages`}, ${p.untracked} exchanges since your last summary`).join('\n')
+}
+
+/** Full-archive read for one chat: goes past the hot buffer into the raw log. */
+export function telegramDeepHistory(chatId: string, n: number, hours?: number): string {
+  let rows: TgMsg[] = []
+  try {
+    rows = fs.readFileSync(inboxPath(), 'utf-8').trim().split('\n').filter(Boolean)
+      .map((l) => { try { return JSON.parse(l) as TgMsg } catch { return null } })
+      .filter((m): m is TgMsg => !!m && String(m.chatId) === chatId)
+  } catch { return '' }
+  if (hours) { const cut = Date.now() - hours * 3600000; rows = rows.filter((m) => m.ts > cut) }
+  return rows.slice(-n).map((m) => `${new Date(m.ts).toLocaleString('en-GB', { day: '2-digit', month: 'short', hour: '2-digit', minute: '2-digit' })} ${who(m)}: ${m.text.slice(0, 200)}`).join('\n')
+}
+
+/** Search everything she has ever ingested. */
+export function telegramSearch(query: string, opts: { chat?: string; from?: string; limit?: number } = {}): string {
+  const q = query.trim().toLowerCase()
+  if (!q) return 'ERROR: need something to search for'
+  const chat = opts.chat ? resolveChat(opts.chat) : null
+  if (opts.chat && !chat) return ambiguityError(opts.chat)
+  const fromQ = (opts.from ?? '').toLowerCase().replace(/^@/, '')
+  let rows: TgMsg[] = []
+  try {
+    rows = fs.readFileSync(inboxPath(), 'utf-8').trim().split('\n').filter(Boolean)
+      .map((l) => { try { return JSON.parse(l) as TgMsg } catch { return null } })
+      .filter((m): m is TgMsg => !!m)
+  } catch { return 'no archive yet' }
+  const terms = q.split(/\s+/).filter(Boolean)
+  const hits = rows.filter((m) => {
+    if (chat && String(m.chatId) !== String(chat.id)) return false
+    if (fromQ && !(`${m.from.username ?? ''} ${m.from.name}`.toLowerCase().includes(fromQ))) return false
+    const t = m.text.toLowerCase()
+    return terms.every((w) => t.includes(w))
+  })
+  if (!hits.length) return `nothing in the archive matches "${query}"${opts.chat ? ` in that chat` : ''}${opts.from ? ` from ${opts.from}` : ''}`
+  const lim = Math.min(Math.max(opts.limit ?? 12, 1), 40)
+  return `${hits.length} match(es), most recent ${Math.min(lim, hits.length)}:\n` + hits.slice(-lim).map((m) =>
+    `${new Date(m.ts).toLocaleString('en-GB', { day: '2-digit', month: 'short', hour: '2-digit', minute: '2-digit' })} [${chatLabel(String(m.chatId)).replace(/ \[id [^\]]+\]/, '')}] ${who(m)}: ${m.text.slice(0, 160)}`).join('\n')
 }
 
 /** Look up a person's real @handle: known senders first, then live Telegram

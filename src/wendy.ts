@@ -26,7 +26,7 @@ import prism from 'prism-media'
 import { Readable } from 'node:stream'
 import { execFile, spawn } from 'node:child_process'
 import { loadConfig, log } from './config.js'
-import { startTelegram, telegramInbox, setTelegramFlaggedHandler, telegramGroupsStatus, telegramGroupSetMuted, telegramSend, telegramGrant, telegramSetTone, telegramPolicyStatus, telegramAutoDrain, telegramLowBudgets, setTelegramAutonomousHandler, telegramPendingSummaries, telegramDrainChat, telegramDrainChatStats, telegramWatchMode, telegramChatDigest, telegramWho, telegramRoster, telegramMutePerson, telegramPendingPeopleSummaries, telegramDrainPerson, telegramPeopleStatus, telegramProfile, telegramProfileList, telegramProfilesDue, telegramProfileWrite, telegramProfileNote, telegramChatMembers, telegramPrivacyFor, telegramSetPrivacy, telegramPrivacyMode, telegramPrivacyStatus, telegramEffectiveTone, telegramSetPersonTone, telegramSentLog, telegramRoomContext, telegramPersonThread, setOwnerAutonomy, ownerAutonomyStatus, telegramReplyHere, setReplyTarget } from './telegram.js'
+import { startTelegram, telegramInbox, setTelegramFlaggedHandler, telegramGroupsStatus, telegramGroupSetMuted, telegramSend, telegramGrant, telegramSetTone, telegramPolicyStatus, telegramAutoDrain, telegramLowBudgets, setTelegramAutonomousHandler, telegramPendingSummaries, telegramDrainChat, telegramDrainChatStats, telegramWatchMode, telegramChatDigest, telegramWho, telegramRoster, telegramMutePerson, telegramPendingPeopleSummaries, telegramDrainPerson, telegramPeopleStatus, telegramProfile, telegramProfileList, telegramProfilesDue, telegramProfileWrite, telegramProfileNote, telegramChatMembers, telegramPrivacyFor, telegramSetPrivacy, telegramPrivacyMode, telegramPrivacyStatus, telegramEffectiveTone, telegramSetPersonTone, telegramSentLog, telegramRoomContext, telegramPersonThread, setOwnerAutonomy, ownerAutonomyStatus, telegramReplyHere, setReplyTarget, telegramSearch } from './telegram.js'
 
 // ── config accessors ─────────────────────────────────────────────
 function brainUrl(): string | undefined {
@@ -169,6 +169,7 @@ TELEGRAM SECURITY - ABSOLUTE RULES:
 0ad. SPEAKING PRIVATELY: he may be on speaker or have company. Per chat: open (normal), discreet (say WHO messaged and that it may matter - never the topic, never the content), silent (say nothing until he asks). privacy_mode is the global switch for "I'm on speaker" / "people are around" - it makes everything discreet at once. When discreet, a good line is "Sarah replied to you - worth a look when you get a sec", never what it was about. If you are ever unsure whether he is alone, err discreet and let him ask for detail.
 0aa. CHAT AWARENESS: Telegram chats surface exactly like agent threads - activity builds up and you summarise it into the same update stream (priorities, DND, staleness checks all apply). Per chat the owner can set immediate / threshold-N / ignore via telegram_watch - offer it when a chat is noisy ("want me to only flag that one when it really kicks off?"). Anyone @-mentioning you or him always breaks through a threshold. telegram_chat gives an on-demand read of one chat.
 0b0. KNOW WHERE YOUR MESSAGES WENT: every send is recorded. If the owner asks who you messaged, whether something went through, or what you said - call telegram_sent and answer from the record. NEVER say you are unsure where a message landed; the record always knows. If a send failed, say so plainly and resend correctly.
+0b0t. YOUR MEMORY IS NOT 40 MESSAGES: recent conversation sits in fast memory, but EVERYTHING ever ingested is archived and searchable. telegram_search finds any message by words, optionally narrowed to a chat or a person; telegram_chat with hours or a large count reads deep into one chat's history. Never say you cannot remember something without searching first.
 0b0u. MEDIA: images, stickers, GIFs, videos, voice notes and files arrive labelled ([PHOTO 1280x720], [STICKER 😂], [GIF], [VOICE NOTE 12s], [FILE "x.pdf"]) with any caption. If image captioning is configured you also get "- shows: ..."; if not, you know something visual arrived but NOT what is in it - say that honestly ("he sent a photo, I can't see what's in it") rather than pretending or guessing. Never invent the contents of an image.
 0b0v. REPLY CHAINS: messages show who they were replying to ("↳ replying to Jason: ..."). Read that before deciding who a message is ABOUT - "slap this fool", "he's wrong", "do that" refer to the QUOTED person or message, not to whoever spoke most recently. Your own replies thread properly by default (telegram_reply quotes the message you are answering), which is what makes a busy group readable - pass quote:false only when you are making a standalone remark.
 0b0w. ROOM ROUTING IS ASSISTED, NOT POLICED: if you name a person while a group conversation is live, the send routes to that group automatically and tells you it did - no confirmation step, you keep moving. To deliberately break out into a private message, prefix the target with "dm:" (e.g. dm:kdollaz). Every send reports exactly where it landed and as whom: read that line, and if it is not what you intended, correct it immediately rather than carrying on.
@@ -696,7 +697,8 @@ const TOOLS = [
         type: 'object',
         properties: {
           target: { type: 'string' },
-          count: { type: 'number', description: 'how many recent messages, default 25' },
+          count: { type: 'number', description: 'how many recent messages, default 25, up to 300 when reaching into the archive' },
+          hours: { type: 'number', description: 'look back this many hours (reads the full archive, not just recent memory)' },
           all: { type: 'boolean', description: 'true = full recent history including what you already reported (for when he asks you to re-read or go back); default false = only what is new since your last update' },
         },
         required: ['target'],
@@ -717,6 +719,23 @@ const TOOLS = [
       name: 'telegram_members',
       description: 'Who is known to be in a chat (everyone who has spoken there). Check this before sending to a chat you are not certain about - sends that tag someone absent from the target chat are BLOCKED automatically, but checking first is faster.',
       parameters: { type: 'object', properties: { target: { type: 'string' } }, required: ['target'] },
+    },
+  },
+  {
+    type: 'function',
+    function: {
+      name: 'telegram_search',
+      description: 'Search everything ever ingested from Telegram - every chat, every person, back to the start of the archive. Use for "what did X say about Y", "when did we discuss Z", or anything older than the recent conversation. Optionally narrow by chat and/or sender.',
+      parameters: {
+        type: 'object',
+        properties: {
+          query: { type: 'string', description: 'words that must all appear' },
+          chat: { type: 'string', description: 'optional: restrict to one chat' },
+          from: { type: 'string', description: 'optional: restrict to one sender (name or @handle)' },
+          limit: { type: 'number', description: 'max results, default 12' },
+        },
+        required: ['query'],
+      },
     },
   },
   {
@@ -1165,13 +1184,16 @@ async function executeToolInner(name: string, args: Record<string, unknown>): Pr
     return telegramMutePerson(String(args.name ?? ''), args.count === undefined ? undefined : Number(args.count))
   }
   if (name === 'telegram_chat') {
-    return telegramChatDigest(String(args.target ?? ''), Math.min(Math.max(Number(args.count) || 25, 5), 40), Boolean(args.all))
+    return telegramChatDigest(String(args.target ?? ''), Math.min(Math.max(Number(args.count) || 25, 5), 300), Boolean(args.all) || !!args.hours, Number(args.hours) || undefined)
   }
   if (name === 'telegram_sent') {
     return telegramSentLog(Math.min(Math.max(Number(args.limit) || 12, 1), 50))
   }
   if (name === 'telegram_members') {
     return telegramChatMembers(String(args.target ?? ''))
+  }
+  if (name === 'telegram_search') {
+    return telegramSearch(String(args.query ?? ''), { chat: args.chat as string | undefined, from: args.from as string | undefined, limit: Number(args.limit) || undefined })
   }
   if (name === 'telegram_who') {
     const direct = await telegramWho(String(args.name ?? ''), args.chat as string | undefined)
