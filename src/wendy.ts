@@ -329,7 +329,7 @@ const TOOLS = [
     function: {
       name: 'bash',
       description:
-        'Run a shell command on the host (your own workspace is the cwd; curl, python3, standard tools available). For quick lookups, calculations, file ops, checking things. Output is truncated for speech - summarise aloud.',
+        'Run a shell command on the host (your own workspace is the cwd; curl, python3, standard tools available). For quick lookups, calculations, file ops, checking things. Output is truncated for speech - summarise aloud. SPEED MATTERS, he is waiting: never scan the whole filesystem (no "find /" - it burns the timeout and makes you look frozen), search specific project directories instead, cap output with head, and prefer one targeted command over several broad ones.',
       parameters: {
         type: 'object',
         properties: {
@@ -1010,7 +1010,7 @@ async function executeToolInner(name: string, args: Record<string, unknown>): Pr
     return hdr + (recentMessages(out, 4) || 'empty session')
   }
   if (name === 'bash') {
-    const timeoutSec = Math.min(Number(args.timeout_sec) || 60, 300)
+    const timeoutSec = Math.min(Number(args.timeout_sec) || 25, 300)
     return new Promise((resolve) => {
       const child = execFile('bash', ['-c', String(args.command ?? '')], {
         cwd: workspaceDir(),
@@ -2426,6 +2426,7 @@ let turnStartedAt = 0
 let lastBusyAck = 0
 let lastRelayAck = 0
 let lastConvoActivity = 0
+let supersededAnswer: { text: string; at: number } | null = null
 const convoEvents: string[] = []
 let lastBgDelivery = 0
 // Deliver background results only when the conversation has space:
@@ -2536,7 +2537,11 @@ async function runTurn(text: string): Promise<void> {
     diag('turn_done', { ms: Date.now() - turnT0, reply: reply.slice(0, 800), superseded: seq !== inputSeq, streamed: streamedCount })
     if (!reply.trim()) return
     if (seq !== inputSeq) {
-      log(`wendy: reply superseded by newer input - staying quiet: "${reply.slice(0, 60)}"`)
+      // Do not bin finished work: hand it to the next turn so she can fold it in
+      // ("that file is at X, by the way") instead of going silent on him.
+      supersededAnswer = { text: reply.slice(0, 700), at: Date.now() }
+      log(`wendy: reply superseded - carrying it into the next turn: "${reply.slice(0, 60)}"`)
+      diag('reply_superseded', { kept: true })
       return
     }
     log(`wendy says: "${reply.slice(0, 80)}"`)

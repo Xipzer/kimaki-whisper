@@ -123,7 +123,22 @@ export async function handlePanelInteraction(i: ButtonInteraction | StringSelect
   }
   if (!i.isButton()) return
   let note = ''
-  if (id === 'wp:sleep') note = wendySleep()
+  if (id === 'wp:sleep') {
+    if (wendySnapshot().inVc) {
+      await i.reply({
+        content: '⚠️ She is currently **in a voice channel with you**. Stopping will end the conversation and shut down the GPU brain.',
+        components: [new ActionRowBuilder<ButtonBuilder>().addComponents(
+          new ButtonBuilder().setCustomId('wp:sleep-confirm').setLabel('Yes, stop her + GPU').setStyle(ButtonStyle.Danger),
+          new ButtonBuilder().setCustomId('wp:cancel').setLabel('Cancel').setStyle(ButtonStyle.Secondary),
+        )],
+        flags: MessageFlags.Ephemeral,
+      }).catch(() => {})
+      return
+    }
+    note = wendySleep()
+  }
+  else if (id === 'wp:sleep-confirm') note = wendySleep()
+  else if (id === 'wp:cancel') note = 'cancelled - she stays running'
   else if (id === 'wp:wake') note = wendyWake()
   else if (id === 'wp:dnd') note = wendySetDnd(!wendySnapshot().dnd)
   else if (id === 'wp:unsilence') note = wendyUnsilence()

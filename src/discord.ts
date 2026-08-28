@@ -19,6 +19,7 @@ import { loadConfig, saveConfig, DEFAULT_PORT, log } from './config.js'
 import { MODEL_TIERS, tierById, recommendTier, installRuntime, getPipeline } from './transcribe/local-onnx.js'
 import { transcribeAudioBytes, startServer, isServerRunning, stopServer } from './server.js'
 import { sendPanel, handlePanelInteraction } from './panel.js'
+import { wendySnapshot } from './wendy.js'
 import { initWendy, wendySleep, wendyWake, wendySetDnd, wendySilence, wendyUnsilence, wendyStatus } from './wendy.js'
 
 function prefix(): string {
@@ -57,7 +58,8 @@ function buildCommands() {
         .addChoices({ name: 'start', value: 'start' }, { name: 'stop', value: 'stop' }, { name: 'restart', value: 'restart' })).setDMPermission(false).toJSON(),
     new SlashCommandBuilder().setName('wendy').setDescription('Wendy control panel - status, queues, agents, logs, controls').setDMPermission(false).toJSON(),
     new SlashCommandBuilder().setName('wendy-start').setDescription('Start Wendy (wake from sleep)').setDMPermission(false).toJSON(),
-    new SlashCommandBuilder().setName('wendy-stop').setDescription('Stop Wendy (sleep - no voice, no replies; updates keep accumulating)').setDMPermission(false).toJSON(),
+    new SlashCommandBuilder().setName('wendy-stop').setDescription('Stop Wendy + GPU (no voice, no replies; updates keep accumulating)')
+      .addBooleanOption((o) => o.setName('force').setDescription('stop even while mid-conversation in voice').setRequired(false)).setDMPermission(false).toJSON(),
     new SlashCommandBuilder().setName('wendy-restart').setDescription('Restart the Wendy process (supervisor respawns it)').setDMPermission(false).toJSON(),
   ]
 }
@@ -68,7 +70,13 @@ async function handleWendyCommand(i: ChatInputCommandInteraction): Promise<void>
   try { await i.deferReply({ flags: MessageFlags.Ephemeral }) } catch { return }
   const name = i.commandName
   if (name === 'wendy-wake' || name === 'wendy-start') return safeReply(i, wendyWake())
-  if (name === 'wendy-stop') return safeReply(i, wendySleep())
+  if (name === 'wendy-stop') {
+    const snap = wendySnapshot()
+    if (snap.inVc && !i.options.getBoolean('force')) {
+      return safeReply(i, '⚠️ She is in a voice channel with you right now - stopping ends the conversation and shuts down the GPU. Run `/wendy-stop force:true` if you really mean it, or leave voice first.')
+    }
+    return safeReply(i, wendySleep())
+  }
   if (name === 'wendy-sleep') return safeReply(i, wendySleep())
   if (name === 'wendy-status') return safeReply(i, await wendyStatus())
   if (name === 'wendy-dnd') return safeReply(i, wendySetDnd(Boolean(i.options.getBoolean('on'))))
