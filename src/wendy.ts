@@ -1552,8 +1552,24 @@ export async function think(userText: string, onSentence?: (s: string) => void):
           ? `ERROR: your ${tc.function.name} call was CUT OFF by the generation limit - the JSON never closed. Retry with much shorter arguments; split long content across multiple calls.`
           : missing.length
             ? `ERROR: missing required argument(s): ${missing.join(', ')}. Call ${tc.function.name} again with ALL required fields filled in.`
-            : await executeTool(tc.function.name, args)
-        if (!result.startsWith('ERROR') && !result.startsWith('BLOCKED') && ['send_to_session', 'ask_thread', 'dispatch_task', 'telegram_send', 'telegram_reply'].includes(tc.function.name)) dispatchToolsRun.add(tc.function.name)
+            : await (async () => {
+                const isSend = ['send_to_session', 'ask_thread', 'dispatch_task', 'telegram_send', 'telegram_reply'].includes(tc.function.name)
+                if (isSend) {
+                  const key = dispatchKey(tc.function.name, args)
+                  const dup = recentDispatches.find((d) => d.key === key && Date.now() - d.ts < 10 * 60000)
+                  if (dup) {
+                    diag('duplicate_send_blocked', { tool: tc.function.name, agoS: Math.round((Date.now() - dup.ts) / 1000) })
+                    return `DUPLICATE BLOCKED: you already sent this exact content to that destination ${Math.round((Date.now() - dup.ts) / 1000)}s ago and it was delivered. Nothing was re-sent. It is already in flight - do not repeat it; reword substantially only if the owner explicitly asks to send again.`
+                  }
+                }
+                const r = await executeTool(tc.function.name, args)
+                if (isSend && !r.startsWith('ERROR') && !r.startsWith('BLOCKED')) {
+                  recentDispatches.push({ key: dispatchKey(tc.function.name, args), ts: Date.now(), tool: tc.function.name })
+                  if (recentDispatches.length > 40) recentDispatches.splice(0, recentDispatches.length - 40)
+                }
+                return r
+              })()
+        if (!result.startsWith('ERROR') && !result.startsWith('BLOCKED') && !result.startsWith('DUPLICATE') && ['send_to_session', 'ask_thread', 'dispatch_task', 'telegram_send', 'telegram_reply'].includes(tc.function.name)) dispatchToolsRun.add(tc.function.name)
         messages.push({ role: 'tool', content: result, tool_call_id: tc.id, name: tc.function.name })
       }
       continue
@@ -1572,7 +1588,8 @@ export async function think(userText: string, onSentence?: (s: string) => void):
     // turn means NOTHING left (seen live: owner waited on a dispatch that never
     // existed). Deterministic check - the ledger cannot be sweet-talked.
     const SEND_CLAIM = /(?<!\b(?:he|she|they|you|xipz|who|owner)\s)\b(sent( it| that| this| him| her| them)?|dispatched|fired (it|that|this) (off|into|to)|relayed|forwarded|passed (it|that|this) (along|on)|told (him|her|them|the (thread|builder|agent))|asked the (thread|builder|agent)|it'?s in there|in the (pinned )?thread now)\b/i
-    if (!claimChecked && !dispatchToolsRun.size && hop < MAX_HOPS - 2 && SEND_CLAIM.test(text)) {
+    const recentSendBacksClaim = recentDispatches.some((d) => Date.now() - d.ts < 10 * 60000)
+    if (!claimChecked && !dispatchToolsRun.size && !recentSendBacksClaim && hop < MAX_HOPS - 2 && SEND_CLAIM.test(text)) {
       claimChecked = true
       log('wendy: send claim with empty dispatch ledger - forcing the real call')
       diag('send_claim_unbacked', { text: text.slice(0, 120) })
@@ -2442,6 +2459,12 @@ let lastBusyAck = 0
 let lastRelayAck = 0
 let lastConvoActivity = 0
 let supersededAnswer: { text: string; at: number } | null = null
+const recentDispatches: { key: string; ts: number; tool: string }[] = []
+function dispatchKey(name: string, args: Record<string, unknown>): string {
+  const target = String(args.session_id ?? args.target ?? args.title ?? '')
+  const body = String(args.prompt ?? args.text ?? '').toLowerCase().replace(/\s+/g, ' ').trim()
+  return `${name}|${target}|${body}`
+}
 const convoEvents: string[] = []
 let lastBgDelivery = 0
 // Deliver background results only when the conversation has space:
