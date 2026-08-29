@@ -1484,6 +1484,8 @@ export async function think(userText: string, onSentence?: (s: string) => void):
     return text
   }
   let nudged = false
+  let claimChecked = false
+  const dispatchToolsRun = new Set<string>()
   const MAX_HOPS = 14
   for (let hop = 0; hop < MAX_HOPS; hop++) {
     const hopT0 = Date.now()
@@ -1551,6 +1553,7 @@ export async function think(userText: string, onSentence?: (s: string) => void):
           : missing.length
             ? `ERROR: missing required argument(s): ${missing.join(', ')}. Call ${tc.function.name} again with ALL required fields filled in.`
             : await executeTool(tc.function.name, args)
+        if (!result.startsWith('ERROR') && !result.startsWith('BLOCKED') && ['send_to_session', 'ask_thread', 'dispatch_task', 'telegram_send', 'telegram_reply'].includes(tc.function.name)) dispatchToolsRun.add(tc.function.name)
         messages.push({ role: 'tool', content: result, tool_call_id: tc.id, name: tc.function.name })
       }
       continue
@@ -1565,6 +1568,18 @@ export async function think(userText: string, onSentence?: (s: string) => void):
       return ''
     }
     if (isBg && history[history.length - 1]?.role === 'user') history[history.length - 1].content = '[background update delivered]'
+    // Hallucinated dispatch guard: "Sent it" with zero send tools called this
+    // turn means NOTHING left (seen live: owner waited on a dispatch that never
+    // existed). Deterministic check - the ledger cannot be sweet-talked.
+    const SEND_CLAIM = /(?<!\b(?:he|she|they|you|xipz|who|owner)\s)\b(sent( it| that| this| him| her| them)?|dispatched|fired (it|that|this) (off|into|to)|relayed|forwarded|passed (it|that|this) (along|on)|told (him|her|them|the (thread|builder|agent))|asked the (thread|builder|agent)|it'?s in there|in the (pinned )?thread now)\b/i
+    if (!claimChecked && !dispatchToolsRun.size && hop < MAX_HOPS - 2 && SEND_CLAIM.test(text)) {
+      claimChecked = true
+      log('wendy: send claim with empty dispatch ledger - forcing the real call')
+      diag('send_claim_unbacked', { text: text.slice(0, 120) })
+      messages.push({ role: 'assistant', content: text })
+      messages.push({ role: 'user', content: '(system: your reply claims something was SENT, but you called NO send tool this turn - nothing was actually dispatched. Either call the right tool NOW (ask_thread / send_to_session / telegram_send) and then confirm, or correct yourself honestly. Never claim a send that did not happen.)' })
+      continue
+    }
     const BROAD_PROMISE = /\b(i'?ll|i will|let me|gonna|going to|one (sec|second|moment)|hold on|right back|having (a bit of )?trouble|can'?t seem to|struggling to|keep looking)\b/i
     let isPromise = false
     if (!nudged && hop < MAX_HOPS - 2 && BROAD_PROMISE.test(text)) {
