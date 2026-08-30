@@ -127,7 +127,7 @@ const scene=new THREE.Scene(), cam=new THREE.PerspectiveCamera(42,1,.1,100); cam
 function fit(){renderer.setSize(innerWidth,innerHeight);renderer.setPixelRatio(Math.min(devicePixelRatio,2));cam.aspect=innerWidth/innerHeight;cam.updateProjectionMatrix()}
 addEventListener('resize',fit);fit()
 const PAL={idle:0x2dd4bf,listen:0x38bdf8,think:0xa78bfa,speak:0xf472b6,asleep:0x27478f,down:0xf87171}
-const head=new THREE.Group(); scene.add(head)
+const head=new THREE.Group(); head.position.y=.25; scene.add(head)
 // glow texture
 function glowTex(){const c=document.createElement('canvas');c.width=c.height=128;const g=c.getContext('2d')
   const r=g.createRadialGradient(64,64,4,64,64,62);r.addColorStop(0,'rgba(255,255,255,.95)');r.addColorStop(.35,'rgba(255,255,255,.28)');r.addColorStop(1,'transparent')
@@ -140,23 +140,25 @@ for(let i=0;i<HN;i++){let t=Math.random()*Math.PI*2,p=Math.acos(2*Math.random()-
   hseed.push({t,p,r:2.15+Math.random()*.06,j:Math.random()*6.28})
   hp.set([0,0,0],i*3)}
 const hgeo=new THREE.BufferGeometry();hgeo.setAttribute('position',new THREE.BufferAttribute(hp,3))
-const hmat=new THREE.PointsMaterial({color:PAL.idle,size:.022,transparent:true,opacity:.52,map:GT,alphaTest:.02,blending:THREE.AdditiveBlending,depthWrite:false})
+const hmat=new THREE.PointsMaterial({color:PAL.idle,size:.085,transparent:true,opacity:.75,map:GT,blending:THREE.AdditiveBlending,depthWrite:false})
 head.add(new THREE.Points(hgeo,hmat))
 // aura ring
 const AN=500,ap=new Float32Array(AN*3),aseed=[]
 for(let i=0;i<AN;i++){aseed.push({r:3.1+Math.random()*1.6,t:Math.random()*6.28,y:(Math.random()-.5)*3.4,s:.001+Math.random()*.004});ap.set([0,0,0],i*3)}
 const ageo=new THREE.BufferGeometry();ageo.setAttribute('position',new THREE.BufferAttribute(ap,3))
-const amat=new THREE.PointsMaterial({color:PAL.idle,size:.03,transparent:true,opacity:.35,map:GT,alphaTest:.02,blending:THREE.AdditiveBlending,depthWrite:false})
+const amat=new THREE.PointsMaterial({color:PAL.idle,size:.07,transparent:true,opacity:.3,map:GT,blending:THREE.AdditiveBlending,depthWrite:false})
 scene.add(new THREE.Points(ageo,amat))
 // eyes
 function makeEye(x){const g=new THREE.Group()
-  const iris=new THREE.Mesh(new THREE.CircleGeometry(.17,32),new THREE.MeshBasicMaterial({color:0xffffff,transparent:true,opacity:.95}))
-  const ring=new THREE.Mesh(new THREE.RingGeometry(.2,.25,32),new THREE.MeshBasicMaterial({color:PAL.idle,transparent:true,opacity:.9,side:THREE.DoubleSide}))
-  const pupil=new THREE.Mesh(new THREE.CircleGeometry(.075,24),new THREE.MeshBasicMaterial({color:0x04060b}))
-  pupil.position.z=.01
+  const iris=new THREE.Mesh(new THREE.CircleGeometry(.16,32),new THREE.MeshBasicMaterial({color:PAL.idle,transparent:true,opacity:.55,blending:THREE.AdditiveBlending,depthWrite:false}))
+  const ring=new THREE.Mesh(new THREE.RingGeometry(.19,.235,40),new THREE.MeshBasicMaterial({color:PAL.idle,transparent:true,opacity:.95,side:THREE.DoubleSide}))
+  const pupil=new THREE.Mesh(new THREE.CircleGeometry(.06,24),new THREE.MeshBasicMaterial({color:0xeafcf9,transparent:true,opacity:.95}))
+  pupil.position.z=.02
+  const glint=new THREE.Mesh(new THREE.CircleGeometry(.02,12),new THREE.MeshBasicMaterial({color:0xffffff}))
+  glint.position.set(.05,.06,.03)
   const glow=new THREE.Sprite(new THREE.SpriteMaterial({map:GT,color:PAL.idle,transparent:true,opacity:.5,blending:THREE.AdditiveBlending,depthWrite:false}))
   glow.scale.setScalar(1.15)
-  g.add(glow,iris,ring,pupil); g.position.set(x,.42,1.95); head.add(g)
+  g.add(glow,iris,ring,pupil,glint); g.position.set(x,.42,1.95); head.add(g)
   return {g,pupil,ring,glow,iris}}
 const eyeL=makeEye(-.72),eyeR=makeEye(.72)
 // brows
@@ -166,7 +168,7 @@ const browL=makeBrow(-.72),browR=makeBrow(.72)
 // mouth: two dotted lip curves
 const MK=30
 const lipMat=new THREE.MeshBasicMaterial({color:PAL.idle,transparent:true,opacity:.9,blending:THREE.AdditiveBlending,depthWrite:false})
-const lipGeom=new THREE.SphereGeometry(.032,8,8)
+const lipGeom=new THREE.SphereGeometry(.024,8,8)
 const lips=[]
 for(let r=0;r<2;r++)for(let i=0;i<MK;i++){const m=new THREE.Mesh(lipGeom,lipMat);head.add(m);lips.push(m)}
 const mouthGlow=new THREE.Sprite(new THREE.SpriteMaterial({map:GT,color:PAL.idle,transparent:true,opacity:.28,blending:THREE.AdditiveBlending,depthWrite:false}))
@@ -180,11 +182,11 @@ const EXPR={
   asleep:{smile:.05,open:.05,browY:-.04,browTilt:0, lookX:0,  lookY:-.3,lean:.12, energy:.05},
   down:  {smile:-.22,open:.02,browY:-.09,browTilt:-.3,lookX:0,lookY:-.2,lean:.16, energy:.1}}
 let state='idle',cur=Object.assign({},EXPR.idle),hue=new THREE.Color(PAL.idle),speakUntil=0,blink=1,nextBlink=2,lookJit={x:0,y:0},nextJit=0
-function setState(s){if(state===s)return;state=s
-  hue=new THREE.Color(PAL[s]||PAL.idle)
-  const pill=$('modepill'),c='#'+hue.getHexString()
+function paintPill(){const pill=$('modepill'),c='#'+hue.getHexString()
   pill.style.borderColor=c;pill.style.color=c
-  pill.textContent={idle:'awake',listen:'listening',think:'thinking',speak:'speaking',asleep:'asleep',down:'brain down'}[s]||s}
+  pill.textContent={idle:'awake',listen:'listening',think:'thinking',speak:'speaking',asleep:'asleep',down:'brain down'}[state]||state}
+function setState(s){if(state===s)return;state=s
+  hue=new THREE.Color(PAL[s]||PAL.idle);paintPill()}
 // ═══ render loop ═════════════════════════════════════════════
 let t0=performance.now()
 function loop(now){const dt=Math.min((now-t0)/1000,.1);t0=now;const T=now/1000
@@ -215,7 +217,7 @@ function loop(now){const dt=Math.min((now-t0)/1000,.1);t0=now;const T=now/1000
     const yL=(y0-.035-open*.42)*(1-q)+cornerY*q
     const x=t*.62,z=zf+(1-q)*.12
     lips[i].position.set(x,yU,z);lips[MK+i].position.set(x,yL,z)
-    const sc=.7+(1-q)*.5;lips[i].scale.setScalar(sc);lips[MK+i].scale.setScalar(sc)}
+    const sc=.6+(1-q)*.45;lips[i].scale.setScalar(sc);lips[MK+i].scale.setScalar(sc)}
   mouthGlow.material.opacity=.15+open*.3
   // head shell shimmer
   const harr=hgeo.attributes.position.array
@@ -237,9 +239,9 @@ function loop(now){const dt=Math.min((now-t0)/1000,.1);t0=now;const T=now/1000
   head.position.y=Math.sin(T*.8)*.05
   // colors
   ;[hmat,amat,lipMat].forEach(m=>m.color.lerp(hue,Math.min(dt*4,1)))
-  for(const e of [eyeL,eyeR]){e.ring.material.color.lerp(hue,dt*4);e.glow.material.color.lerp(hue,dt*4)}
-  browL.material.color.lerp(hue,dt*4);mouthGlow.material.color.lerp(hue,dt*4)
-  hmat.opacity=.35+cur.energy*.3;amat.opacity=.18+cur.energy*.3
+  for(const e of [eyeL,eyeR]){e.ring.material.color.lerp(hue,dt*4);e.glow.material.color.lerp(hue,dt*4);e.iris.material.color.lerp(hue,dt*4)}
+  browL.material.color.lerp(hue,dt*4);browR.material.color.lerp(hue,dt*4);mouthGlow.material.color.lerp(hue,dt*4)
+  hmat.opacity=.5+cur.energy*.3;amat.opacity=.18+cur.energy*.3
   if(state==='speak'&&now>speakUntil)setState('idle')
   renderer.render(scene,cam);requestAnimationFrame(loop)}
 requestAnimationFrame(loop)
@@ -273,7 +275,7 @@ $('turnstate').dataset.base='idle'
 function connect(){
   const ws=new WebSocket((location.protocol==='https:'?'wss://':'ws://')+location.host)
   ws.onclose=()=>{$('offline').style.display='flex';setTimeout(connect,2000)}
-  ws.onopen=()=>{$('offline').style.display='none'}
+  ws.onopen=()=>{$('offline').style.display='none';paintPill()}
   ws.onmessage=(m)=>{const {ev,data}=JSON.parse(m.data)
     if(ev==='snapshot'){
       const up=data.brainUp
