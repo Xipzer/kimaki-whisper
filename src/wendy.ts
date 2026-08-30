@@ -26,6 +26,7 @@ import prism from 'prism-media'
 import { Readable } from 'node:stream'
 import { execFile, spawn } from 'node:child_process'
 import { loadConfig, log } from './config.js'
+import { startVisage, visageBroadcast } from './visage.js'
 import { startTelegram, telegramInbox, setTelegramFlaggedHandler, telegramGroupsStatus, telegramGroupSetMuted, telegramSend, telegramGrant, telegramSetTone, telegramPolicyStatus, telegramAutoDrain, telegramLowBudgets, setTelegramAutonomousHandler, telegramPendingSummaries, telegramDrainChat, telegramDrainChatStats, telegramWatchMode, telegramChatDigest, telegramWho, telegramRoster, telegramMutePerson, telegramPendingPeopleSummaries, telegramDrainPerson, telegramPeopleStatus, telegramProfile, telegramProfileList, telegramProfilesDue, telegramProfileWrite, telegramProfileNote, telegramChatMembers, telegramPrivacyFor, telegramSetPrivacy, telegramPrivacyMode, telegramPrivacyStatus, telegramEffectiveTone, telegramSetPersonTone, telegramSentLog, telegramRoomContext, telegramPersonThread, setOwnerAutonomy, ownerAutonomyStatus, telegramReplyHere, setReplyTarget, telegramSearch } from './telegram.js'
 
 // ── config accessors ─────────────────────────────────────────────
@@ -81,6 +82,7 @@ function diagDir(): string {
   return d
 }
 export function diag(ev: string, data: Record<string, unknown> = {}): void {
+  try { visageBroadcast(ev, data) } catch { /* visage optional */ }
   try {
     const day = new Date().toISOString().slice(0, 10)
     fs.appendFileSync(path.join(diagDir(), `${day}.jsonl`), JSON.stringify({ ts: Date.now(), ev, ...data }) + '\n')
@@ -1974,7 +1976,7 @@ export function wendyUnsilence(): string {
   return 'Silence lifted.'
 }
 export type Snapshot = {
-  mode: string; inVc: boolean; dnd: boolean; silencedMin: number
+  mode: string; held: number; inVc: boolean; dnd: boolean; silencedMin: number
   brainUp: boolean; tps: number; ctxPct: number
   selfTasks: { active: number; done: number; list: Array<{ goal: string; status: string; slices: number }> }
   spawns: Array<{ label: string; status: string; ageMin: number; result?: string }>
@@ -2014,6 +2016,7 @@ export function wendySnapshot(): Snapshot {
   const allHeld = [...digestQueue, ...convoEvents, ...pendingAnnouncements, ...heldWhileSilent]
   return {
     mode: dormant ? 'ASLEEP' : connection ? 'IN VOICE' : 'AWAKE',
+    held: allHeld.length,
     inVc: !!connection, dnd, silencedMin: silencedUntil > now ? Math.ceil((silencedUntil - now) / 60000) : 0,
     brainUp: brainProbeChecked ? brainProbeUp : (!lastBrainTpsAt || now - lastBrainTpsAt < 30 * 60000), tps: lastBrainTps,
     ctxPct: lastPromptTokens ? Math.round((lastPromptTokens / 196608) * 1000) / 10 : 0,
@@ -2631,6 +2634,7 @@ function listenTo(channel: VoiceBasedChannel, userId: string): void {
   receiver.speaking.on('start', (speakingUserId) => {
     if (speakingUserId !== userId || capturing) return
     capturing = true
+    visageBroadcast('listening', {})
     const captureGuard = setTimeout(() => {
       if (capturing) { capturing = false; log('wendy: capture guard - stuck capture released'); diag('capture_stuck_released', {}) }
     }, 60000)
@@ -2661,7 +2665,7 @@ function listenTo(channel: VoiceBasedChannel, userId: string): void {
         }
       }
     })
-    opus.on('close', () => { clearTimeout(captureGuard); capturing = false })
+    opus.on('close', () => { clearTimeout(captureGuard); capturing = false; visageBroadcast('listening_end', {}) })
     opus.on('error', () => { clearTimeout(captureGuard); capturing = false })
     decoder.on('close', () => { clearTimeout(captureGuard); capturing = false })
     decoder.on('end', () => {
@@ -2825,6 +2829,8 @@ function leave(): void {
 }
 
 export function initWendy(client: Client): void {
+  const vp = (loadConfig() as { visagePort?: number }).visagePort ?? 7799
+  if (vp > 0) startVisage(vp, () => wendySnapshot() as unknown as Record<string, unknown>)
   const owner = ownerId()
   if (!owner || !brainUrl()) {
     log('wendy: disabled (set ownerId + brainUrl in config to enable)')
