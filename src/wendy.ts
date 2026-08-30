@@ -2234,6 +2234,7 @@ setInterval(() => {
   void (async () => {
     try {
     for (const c of telegramPendingSummaries()) {
+      if (connection && Date.now() - lastConvoActivity < 120000) { diag('bg_brain_deferred', { what: 'summaries' }); break }
       const st = telegramDrainChatStats(c.id)
       const body = st.body
       if (!body) continue
@@ -2272,6 +2273,7 @@ setInterval(() => {
     }
     // person profiles: consolidate from accumulated interactions (silent, no announce)
     for (const d of telegramProfilesDue()) {
+      if (connection && Date.now() - lastConvoActivity < 120000) { diag('bg_brain_deferred', { what: 'profiles' }); break }
       const url = brainUrl()
       if (!url) break
       const res = await fetch(`${url.replace(/\/$/, '')}/v1/chat/completions`, {
@@ -2648,7 +2650,12 @@ function listenTo(channel: VoiceBasedChannel, userId: string): void {
     if (speakingUserId !== userId || capturing) return
     capturing = true
     const captureGuard = setTimeout(() => {
-      if (capturing) { capturing = false; log('wendy: capture guard - stuck capture released'); diag('capture_stuck_released', {}) }
+      if (capturing) {
+        log('wendy: capture guard - forcing flush of a stream that never went silent')
+        diag('capture_stuck_released', { flushed: true })
+        try { opus.destroy() } catch { /* forces decoder end -> audio still transcribed */ }
+        capturing = false
+      }
     }, 60000)
     const opus = receiver.subscribe(speakingUserId, {
       end: { behavior: EndBehaviorType.AfterSilence, duration: 900 },
