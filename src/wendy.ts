@@ -2655,13 +2655,16 @@ function listenTo(channel: VoiceBasedChannel, userId: string): void {
   receiver.speaking.on('start', (speakingUserId) => {
     if (speakingUserId !== userId || capturing) return
     capturing = true
-    const captureGuard = setTimeout(() => {
-      if (capturing) {
-        log('wendy: capture guard - forcing flush of a stream that never went silent')
-        diag('capture_stuck_released', { flushed: true })
-        try { opus.destroy() } catch { /* forces decoder end -> audio still transcribed */ }
-        capturing = false
-      }
+    const captureGuard = setInterval(() => {
+      if (!capturing) { clearInterval(captureGuard); return }
+      if (!chunks.length) return
+      // Stream never hit 900ms of silence (noise floor / open mic / long
+      // monologue). Rotate: transcribe what we have, keep recording - the
+      // owner is never cut off and never unheard.
+      log('wendy: long capture - rotating a 60s segment for transcription, stream stays open')
+      diag('capture_rotated', { bytes: chunks.reduce((a, c) => a + c.length, 0) })
+      void finishSegment(chunks.splice(0))
+      interrupted = false
     }, 60000)
     const opus = receiver.subscribe(speakingUserId, {
       end: { behavior: EndBehaviorType.AfterSilence, duration: 900 },
@@ -2690,14 +2693,11 @@ function listenTo(channel: VoiceBasedChannel, userId: string): void {
         }
       }
     })
-    opus.on('close', () => { clearTimeout(captureGuard); capturing = false })
-    opus.on('error', () => { clearTimeout(captureGuard); capturing = false })
-    decoder.on('close', () => { clearTimeout(captureGuard); capturing = false })
-    decoder.on('end', () => {
-      clearTimeout(captureGuard)
-      capturing = false
-      liveCapture = null
-      void (async () => {
+    opus.on('close', () => { clearInterval(captureGuard); capturing = false })
+    opus.on('error', () => { clearInterval(captureGuard); capturing = false })
+    decoder.on('close', () => { clearInterval(captureGuard); capturing = false })
+    const finishSegment = async (segChunks: Buffer[]): Promise<void> => {
+      {
         const resumeIfPhantom = (): void => {
           // a streamed reply that's still draining will continue on its own -
           // replaying the cut chunk now would land AFTER the next chunk (scrambled)
@@ -2709,7 +2709,7 @@ function listenTo(channel: VoiceBasedChannel, userId: string): void {
             cutSpeech = []
           }
         }
-        const pcm = Buffer.concat(chunks)
+        const pcm = Buffer.concat(segChunks)
         // She just asked a question -> a short "yes/sure/okay" is the EXPECTED shape
         // of the answer; the anti-phantom gates must not eat it.
         const expectingAnswer = /\?\s*$/.test(lastSpokenText.trim()) && Date.now() - lastSpeechEnd < 45000
@@ -2786,9 +2786,15 @@ function listenTo(channel: VoiceBasedChannel, userId: string): void {
           diag('interrupted_context', {})
         }
         void runTurn(turnText)
-      })()
+      }
+    }
+    decoder.on('end', () => {
+      clearInterval(captureGuard)
+      capturing = false
+      liveCapture = null
+      void finishSegment(chunks)
     })
-    decoder.on('error', () => { clearTimeout(captureGuard); capturing = false })
+    decoder.on('error', () => { clearInterval(captureGuard); capturing = false })
   })
 }
 
