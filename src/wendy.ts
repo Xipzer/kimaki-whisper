@@ -32,6 +32,26 @@ import { startTelegram, telegramInbox, setTelegramFlaggedHandler, telegramGroups
 function brainUrl(): string | undefined {
   return loadConfig().brainUrl
 }
+
+// Ground truth for the status panel: actually probe the server instead of
+// inferring "awake" from the age of the last successful call (which kept
+// claiming up for 30 minutes after the process was killed).
+let brainProbeUp = false
+let brainProbeChecked = false
+async function probeBrain(): Promise<void> {
+  const url = brainUrl()
+  if (!url) { brainProbeUp = false; brainProbeChecked = true; return }
+  try {
+    const ctrl = new AbortController()
+    const t = setTimeout(() => ctrl.abort(), 3000)
+    const res = await fetch(url.replace(/\/$/, '') + '/v1/models', { signal: ctrl.signal })
+    clearTimeout(t)
+    brainProbeUp = res.ok
+  } catch { brainProbeUp = false }
+  brainProbeChecked = true
+}
+setInterval(() => void probeBrain(), 20000)
+void probeBrain()
 function ownerId(): string | undefined {
   return loadConfig().ownerId
 }
@@ -1995,7 +2015,7 @@ export function wendySnapshot(): Snapshot {
   return {
     mode: dormant ? 'ASLEEP' : connection ? 'IN VOICE' : 'AWAKE',
     inVc: !!connection, dnd, silencedMin: silencedUntil > now ? Math.ceil((silencedUntil - now) / 60000) : 0,
-    brainUp: !lastBrainTpsAt || now - lastBrainTpsAt < 30 * 60000, tps: lastBrainTps,
+    brainUp: brainProbeChecked ? brainProbeUp : (!lastBrainTpsAt || now - lastBrainTpsAt < 30 * 60000), tps: lastBrainTps,
     ctxPct: lastPromptTokens ? Math.round((lastPromptTokens / 196608) * 1000) / 10 : 0,
     selfTasks: {
       active: selfTasks.filter((t) => t.status === 'active').length,
