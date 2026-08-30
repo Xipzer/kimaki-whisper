@@ -968,7 +968,7 @@ function outboundBlockReason(text: string): string | null {
   ]
   for (const [re, why] of checks) if (re.test(t)) return why
   // bulk verbatim code: a few lines to illustrate is fine, a file is not
-  const codeLines = (t.match(/(^|\n)\s{0,8}(const |let |var |function |class |import |from |def |public |private |async |return |if \(|for \(|\}|<\/?\w+>)/g) ?? []).length
+  const codeLines = (t.match(/(^|\n)\s{0,8}(const |let |var |function |class |import |from |def |public |private |async |return |if \(|for \(|\})/g) ?? []).length
   if (codeLines >= 6) return 'contains a substantial block of source code'
   if (t.length > 2000 && /```/.test(t)) return 'contains a large verbatim code dump'
   return null

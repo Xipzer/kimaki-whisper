@@ -1505,6 +1505,7 @@ export async function think(userText: string, onSentence?: (s: string) => void):
   }
   let nudged = false
   let claimChecked = false
+  let blockedSendsThisTurn = 0
   const dispatchToolsRun = new Set<string>()
   const MAX_HOPS = 14
   for (let hop = 0; hop < MAX_HOPS; hop++) {
@@ -1582,7 +1583,12 @@ export async function think(userText: string, onSentence?: (s: string) => void):
                     return `DUPLICATE BLOCKED: you already sent this exact content to that destination ${Math.round((Date.now() - dup.ts) / 1000)}s ago and it was delivered. Nothing was re-sent. It is already in flight - do not repeat it; reword substantially only if the owner explicitly asks to send again.`
                   }
                 }
+                if (blockedSendsThisTurn >= 2 && (tc.function.name === 'telegram_send' || tc.function.name === 'telegram_reply')) {
+                  diag('send_thrash_stopped', {})
+                  return 'STOP: the outbound filter has already blocked two drafts this turn. Do NOT keep rewriting and resending - you will spam the chat with fragments. Tell the owner what was blocked and why, and let him decide.'
+                }
                 const r = await executeTool(tc.function.name, args)
+                if (r.startsWith('BLOCKED') && (tc.function.name === 'telegram_send' || tc.function.name === 'telegram_reply')) blockedSendsThisTurn++
                 if (isSend && !r.startsWith('ERROR') && !r.startsWith('BLOCKED')) {
                   recentDispatches.push({ key: dispatchKey(tc.function.name, args), ts: Date.now(), tool: tc.function.name })
                   if (recentDispatches.length > 40) recentDispatches.splice(0, recentDispatches.length - 40)
