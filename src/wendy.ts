@@ -2083,7 +2083,23 @@ function tierFor(sessionId: string): NotifyTier {
   for (const r of Object.values(loadRoutes())) if (r.id === sessionId) return r.tier ?? 'digest'
   return 'digest'
 }
+function dropQueuedMatching(marker: string): void {
+  for (const q of [digestQueue, pendingAnnouncements, heldWhileSilent]) {
+    for (let i = q.length - 1; i >= 0; i--) if (q[i].includes(marker)) q.splice(i, 1)
+  }
+}
 function announce(text: string, tier: NotifyTier, srcId?: string): void {
+  // Collapse stacked priority tags ("[MED] [LOW] ..." from a summarizer that
+  // emitted its own tag) down to the intended leading one.
+  const stacked = text.match(/^((?:\[(?:HIGH|MED|LOW)\]\s*){2,})/i)
+  if (stacked) {
+    const first = stacked[1].match(/\[(?:HIGH|MED|LOW)\]/i)![0]
+    text = `${first} ${text.slice(stacked[1].length)}`
+  }
+  // A chat-activity pointer supersedes any older pointer for the same chat:
+  // "N new messages" queued every sweep was stacking near-identical entries.
+  const tg = text.match(/<tg:[^>]+>/)
+  if (tg) dropQueuedMatching(tg[0])
   const hm = new Date().toISOString().slice(11, 16)
   text = `${text} [queued ${hm}Z${srcId ? ` src:${srcId}` : ''}]`
   diag('announce', { tier, text: text.slice(0, 300), inVc: !!connection })
