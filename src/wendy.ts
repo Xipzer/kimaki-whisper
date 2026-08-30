@@ -1976,7 +1976,7 @@ export function wendyUnsilence(): string {
   return 'Silence lifted.'
 }
 export type Snapshot = {
-  mode: string; held: number; up: number; inVc: boolean; dnd: boolean; silencedMin: number
+  mode: string; held: number; inVc: boolean; dnd: boolean; silencedMin: number
   brainUp: boolean; tps: number; ctxPct: number
   selfTasks: { active: number; done: number; list: Array<{ goal: string; status: string; slices: number }> }
   spawns: Array<{ label: string; status: string; ageMin: number; result?: string }>
@@ -2017,7 +2017,6 @@ export function wendySnapshot(): Snapshot {
   return {
     mode: dormant ? 'ASLEEP' : connection ? 'IN VOICE' : 'AWAKE',
     held: allHeld.length,
-    up: Math.round(process.uptime()),
     inVc: !!connection, dnd, silencedMin: silencedUntil > now ? Math.ceil((silencedUntil - now) / 60000) : 0,
     brainUp: brainProbeChecked ? brainProbeUp : (!lastBrainTpsAt || now - lastBrainTpsAt < 30 * 60000), tps: lastBrainTps,
     ctxPct: lastPromptTokens ? Math.round((lastPromptTokens / 196608) * 1000) / 10 : 0,
