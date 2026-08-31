@@ -1846,7 +1846,7 @@ setInterval(() => {
             : 'no real movement since my last update.'
         announce(`Scheduled check${d.note ? ` on ${d.note}` : ''}: ${summary}`, 'interrupt', d.sessionId)
       } else {
-        announce(`Reminder: ${d.note}`, 'interrupt')
+        announce(`Reminder: ${d.note.replace(/^\s*reminder:?\s*/i, '')}`, 'interrupt')
       }
     }
   })()
