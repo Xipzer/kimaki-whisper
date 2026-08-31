@@ -22,6 +22,7 @@ import {
   type AudioPlayer,
 } from '@discordjs/voice'
 import type { Client, VoiceState, VoiceBasedChannel } from 'discord.js'
+import { Client as DClient, GatewayIntentBits } from 'discord.js'
 import prism from 'prism-media'
 import { Readable } from 'node:stream'
 import { execFile, spawn } from 'node:child_process'
@@ -2929,7 +2930,7 @@ export function initWendy(client: Client): void {
     return
   }
   clientRef = client
-  client.on('voiceStateUpdate', (oldState: VoiceState, newState: VoiceState) => {
+  const followOwner = (oldState: VoiceState, newState: VoiceState): void => {
     if (newState.member?.user.id !== owner) return
     if (dormant) return
     if (newState.channel && newState.channelId !== oldState.channelId) {
@@ -2939,7 +2940,23 @@ export function initWendy(client: Client): void {
       currentChannelId = ''
       leave()
     }
-  })
+  }
+  client.on('voiceStateUpdate', followOwner)
+  // Foreign-guild identity: the dedicated "Wendy" application. Voice-only
+  // surface - no slash commands, no panel, no message handlers - so what gets
+  // invited into other people's servers carries the minimum possible control.
+  const foreignToken = (loadConfig() as { foreignBotToken?: string }).foreignBotToken
+  if (foreignToken) {
+    const foreign = new DClient({ intents: [GatewayIntentBits.Guilds, GatewayIntentBits.GuildVoiceStates] })
+    foreign.on('voiceStateUpdate', (o: VoiceState, n: VoiceState) => {
+      // home guilds are the primary bot's turf - only act where it is absent
+      const gid = n.guild?.id ?? o.guild?.id
+      if (gid && client.guilds.cache.has(gid)) return
+      followOwner(o, n)
+    })
+    foreign.once('clientReady', () => log(`wendy: foreign identity online as ${foreign.user?.tag} (${foreign.guilds.cache.size} foreign guild(s))`))
+    foreign.login(foreignToken).catch((e) => log(`wendy: foreign identity login failed: ${String(e)}`))
+  }
   startTelegram()
   setTelegramAutonomousHandler((m, p) => {
     setReplyTarget(p.chatId, m.id)
