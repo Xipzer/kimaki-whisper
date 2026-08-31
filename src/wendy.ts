@@ -38,6 +38,7 @@ function brainUrl(): string | undefined {
 // claiming up for 30 minutes after the process was killed).
 let brainProbeUp = false
 let brainProbeChecked = false
+let brainCtxMax = 147456
 async function probeBrain(): Promise<void> {
   const url = brainUrl()
   if (!url) { brainProbeUp = false; brainProbeChecked = true; return }
@@ -47,6 +48,11 @@ async function probeBrain(): Promise<void> {
     const res = await fetch(url.replace(/\/$/, '') + '/v1/models', { signal: ctrl.signal })
     clearTimeout(t)
     brainProbeUp = res.ok
+    if (res.ok) {
+      const d = (await res.json().catch(() => null)) as { data?: Array<{ meta?: { n_ctx?: number } }> } | null
+      const n = d?.data?.[0]?.meta?.n_ctx
+      if (n && n > 1000) brainCtxMax = n
+    }
   } catch { brainProbeUp = false }
   brainProbeChecked = true
 }
@@ -2037,7 +2043,7 @@ export function wendySnapshot(): Snapshot {
     mode: dormant ? 'ASLEEP' : connection ? 'IN VOICE' : 'AWAKE',
     inVc: !!connection, dnd, silencedMin: silencedUntil > now ? Math.ceil((silencedUntil - now) / 60000) : 0,
     brainUp: brainProbeChecked ? brainProbeUp : (!lastBrainTpsAt || now - lastBrainTpsAt < 30 * 60000), tps: lastBrainTps,
-    ctxPct: lastPromptTokens ? Math.round((lastPromptTokens / 196608) * 1000) / 10 : 0,
+    ctxPct: lastPromptTokens ? Math.round((lastPromptTokens / brainCtxMax) * 1000) / 10 : 0,
     selfTasks: {
       active: selfTasks.filter((t) => t.status === 'active').length,
       done: selfTasks.filter((t) => t.status === 'done').length,
