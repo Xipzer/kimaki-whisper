@@ -2706,9 +2706,19 @@ function listenTo(channel: VoiceBasedChannel, userId: string): void {
           // replaying the cut chunk now would land AFTER the next chunk (scrambled)
           if (streamDrains > 0) { cutSpeech = []; return }
           if (interrupted && cutSpeech.length) {
-            log('wendy: barge-in was a phantom - resuming what I was saying')
-            diag('barge_in_resumed', { sentences: cutSpeech.length })
-            for (const t of cutSpeech) void speak(t)
+            // cutSpeech[0] is the sentence that was PLAYING when cut - the owner
+            // already heard most of it. Replaying it repeats her from the start
+            // (seen live on a one-sentence greeting). Resume only sentences that
+            // never began playing; if there are none, just stay quiet.
+            const unplayed = cutSpeech.slice(1)
+            if (unplayed.length) {
+              log('wendy: barge-in was a phantom - resuming the unspoken part')
+              diag('barge_in_resumed', { sentences: unplayed.length, droppedInFlight: true })
+              for (const t of unplayed) void speak(t)
+            } else {
+              log('wendy: phantom barge-in but the cut sentence was already mostly heard - not repeating it')
+              diag('barge_in_no_resume', {})
+            }
             cutSpeech = []
           }
         }
