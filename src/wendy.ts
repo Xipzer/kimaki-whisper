@@ -1378,6 +1378,7 @@ function persistHistory(): void {
 
 type BrainOut = {
   content: string
+  reasoning?: string
   toolCalls: Array<{ id: string; type?: string; function: { name: string; arguments: string } }>
   timings?: { predicted_per_second?: number; prompt_per_second?: number }
   usage?: { prompt_tokens?: number }
@@ -1398,12 +1399,13 @@ async function brainRequest(url: string, body: Record<string, unknown>, onSenten
   }
   if (!res.ok) return { content: '', toolCalls: [], error: `HTTP ${res.status} ${(await res.text().catch(() => '')).slice(0, 200)}` }
   if (!stream) {
-    const d = (await res.json().catch(() => null)) as { choices?: Array<{ message?: { content?: string; tool_calls?: BrainOut['toolCalls'] } }>; timings?: BrainOut['timings']; usage?: BrainOut['usage'] } | null
+    const d = (await res.json().catch(() => null)) as { choices?: Array<{ message?: { content?: string; reasoning_content?: string; tool_calls?: BrainOut['toolCalls'] } }>; timings?: BrainOut['timings']; usage?: BrainOut['usage'] } | null
     const m = d?.choices?.[0]?.message
-    return { content: (m?.content ?? '').trim(), toolCalls: m?.tool_calls ?? [], timings: d?.timings, usage: d?.usage }
+    return { content: (m?.content ?? '').trim(), reasoning: (m?.reasoning_content ?? '').trim() || undefined, toolCalls: m?.tool_calls ?? [], timings: d?.timings, usage: d?.usage }
   }
   const toolCalls: BrainOut['toolCalls'] = []
   let content = ''
+  let reasoning = ''
   let sentenceBuf = ''
   let timings: BrainOut['timings']
   let usage: BrainOut['usage']
@@ -1441,12 +1443,13 @@ async function brainRequest(url: string, body: Record<string, unknown>, onSenten
         if (!l.startsWith('data:')) continue
         const payload = l.slice(5).trim()
         if (payload === '[DONE]') continue
-        let j: { timings?: BrainOut['timings']; usage?: BrainOut['usage']; choices?: Array<{ delta?: { content?: string; tool_calls?: Array<{ index?: number; id?: string; function?: { name?: string; arguments?: string } }> } }> }
+        let j: { timings?: BrainOut['timings']; usage?: BrainOut['usage']; choices?: Array<{ delta?: { content?: string; reasoning_content?: string; tool_calls?: Array<{ index?: number; id?: string; function?: { name?: string; arguments?: string } }> } }> }
         try { j = JSON.parse(payload) } catch { continue }
         if (j.timings) timings = j.timings
         if (j.usage) usage = j.usage
         const delta = j.choices?.[0]?.delta
         if (!delta) continue
+        if (delta.reasoning_content) reasoning += delta.reasoning_content
         if (delta.content) {
           content += delta.content
           sentenceBuf += delta.content
@@ -1465,7 +1468,7 @@ async function brainRequest(url: string, body: Record<string, unknown>, onSenten
     log('wendy: stream interrupted:', (e as Error).message)
   }
   if (!toolCalls.length) flush(true)
-  return { content: content.trim(), toolCalls: toolCalls.filter((t) => t.function.name), timings, usage }
+  return { content: content.trim(), reasoning: reasoning.trim() || undefined, toolCalls: toolCalls.filter((t) => t.function.name), timings, usage }
 }
 
 export async function think(userText: string, onSentence?: (s: string) => void): Promise<string> {
@@ -1536,7 +1539,7 @@ export async function think(userText: string, onSentence?: (s: string) => void):
 
     if (out.timings?.predicted_per_second) { lastBrainTps = Math.round(out.timings.predicted_per_second); lastBrainTpsAt = Date.now() }
     if (out.usage?.prompt_tokens) lastPromptTokens = out.usage.prompt_tokens
-    diag('brain', { hop, ms: Date.now() - hopT0, tps: out.timings?.predicted_per_second ? Math.round(out.timings.predicted_per_second) : undefined, tools: out.toolCalls.map((t) => t.function.name), text: out.content.slice(0, 500), usage: out.usage })
+    diag('brain', { hop, ms: Date.now() - hopT0, tps: out.timings?.predicted_per_second ? Math.round(out.timings.predicted_per_second) : undefined, tools: out.toolCalls.map((t) => t.function.name), text: out.content.slice(0, 500), reasoning: out.reasoning?.slice(0, 700), usage: out.usage })
     const msg = { content: out.content || null, tool_calls: out.toolCalls.length ? out.toolCalls : undefined }
     if (!out.content && !out.toolCalls.length) return fail('I got an empty response from my reasoning engine.')
 
