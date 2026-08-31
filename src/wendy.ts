@@ -1768,6 +1768,7 @@ async function refreshThreadIndexInner(): Promise<void> {
     for (const e of next) {
       const a = ambient.get(e.id)
       if (!a || a.hotStreak < 2 || a.stallNotified) continue
+      if (!everDispatched.has(e.id)) continue // her dispatched work only - cron tasks and ambient threads are not "stalled"
       const idleMs = Date.now() - (a.lastUpd || 0)
       if (idleMs > 4 * 3600000 && idleMs < 48 * 3600000) {
         a.stallNotified = true
@@ -2127,6 +2128,13 @@ function announce(text: string, tier: NotifyTier, srcId?: string): void {
   // "N new messages" queued every sweep was stacking near-identical entries.
   const tg = text.match(/<tg:[^>]+>/)
   if (tg) dropQueuedMatching(tg[0])
+  // One queued item per source: a session announcing 20x in 7h churned the
+  // 12-slot queue 267 times - joins delivered a random tail, not a digest.
+  if (srcId) dropQueuedMatching(`src:${srcId}`)
+  const commitRepo = text.match(/New commit in ([\w.-]+)/)
+  if (commitRepo) dropQueuedMatching(`New commit in ${commitRepo[1]}`)
+  const dmFrom = text.match(/Telegram from ([^(:\n]+)/)
+  if (dmFrom) dropQueuedMatching(`Telegram from ${dmFrom[1].trim()}`)
   const hm = new Date().toISOString().slice(11, 16)
   text = `${text} [queued ${hm}Z${srcId ? ` src:${srcId}` : ''}]`
   diag('announce', { tier, text: text.slice(0, 300), inVc: !!connection })
@@ -2211,7 +2219,9 @@ function shouldAnnounce(id: string, tail: string): boolean {
 // completes and exits the MOMENT output concludes - no polling latency, no
 // digest cooldown. Completions announce in arrival order (FIFO by finish).
 const finishWatches = new Set<string>()
+const everDispatched = new Set<string>()
 function armFinishWatch(id: string, label: string): void {
+  if (id) everDispatched.add(id)
   if (!id || finishWatches.has(id)) return
   finishWatches.add(id)
   diag('finish_watch_armed', { id })
@@ -2907,7 +2917,7 @@ async function joinAndServe(channel: VoiceBasedChannel, userId: string): Promise
   lastGreetedAt = Date.now()
   const totalHeld = heldWhileSilent.length
   const hi = heldWhileSilent.filter((x) => x.includes('[HIGH]')).length
-  void runTurn(`[The owner just joined voice. Greet them briefly and naturally - ONE short line, warm but efficient, no jokes or bits. Vary it; never a stock phrase. EXCEPTION: if the recent history shows a restart interrupted them mid-speech, acknowledge that first and respond to what they had been saying.${totalHeld ? ` Also: ${totalHeld} update${totalHeld > 1 ? 's are' : ' is'} queued${hi ? ` (${hi} high-priority)` : ''} - fold a casual offer to share into the greeting, but do NOT deliver any contents yet.` : ''}]`)
+  void runTurn(`[The owner just joined voice. Greet them briefly and naturally - ONE short line, warm but efficient, no jokes or bits. Vary it; never a stock phrase. EXCEPTION: if the recent history shows a restart interrupted them mid-speech, acknowledge that first and respond to what they had been saying.${totalHeld ? ` ${hi ? `One queued update is HIGH priority - mention that single fact casually (no contents yet).` : `Updates are queued but NONE are high priority - do NOT mention the queue, counts, or offer a rundown; he knows he can ask. Just greet.`}` : ''}]`)
 }
 
 function leave(): void {
