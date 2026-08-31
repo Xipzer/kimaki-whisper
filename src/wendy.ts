@@ -1524,6 +1524,7 @@ export async function think(userText: string, onSentence?: (s: string) => void):
     diag('brain_error_ack', { text: text.slice(0, 120) })
     return text
   }
+  const turnSeq = inputSeq
   let nudged = false
   let claimChecked = false
   let blockedSendsThisTurn = 0
@@ -1586,16 +1587,16 @@ export async function think(userText: string, onSentence?: (s: string) => void):
         // 0 and false are VALID values - only absent/blank counts as missing
         // (this rejected telegram_grant count:0 revokes and privacy_mode on:false)
         const missing = required.filter((k) => args[k] === undefined || args[k] === null || (typeof args[k] === 'string' && args[k].trim() === ''))
-        if (!missing.length && (tc.function.name === 'ask_thread' || tc.function.name === 'dispatch_task') && Date.now() - lastRelayAck > 60000) {
-          lastRelayAck = Date.now()
-          void speak('One moment - passing that along.')
-        }
         const result = truncatedCalls.has(tc.id)
           ? `ERROR: your ${tc.function.name} call was CUT OFF by the generation limit - the JSON never closed. Retry with much shorter arguments; split long content across multiple calls.`
           : missing.length
             ? `ERROR: missing required argument(s): ${missing.join(', ')}. Call ${tc.function.name} again with ALL required fields filled in.`
             : await (async () => {
                 const isSend = ['send_to_session', 'ask_thread', 'dispatch_task', 'telegram_send', 'telegram_reply'].includes(tc.function.name)
+                if (isSend && !userText.startsWith('[') && (turnSeq !== inputSeq || capturing || pendingUtterance)) {
+                  diag('action_held_owner_talking', { tool: tc.function.name })
+                  return 'HELD - the owner resumed speaking mid-turn, so this action was NOT taken (acting on a half-finished thought sends half-finished instructions). Their full input arrives next turn: acknowledge briefly and redo this action then, with the complete picture.'
+                }
                 if (isSend) {
                   const key = dispatchKey(tc.function.name, args)
                   const dup = recentDispatches.find((d) => d.key === key && Date.now() - d.ts < 10 * 60000)
@@ -2605,11 +2606,6 @@ async function runTurn(text: string): Promise<void> {
     pendingUtterance = pendingUtterance ? `${pendingUtterance} - ${text}`.slice(-1500) : text
     log(`wendy: busy - queued "${text.slice(0, 50)}"`)
     diag('queued_while_busy', { text })
-    if (!busyAckGiven && !isSilenced() && Date.now() - turnStartedAt > 10000 && Date.now() - lastBusyAck > 90000) {
-      busyAckGiven = true
-      lastBusyAck = Date.now()
-      void speak("One sec - I heard you, just finishing something.")
-    }
     return
   }
   busy = true
