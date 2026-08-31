@@ -1499,6 +1499,18 @@ export async function think(userText: string, onSentence?: (s: string) => void):
   const eps = searchJournal(userText, 2)
   if (eps.length) capsule += `\n\nPOSSIBLY RELEVANT PAST MOMENTS:\n${eps.map((e) => `- [${new Date(e.ts).toISOString().slice(0, 10)}] ${e.s}`).join('\n')}`
   const messages: Msg[] = [{ role: 'system', content: SYSTEM_PROMPT + routesBlock + capsule }, ...history]
+  // Newer llama.cpp builds hard-reject consecutive assistant messages (400:
+  // "Cannot have 2 or more assistant messages at the end of the list").
+  // History can legitimately contain them (superseded turns, error acks) -
+  // coalesce plain-text neighbours instead of failing the whole turn.
+  for (let i = messages.length - 1; i > 0; i--) {
+    const a = messages[i - 1] as { role: string; content?: unknown; tool_calls?: unknown }
+    const b = messages[i] as { role: string; content?: unknown; tool_calls?: unknown }
+    if (a.role === 'assistant' && b.role === 'assistant' && !a.tool_calls && !b.tool_calls) {
+      a.content = `${String(a.content ?? '')}\n${String(b.content ?? '')}`.trim()
+      messages.splice(i, 1)
+    }
+  }
 
   const fail = (text: string): string => {
     history.push({ role: 'assistant', content: text })
