@@ -2189,8 +2189,34 @@ function shouldAnnounce(id: string, tail: string): boolean {
   lastAnnounced.set(id, { fp, at: Date.now() })
   return true
 }
+// Instant finish detection: `kimaki session wait` blocks until the session
+// completes and exits the MOMENT output concludes - no polling latency, no
+// digest cooldown. Completions announce in arrival order (FIFO by finish).
+const finishWatches = new Set<string>()
+function armFinishWatch(id: string, label: string): void {
+  if (!id || finishWatches.has(id)) return
+  finishWatches.add(id)
+  diag('finish_watch_armed', { id })
+  // Delay before attaching: waiting on a session that has not begun processing
+  // yet returns immediately with stale content (a false "finished").
+  setTimeout(() => {
+    const t0 = Date.now()
+    execFile('bash', ['-c', `exec kimaki session wait '${id.replace(/[^A-Za-z0-9_-]/g, '')}'`], { timeout: 45 * 60000, maxBuffer: 8 * 1024 * 1024, killSignal: 'SIGKILL' }, (err, stdout) => {
+      finishWatches.delete(id)
+      const ranMs = Date.now() - t0
+      if (err && !String(stdout ?? '').trim()) { diag('finish_watch_dead', { id, ms: ranMs }); return }
+      // An exit within seconds means it attached to an already-idle session
+      // (the dispatch had not started or the inline reply already covered it) -
+      // the 45s pollers own that case. Only announce believable completions.
+      if (ranMs < 8000) { diag('finish_watch_instant_ignored', { id, ms: ranMs }); return }
+      diag('finish_watch_fired', { id, ms: ranMs })
+      announce(`[MED] "${labelFor(id, label)}" just FINISHED its output - the full result is ready. Read it with read_session and report to the owner.`, 'interrupt', id)
+    })
+  }, 12000)
+}
 function watchSession(id: string, label: string): void {
   label = labelFor(id, label)
+  armFinishWatch(id, label)
   if (watchlist.some((w) => w.id === id)) return
   const w: Watch = { id, label, fp: '', baselined: false, expires: Date.now() + 45 * 60 * 1000 }
   watchlist.push(w)
