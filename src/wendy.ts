@@ -33,7 +33,7 @@ import { DispatchLedger } from './state/ledgers.js'
 import { SYSTEM_PROMPT } from './prompt.js'
 import { TOOLS } from './tools/specs.js'
 import { executeTelegramTool } from './tools/telegram.js'
-import { isDispatchTool, isThreadDispatchTool, dispatchSucceeded, claimsSend, sendClaimAck, isTrailingFragment, isAffirmative, soundsLikePromise, dispatchKey, collapsePriorityTags, isUrgentUpdate, queueDedupeMarkers, repairHistory, SESSION_ID, isSessionId, stripReminderPrefix } from './brain/guards.js'
+import { isDispatchTool, isThreadDispatchTool, dispatchSucceeded, claimsSend, sendClaimAck, isTrailingFragment, isAffirmative, isSelfDirective, soundsLikePromise, dispatchKey, collapsePriorityTags, isUrgentUpdate, queueDedupeMarkers, repairHistory, SESSION_ID, isSessionId, stripReminderPrefix } from './brain/guards.js'
 import { brainUrl, brainRequest, brainFetch, brainText, brainHealth, type BrainOut } from './brain/client.js'
 import { startTelegram, setTelegramFlaggedHandler, telegramAutoDrain, telegramLowBudgets, setTelegramAutonomousHandler, telegramPendingSummaries, telegramDrainChatStats, telegramPendingPeopleSummaries, telegramDrainPerson, telegramProfile, telegramProfilesDue, telegramProfileWrite, telegramPrivacyFor, telegramEffectiveTone, telegramRoomContext, telegramPersonThread, setReplyTarget } from './telegram.js'
 
@@ -61,7 +61,6 @@ function routesPath(): string {
 }
 
 pruneDiagnostics()
-diag('boot', { pid: process.pid })
 diag('boot', { pid: process.pid })
 
 // - episodic memory: eviction -> journal -> consolidated memory.md -
@@ -126,7 +125,13 @@ function runKimaki(args: string[], timeoutMs = 30000, maxChars = 6000, fromEnd =
         const fd = fs.openSync(src, 'r')
         fs.readSync(fd, buf, 0, window, fromEnd ? st.size - window : 0)
         fs.closeSync(fd)
-        const out = buf.toString()
+        const raw = buf.toString()
+        // kimaki's pretty logger writes '│  HH:MM DB  ...' / '■  HH:MM CLI Failed ...'
+        // lines into the same stream - they are noise to the brain, and a
+        // 'Failed to connect' line is a real error that must read as one.
+        const fail = raw.match(/^■\s+\S+\s+CLI\s+(.*)$/m)
+        if (fail && !raw.replace(/^[│■].*$/gm, '').trim()) { resolve(`ERROR: ${fail[1].slice(0, 300)}`); return }
+        const out = raw.replace(/^[│■]\s+\d\d:\d\d\s+\S+\s+.*\n?/gm, '')
         resolve(fromEnd ? out.slice(-maxChars) : out.slice(0, maxChars))
       } catch (e) {
         resolve(`ERROR: ${String((e as Error).message).slice(0, 300)}`)
@@ -193,7 +198,10 @@ async function executeToolInner(name: string, args: Record<string, unknown>): Pr
     return out || 'dispatched'
   }
   if (name === 'list_recent_sessions') {
-    return runKimaki(['session', 'list', '--project', String(args.directory ?? '.'), '--json'])
+    // She passes names ("wendy", "BaseStonk") - resolve against the thread index.
+    const want = String(args.directory ?? '.')
+    const dir = want === '.' || want.startsWith('/') ? want : (threadIndex.find((e) => path.basename(e.dir).toLowerCase() === want.toLowerCase())?.dir ?? want)
+    return runKimaki(['session', 'list', '--project', dir, '--json'])
   }
   if (name === 'lookup_thread') {
     const hits = lookupThreads(String(args.query ?? ''))
@@ -638,6 +646,10 @@ export async function think(userText: string, onSentence?: (s: string) => void):
                     diag('unverified_target_blocked', { id: targetId, tool: tc.function.name })
                     return `BLOCKED: you have not looked up ${targetId} recently, so it may be a MISREMEMBERED id - session ids share long prefixes and near-misses silently hit the wrong thread. Nothing was sent. Call lookup_thread (or read_session) for the thread you actually mean, confirm the title in the result, then dispatch to the id it returns.`
                   }
+                }
+                if (isThreadDispatchTool(tc.function.name) && !userText.startsWith('[') && isSelfDirective(userText)) {
+                  diag('dispatch_held_self_directive', { tool: tc.function.name })
+                  return 'HELD: the owner told you to do this YOURSELF ("independently" / "on your own" / "yourself"). Do not delegate it to a thread - use read_session (deep, with chars), bash, notes and your own reasoning, then answer him directly.'
                 }
                 if (isSend && !userText.startsWith('[') && (turnSeq !== inputSeq || capturing || pendingUtterance)) {
                   diag('action_held_owner_talking', { tool: tc.function.name })
@@ -1292,6 +1304,10 @@ function armFinishWatch(id: string, label: string, reArmed = false): void {
       if (ranMs < 8000 && !reArmed) { diag('finish_watch_instant_ignored', { id, ms: ranMs }); return }
       ledger.markDone(id)
       diag('finish_watch_fired', { id, ms: ranMs, reArmed })
+      // The poll watcher tracks the same id - without this it re-announces the
+      // very content the finish notice covers (seen: 3 deltas + a SKIP turn).
+      const w = watchlist.find((x) => x.id === id)
+      if (w) { w.fp = fingerprint(String(stdout ?? '')); w.seen = true; w.more = false }
       announce(`[MED] "${labelFor(id, label)}" just FINISHED its output - the full result is ready. Read it with read_session and report to the owner.`, 'interrupt', id)
     })
   }, 12000)

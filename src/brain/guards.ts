@@ -97,3 +97,7 @@ export const isTrailingFragment = (text: string): boolean => {
 /** "Yes" to an offer she just made ("want the updates?"). */
 export const AFFIRMATIVE = /^\W*(yeah|yes|yep|yup|sure|go on|go ahead|please|do it|hit me|okay|ok|absolutely|of course)\b/i
 export const isAffirmative = (text: string): boolean => AFFIRMATIVE.test(text.trim())
+
+/** The owner asked her to do the work herself, not delegate it. */
+export const SELF_DIRECTIVE = /\b(independently|on your own|by yourself|do it yourself|figure (it|this|that) out yourself|without (asking|delegating|dispatching)|don'?t (ask|delegate|dispatch|send (it|this|that) (to|off))|use your own (hands|tools)|read it yourself)\b/i
+export const isSelfDirective = (text: string): boolean => SELF_DIRECTIVE.test(text)

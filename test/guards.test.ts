@@ -78,3 +78,11 @@ test('fragment + affirmative detection', async () => {
   for (const t of ['Yeah, I mean, go on', 'Yes', 'sure, hit me', 'Go ahead.']) assert.equal(isAffirmative(t), true, t)
   assert.equal(isAffirmative('Not now.'), false)
 })
+
+test('self-directive detection', async () => {
+  const { isSelfDirective } = await import('../dist/brain/guards.js')
+  assert.equal(isSelfDirective('I want you to go on your own and figure out what changed'), true)
+  assert.equal(isSelfDirective('figure out independently what the thread did'), true)
+  assert.equal(isSelfDirective("Don't ask the thread, read it yourself."), true)
+  assert.equal(isSelfDirective('Ask the builder thread to summarise it'), false)
+})
