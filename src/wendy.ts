@@ -1865,8 +1865,34 @@ let sliceRunning = false
 let sliceAbort: AbortController | null = null
 async function runTaskSlice(): Promise<void> {
   if (sliceRunning || busy || capturing || isSilenced()) return
-  const t = selfTasks.find((x) => x.status === 'active')
+  // least-recently-worked active task first - find() let a stuck task starve
+  // every other active task forever
+  const t = selfTasks.filter((x) => x.status === 'active').sort((a, b) => (a.updated ?? 0) - (b.updated ?? 0))[0]
   if (!t) return
+  // runaway guard: 4,834 silent slices observed on one task. Real tasks finish
+  // in 3-7 slices; 150 means permanently stuck, not working.
+  if ((t.slices ?? 0) > 150) {
+    t.status = 'failed'
+    t.result = 'exceeded slice budget - permanently stuck, likely a poisoned message history'
+    announce(`[MED] Background task auto-failed after ${t.slices} slices - ${t.goal.slice(0, 60)}. It was stuck, not working.`, 'digest')
+    diag('selftask_budget_kill', { id: t.id, slices: t.slices })
+    saveSelfTasks()
+    return
+  }
+  // b10705 rejects histories with consecutive assistant messages (worker
+  // thinking-notes accumulate exactly that) and generation must not resume
+  // from a bare trailing assistant - repair both before every request.
+  for (let i = t.msgs.length - 1; i > 0; i--) {
+    const a = t.msgs[i - 1] as { role: string; content?: unknown; tool_calls?: unknown }
+    const b = t.msgs[i] as { role: string; content?: unknown; tool_calls?: unknown }
+    if (a.role === 'assistant' && b.role === 'assistant' && !a.tool_calls && !b.tool_calls) {
+      a.content = `${String(a.content ?? '')}\n${String(b.content ?? '')}`.trim()
+      t.msgs.splice(i, 1)
+    }
+  }
+  if ((t.msgs[t.msgs.length - 1] as { role?: string })?.role === 'assistant') {
+    t.msgs.push({ role: 'user', content: '(system: resume - keep working with your tools; reply RESULT:/FAILED: only when finished)' })
+  }
   const url = brainUrl()
   if (!url) return
   sliceRunning = true
@@ -1880,7 +1906,10 @@ async function runTaskSlice(): Promise<void> {
         body: JSON.stringify({ model: 'local-fast', cache_prompt: true, messages: t.msgs, tools: TOOLS, max_tokens: 4000 }),
         signal: AbortSignal.any([sliceAbort.signal, AbortSignal.timeout(120000)]),
       }).catch(() => null)
-      if (!res?.ok) break
+      if (!res?.ok) {
+        diag('slice_http_error', { id: t.id, status: res?.status ?? 'network', body: res ? String(await res.text().catch(() => '')).slice(0, 150) : '' })
+        break
+      }
       const d = (await res.json().catch(() => null)) as { choices?: Array<{ message?: { content?: string; tool_calls?: Array<{ id: string; type?: string; function: { name: string; arguments: string } }> } }> } | null
       const m = d?.choices?.[0]?.message
       if (!m) break
