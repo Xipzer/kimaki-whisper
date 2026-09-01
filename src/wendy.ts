@@ -1484,6 +1484,8 @@ let busy = false
 export const spokenTranscript: string[] = []
 let lastSpokenText = ''
 let lastSpeechEnd = 0
+// Whisper's silence hallucinations: short stock phrases that need strong confidence to be believed.
+const STOCK_GHOST = /^(thank you|thanks|okay|ok|you|bye|yeah)[.!\s]*$/i
 let speechEpoch = 0
 const speechQueueTexts: string[] = []
 function interruptSpeech(): string[] {
@@ -1841,14 +1843,25 @@ function listenTo(channel: VoiceBasedChannel, userId: string): void {
         if (isSilenced()) diag('dropped', { text: text.slice(0, 60), why: 'silenced', noSpeech: +noSpeech.toFixed(2), logprob: +logprob.toFixed(2) })
         // Whisper's own confidence: silence-hallucinations carry high no_speech_prob
         // and low avg_logprob. Real speech is typically logprob > -0.5, noSpeech < 0.3.
-        const joinLenient = Date.now() - joinedAt < 20000
-        if (!joinLenient && (noSpeech > (borderline ? 0.4 : 0.55) || logprob < (borderline ? -0.7 : -0.9))) {
+        // Leniency when a reply is EXPECTED: shortly after joining, or shortly
+        // after she finished speaking (his answer to her is the most likely
+        // audio there is). Live loss: "are you aware of" dropped 21s after
+        // join, 11s after her greeting, because the window was join-keyed.
+        const replyExpected = Date.now() - joinedAt < 60000 || Date.now() - lastSpeechEnd < 15000
+        // Whisper's no_speech_prob is unreliable on short clips; a multi-word
+        // sentence with no artifact shape needs BOTH signals bad to be binned.
+        const words = text.trim().split(/\s+/).filter(Boolean).length
+        const substantive = words >= 3 && !STOCK_GHOST.test(text.trim())
+        const badNoSpeech = noSpeech > (borderline ? 0.4 : 0.55)
+        const badLogprob = logprob < (borderline ? -0.7 : -0.9)
+        const drop = substantive ? (noSpeech > 0.9 && logprob < -1.0) : (badNoSpeech || badLogprob)
+        if (!replyExpected && drop) {
           diag('dropped', { text: text.slice(0, 60), why: 'low_confidence', noSpeech: +noSpeech.toFixed(2), logprob: +logprob.toFixed(2) })
           resumeIfPhantom()
           return
         }
         // Stock ghost phrases need GOOD confidence to be believed at all
-        if (!expectingAnswer && /^(thank you|thanks|okay|ok|you|bye|yeah)[.!\s]*$/i.test(text.trim()) && (logprob < -0.4 || noSpeech > 0.25)) {
+        if (!expectingAnswer && STOCK_GHOST.test(text.trim()) && (logprob < -0.4 || noSpeech > 0.25)) {
           diag('dropped', { text: text.trim(), why: 'stock_low_conf', noSpeech: +noSpeech.toFixed(2), logprob: +logprob.toFixed(2) })
           resumeIfPhantom()
           return
