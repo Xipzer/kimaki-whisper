@@ -83,3 +83,17 @@ export const SESSION_ID = /\bses_\w{10,}\b/g
 export const isSessionId = (s: string): boolean => /^ses_\w{10,}$/.test(s)
 
 export const stripReminderPrefix = (note: string): string => note.replace(/^\s*reminder:?\s*/i, '')
+
+/** An utterance cut mid-thought: trailing connective/comma, or a bare filler.
+ *  Human speech pauses here; the mic gate should not treat it as the end. */
+export const TRAILING_FRAGMENT = /(,|;|\b(i mean|so|and|but|like|um|uh|er|because|basically|then|well|actually|you know))\s*[.]?\s*$/i
+export const isTrailingFragment = (text: string): boolean => {
+  const t = text.trim()
+  if (!t) return false
+  const words = t.split(/\s+/).length
+  return TRAILING_FRAGMENT.test(t) || (words <= 2 && !/[?!]$/.test(t) && /^(yeah|yes|yep|okay|ok|so|well|right|sure|hmm|um)\b/i.test(t))
+}
+
+/** "Yes" to an offer she just made ("want the updates?"). */
+export const AFFIRMATIVE = /^\W*(yeah|yes|yep|yup|sure|go on|go ahead|please|do it|hit me|okay|ok|absolutely|of course)\b/i
+export const isAffirmative = (text: string): boolean => AFFIRMATIVE.test(text.trim())

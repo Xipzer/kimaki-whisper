@@ -33,7 +33,7 @@ import { DispatchLedger } from './state/ledgers.js'
 import { SYSTEM_PROMPT } from './prompt.js'
 import { TOOLS } from './tools/specs.js'
 import { executeTelegramTool } from './tools/telegram.js'
-import { isDispatchTool, isThreadDispatchTool, dispatchSucceeded, claimsSend, sendClaimAck, soundsLikePromise, dispatchKey, collapsePriorityTags, isUrgentUpdate, queueDedupeMarkers, repairHistory, SESSION_ID, isSessionId, stripReminderPrefix } from './brain/guards.js'
+import { isDispatchTool, isThreadDispatchTool, dispatchSucceeded, claimsSend, sendClaimAck, isTrailingFragment, isAffirmative, soundsLikePromise, dispatchKey, collapsePriorityTags, isUrgentUpdate, queueDedupeMarkers, repairHistory, SESSION_ID, isSessionId, stripReminderPrefix } from './brain/guards.js'
 import { brainUrl, brainRequest, brainFetch, brainText, brainHealth, type BrainOut } from './brain/client.js'
 import { startTelegram, setTelegramFlaggedHandler, telegramAutoDrain, telegramLowBudgets, setTelegramAutonomousHandler, telegramPendingSummaries, telegramDrainChatStats, telegramPendingPeopleSummaries, telegramDrainPerson, telegramProfile, telegramProfilesDue, telegramProfileWrite, telegramPrivacyFor, telegramEffectiveTone, telegramRoomContext, telegramPersonThread, setReplyTarget } from './telegram.js'
 
@@ -1485,6 +1485,7 @@ let busy = false
 export const spokenTranscript: string[] = []
 let lastSpokenText = ''
 let lastSpeechEnd = 0
+let fragmentHold: { text: string; timer: NodeJS.Timeout } | null = null
 // Whisper's silence hallucinations: short stock phrases that need strong confidence to be believed.
 const STOCK_GHOST = /^(thank you|thanks|okay|ok|you|bye|yeah)[.!\s]*$/i
 let speechEpoch = 0
@@ -1679,10 +1680,12 @@ async function runTurn(text: string): Promise<void> {
       // them clean - the queue stays held and injects on a later turn/lull.
       diag('join_priority_clean_turn', {})
       text = `[The owner joined moments ago and this is his FIRST real input - answer EXACTLY what he says and nothing else. Do NOT deliver, mention, or allude to any queued updates this turn unless he explicitly asks for them.]\n${text}`
-    } else if ((attention.has('held') || (dnd && (attention.has('live') || attention.has('digest')))) && !text.startsWith('[')) {
+    } else if ((attention.has('held') || (dnd && (attention.has('live') || attention.has('digest')))) && !text.startsWith('[') && !isTrailingFragment(text)) {
       const held = [...attention.take('held'), ...(dnd ? [...attention.take('live'), ...attention.take('digest')] : [])]
       lastDeliveredAt = Date.now()
-      text = `[Context - updates queued while you were quiet or the owner was away (each tagged HIGH/MED/LOW): ${held.join(' | ')}. You may have offered a catch-up. Deliver HIGH items first, then MED; skip LOW unless they want everything. Items carry [queued HH:MMZ src:ses_...] - for items older than ~3 minutes, read_session the src first and deliver the CURRENT state, not the stale summary. TELEGRAM items carry <tg:ChatName>: ALWAYS telegram_chat that chat first and report the CURRENT state - a queued chat summary is usually several messages behind by the time you speak it. Never speak the bracketed metadata or the <tg:...> marker. Updates may describe YOU in third person ("Wendy", "the assistant") - you are still Wendy speaking directly to your owner; never slip into narrating yourself from the outside. NO editorial framing or preamble ("two things worth knowing", "all polish, nothing structural") - open directly with the first item's substance; verdicts only if asked. Dismissal rule: ONLY treat their words as declining updates if you ACTUALLY offered updates and they are clearly responding to that offer - if you never offered, their words are about something else entirely: just answer them (the queued items are silent context, not the topic). A genuine dismissal -> snooze_updates and drop the subject instantly. If the owner wants everything, deliver it concisely. If they ask for the most urgent or most recent only, REASON over the list yourself, pick the single most important item (breakages and blockers beat progress notes; newest beats oldest), deliver just that one, and stop - no extra digging, no spillover into other updates unless asked.]\n${text}`
+      const saidYes = Date.now() - lastDigestAsk < 90000 && isAffirmative(text)
+      if (saidYes) diag('updates_accepted', { n: held.length })
+      text = `${saidYes ? '[He just said YES to your offer of updates - DELIVER THEM NOW, highs first, concise. This is not a false start.]\n' : ''}[Context - updates queued while you were quiet or the owner was away (each tagged HIGH/MED/LOW): ${held.join(' | ')}. You may have offered a catch-up. Deliver HIGH items first, then MED; skip LOW unless they want everything. Items carry [queued HH:MMZ src:ses_...] - for items older than ~3 minutes, read_session the src first and deliver the CURRENT state, not the stale summary. TELEGRAM items carry <tg:ChatName>: ALWAYS telegram_chat that chat first and report the CURRENT state - a queued chat summary is usually several messages behind by the time you speak it. Never speak the bracketed metadata or the <tg:...> marker. Updates may describe YOU in third person ("Wendy", "the assistant") - you are still Wendy speaking directly to your owner; never slip into narrating yourself from the outside. NO editorial framing or preamble ("two things worth knowing", "all polish, nothing structural") - open directly with the first item's substance; verdicts only if asked. Dismissal rule: ONLY treat their words as declining updates if you ACTUALLY offered updates and they are clearly responding to that offer - if you never offered, their words are about something else entirely: just answer them (the queued items are silent context, not the topic). A genuine dismissal -> snooze_updates and drop the subject instantly. If the owner wants everything, deliver it concisely. If they ask for the most urgent or most recent only, REASON over the list yourself, pick the single most important item (breakages and blockers beat progress notes; newest beats oldest), deliver just that one, and stop - no extra digging, no spillover into other updates unless asked.]\n${text}`
     }
     log(`wendy heard: "${text.slice(0, 80)}"`)
     diag('owner_said', { text })
@@ -1832,7 +1835,9 @@ function listenTo(channel: VoiceBasedChannel, userId: string): void {
         // has confidence scores to judge it far better than raw loudness can.
         if (rms < calRmsGate * 0.35) { diag('dropped', { why: 'low_energy', rms: Math.round(rms), gate: calRmsGate }); resumeIfPhantom(); return }
         const borderline = rms < calRmsGate
-        const { text, noSpeech, logprob } = await stt(pcm48kMonoToWav(pcm))
+        const stt0 = await stt(pcm48kMonoToWav(pcm))
+        let text = stt0.text
+        const { noSpeech, logprob } = stt0
         if (!text || text.length < 2) { resumeIfPhantom(); return }
         // Silence wake-word: DETERMINISTIC - checked before every other gate so
         // nothing (confidence, artifact, noise filters) can eat a wake attempt.
@@ -1897,6 +1902,16 @@ function listenTo(channel: VoiceBasedChannel, userId: string): void {
           }
         }
         recordAcceptedRms(rms)
+        // A thinking pause ("Yeah, I mean,") is not the end of a sentence: hold
+        // the fragment briefly and merge it with what follows. Live loss: the
+        // owner's "yes" to an updates offer became a false-start fragment.
+        if (fragmentHold) { clearTimeout(fragmentHold.timer); text = `${fragmentHold.text} ${text}`; fragmentHold = null }
+        if (isTrailingFragment(text) && !interrupted) {
+          diag('fragment_held', { text: text.slice(0, 60) })
+          const held = text
+          fragmentHold = { text: held, timer: setTimeout(() => { if (fragmentHold?.text === held) { fragmentHold = null; void runTurn(held) } }, 2500) }
+          return
+        }
         let turnText = text
         if (interrupted && cutSpeech.length) {
           // Real interruption: hand her the unfinished thought so she can reason

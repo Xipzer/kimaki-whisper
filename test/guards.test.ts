@@ -70,3 +70,11 @@ test('sendClaimAck fires on ack-shaped replies only', async () => {
   assert.equal(sendClaimAck(long), null)
   assert.equal(sendClaimAck('The tests are green.'), null)
 })
+
+test('fragment + affirmative detection', async () => {
+  const { isTrailingFragment, isAffirmative } = await import('../dist/brain/guards.js')
+  for (const t of ['Yeah, I mean,', 'So basically', 'Okay so', 'and then', 'Yeah']) assert.equal(isTrailingFragment(t), true, t)
+  for (const t of ['Can you hear me, Wendy?', 'Yes, give me the updates.', 'Go to the builder thread and read it.', 'No.']) assert.equal(isTrailingFragment(t), false, t)
+  for (const t of ['Yeah, I mean, go on', 'Yes', 'sure, hit me', 'Go ahead.']) assert.equal(isAffirmative(t), true, t)
+  assert.equal(isAffirmative('Not now.'), false)
+})
