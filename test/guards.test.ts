@@ -1,6 +1,6 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
-import { claimsSend, soundsLikePromise, dispatchKey, collapsePriorityTags, repairHistory, queueDedupeMarkers, isUrgentUpdate, dispatchSucceeded, isDispatchTool, stripReminderPrefix } from '../src/brain/guards.ts'
+import { claimsSend, soundsLikePromise, dispatchKey, collapsePriorityTags, repairHistory, queueDedupeMarkers, isUrgentUpdate, dispatchSucceeded, isDispatchTool, stripReminderPrefix } from '../dist/brain/guards.js'
 
 test('claimsSend catches first-person completed sends, not third-party', () => {
   for (const t of ['Sent it — investigating first.', "It's in there now — the pinned thread.", 'I passed that along to the builder.', 'I sent him the summary.']) assert.equal(claimsSend(t), true, t)

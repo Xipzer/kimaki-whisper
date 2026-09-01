@@ -29,6 +29,7 @@ import { execFile, spawn } from 'node:child_process'
 import { loadConfig, log } from './config.js'
 import { diag, pruneDiagnostics } from './diag.js'
 import { AttentionQueue } from './attention/queue.js'
+import { DispatchLedger } from './state/ledgers.js'
 import { SYSTEM_PROMPT } from './prompt.js'
 import { TOOLS } from './tools/specs.js'
 import { executeTelegramTool } from './tools/telegram.js'
@@ -163,7 +164,7 @@ async function executeTool(name: string, args: Record<string, unknown>): Promise
   log(`wendy tool: ${name}(${JSON.stringify(args).slice(0, 120)})`)
   const t0 = Date.now()
   const result = await executeToolInner(name, args)
-  for (const m of result.matchAll(SESSION_ID)) markVerified(m[0])
+  for (const m of result.matchAll(SESSION_ID)) ledger.markVerified(m[0])
   diag('tool', { name, args, ms: Date.now() - t0, result: result.slice(0, 2000) })
   if (result.startsWith('ERROR')) diag('tool_error', { name, err: result.slice(0, 150) })
   return result
@@ -630,8 +631,7 @@ export async function think(userText: string, onSentence?: (s: string) => void):
                 const isSend = isDispatchTool(tc.function.name)
                 const targetId = String(args.session_id ?? '')
                 if (isThreadDispatchTool(tc.function.name) && isSessionId(targetId)) {
-                  const seen = verifiedIds.get(targetId)
-                  if (!seen || Date.now() - seen > 10 * 60000) {
+                  if (!ledger.isVerified(targetId)) {
                     // Session ids share long prefixes (ses_fb35bcab... vs
                     // ses_fb3f7013...) - recalled-from-memory ids land in
                     // sibling threads. Force a fresh lookup instead.
@@ -645,10 +645,10 @@ export async function think(userText: string, onSentence?: (s: string) => void):
                 }
                 if (isSend) {
                   const key = dispatchKey(tc.function.name, args)
-                  const dup = recentDispatches.find((d) => d.key === key && Date.now() - d.ts < 10 * 60000)
-                  if (dup) {
-                    diag('duplicate_send_blocked', { tool: tc.function.name, agoS: Math.round((Date.now() - dup.ts) / 1000) })
-                    return `DUPLICATE BLOCKED: you already sent this exact content to that destination ${Math.round((Date.now() - dup.ts) / 1000)}s ago and it was delivered. Nothing was re-sent. It is already in flight - do not repeat it; reword substantially only if the owner explicitly asks to send again.`
+                  const dupAge = ledger.duplicateAgeS(key)
+                  if (dupAge !== null) {
+                    diag('duplicate_send_blocked', { tool: tc.function.name, agoS: dupAge })
+                    return `DUPLICATE BLOCKED: you already sent this exact content to that destination ${dupAge}s ago and it was delivered. Nothing was re-sent. It is already in flight - do not repeat it; reword substantially only if the owner explicitly asks to send again.`
                   }
                 }
                 if (blockedSendsThisTurn >= 2 && (tc.function.name === 'telegram_send' || tc.function.name === 'telegram_reply')) {
@@ -658,8 +658,7 @@ export async function think(userText: string, onSentence?: (s: string) => void):
                 const r = await executeTool(tc.function.name, args)
                 if (r.startsWith('BLOCKED') && (tc.function.name === 'telegram_send' || tc.function.name === 'telegram_reply')) blockedSendsThisTurn++
                 if (isSend && dispatchSucceeded(r)) {
-                  recentDispatches.push({ key: dispatchKey(tc.function.name, args), ts: Date.now(), tool: tc.function.name })
-                  if (recentDispatches.length > 40) recentDispatches.splice(0, recentDispatches.length - 40)
+                  ledger.recordSend(dispatchKey(tc.function.name, args), tc.function.name)
                 }
                 return r
               })()
@@ -681,7 +680,7 @@ export async function think(userText: string, onSentence?: (s: string) => void):
     // Hallucinated dispatch guard: "Sent it" with zero send tools called this
     // turn means NOTHING left (seen live: owner waited on a dispatch that never
     // existed). Deterministic check - the ledger cannot be sweet-talked.
-    const recentSendBacksClaim = recentDispatches.some((d) => Date.now() - d.ts < 10 * 60000)
+    const recentSendBacksClaim = ledger.sentRecently()
     if (!claimChecked && !dispatchToolsRun.size && !recentSendBacksClaim && hop < MAX_HOPS - 2 && claimsSend(text)) {
       claimChecked = true
       log('wendy: send claim with empty dispatch ledger - forcing the real call')
@@ -813,7 +812,7 @@ async function refreshThreadIndexInner(): Promise<void> {
     for (const e of next) {
       const a = ambient.get(e.id)
       if (!a || a.hotStreak < 2 || a.stallNotified) continue
-      if (!everDispatched.has(e.id)) continue // her dispatched work only - cron tasks and ambient threads are not "stalled"
+      if (!ledger.everDispatched(e.id)) continue // her dispatched work only - cron tasks and ambient threads are not "stalled"
       const idleMs = Date.now() - (a.lastUpd || 0)
       if (idleMs > 4 * 3600000 && idleMs < 48 * 3600000) {
         a.stallNotified = true
@@ -1272,33 +1271,11 @@ function shouldAnnounce(id: string, tail: string): boolean {
 // completes and exits the MOMENT output concludes - no polling latency, no
 // digest cooldown. Completions announce in arrival order (FIFO by finish).
 const finishWatches = new Set<string>()
-const everDispatched = new Set<string>()
-type DispatchEntry = { label: string; at: number; done?: number }
-const dispatchStatus = new Map<string, DispatchEntry>()
-function dispatchStatusPath(): string { return path.join(workspaceDir(), 'dispatch-status.json') }
-function saveDispatchStatus(): void {
-  try { fs.writeFileSync(dispatchStatusPath(), JSON.stringify([...dispatchStatus.entries()])) } catch {}
-}
-function loadDispatchStatus(): void {
-  try {
-    for (const [k, v] of JSON.parse(fs.readFileSync(dispatchStatusPath(), 'utf-8')) as Array<[string, DispatchEntry]>) dispatchStatus.set(k, v)
-  } catch {}
-}
-/** Deterministic ground truth for greeting/status turns - memory lies, this does not. */
-function dispatchGroundTruth(): string {
-  const now = Date.now()
-  const recent = [...dispatchStatus.entries()].filter(([, v]) => now - v.at < 4 * 3600000)
-  if (!recent.length) return ''
-  const done = recent.filter(([, v]) => v.done).map(([, v]) => `"${v.label}" FINISHED ${Math.max(1, Math.round((now - (v.done ?? now)) / 60000))}m ago`)
-  const running = recent.filter(([, v]) => !v.done).map(([, v]) => `"${v.label}" running ${Math.round((now - v.at) / 60000)}m`)
-  return ` GROUND TRUTH on dispatched work (TRUST THIS over your memory - never claim something is still running unless it is in the running list, and never promise to announce work listed as FINISHED - he has likely already read it): ${done.length ? `FINISHED: ${done.join('; ')}. ` : ''}${running.length ? `RUNNING: ${running.join('; ')}.` : ''}`
-}
+const ledger = new DispatchLedger(path.join(workspaceDir(), 'dispatch-status.json'))
 function armFinishWatch(id: string, label: string, reArmed = false): void {
-  if (id) everDispatched.add(id)
-  if (!id || finishWatches.has(id)) return
+  if (!id || finishWatches.has(id)) { if (id) ledger.record(id, label || threadIdent(id).slice(0, 60), true); return }
   finishWatches.add(id)
-  if (!reArmed || !dispatchStatus.has(id)) dispatchStatus.set(id, { label: label || threadIdent(id).slice(0, 60), at: dispatchStatus.get(id)?.at ?? Date.now() })
-  saveDispatchStatus()
+  ledger.record(id, label || threadIdent(id).slice(0, 60), reArmed)
   diag('finish_watch_armed', { id, reArmed })
   // Delay before attaching: waiting on a session that has not begun processing
   // yet returns immediately with stale content (a false "finished").
@@ -1312,8 +1289,7 @@ function armFinishWatch(id: string, label: string, reArmed = false): void {
       // (the dispatch had not started or the inline reply already covered it) -
       // the 45s pollers own that case. Only announce believable completions.
       if (ranMs < 8000 && !reArmed) { diag('finish_watch_instant_ignored', { id, ms: ranMs }); return }
-      const entry = dispatchStatus.get(id)
-      if (entry) { entry.done = Date.now(); saveDispatchStatus() }
+      ledger.markDone(id)
       diag('finish_watch_fired', { id, ms: ranMs, reArmed })
       announce(`[MED] "${labelFor(id, label)}" just FINISHED its output - the full result is ready. Read it with read_session and report to the owner.`, 'interrupt', id)
     })
@@ -1620,11 +1596,9 @@ let lastBusyAck = 0
 let lastRelayAck = 0
 // Ids proven real in the last few minutes by an actual lookup/read - a
 // dispatch to anything else is memory, and memory confuses sibling ids.
-const verifiedIds = new Map<string, number>()
-function markVerified(id: string): void { if (isSessionId(id)) verifiedIds.set(id, Date.now()) }
+
 let lastConvoActivity = 0
 let supersededAnswer: { text: string; at: number } | null = null
-const recentDispatches: { key: string; ts: number; tool: string }[] = []
 let lastBgDelivery = 0
 // Deliver background results only when the conversation has space:
 // nobody talking, nothing playing, no turn running, >10s since last exchange.
@@ -1980,7 +1954,7 @@ async function joinAndServe(channel: VoiceBasedChannel, userId: string): Promise
   lastGreetedAt = Date.now()
   const totalHeld = attention.count('held')
   const hi = attention.highCount('held')
-  void runTurn(`[The owner just joined voice. Greet them briefly and naturally - ONE short line, warm but efficient, no jokes or bits. Vary it; never a stock phrase.${dispatchGroundTruth()} EXCEPTION: if the recent history shows a restart interrupted them mid-speech, acknowledge that first and respond to what they had been saying.${totalHeld ? ` ${hi ? `One queued update is HIGH priority - mention that single fact casually (no contents yet).` : `Updates are queued but NONE are high priority - do NOT mention the queue, counts, or offer a rundown; he knows he can ask. Just greet.`}` : ''}]`)
+  void runTurn(`[The owner just joined voice. Greet them briefly and naturally - ONE short line, warm but efficient, no jokes or bits. Vary it; never a stock phrase.${ledger.groundTruth()} EXCEPTION: if the recent history shows a restart interrupted them mid-speech, acknowledge that first and respond to what they had been saying.${totalHeld ? ` ${hi ? `One queued update is HIGH priority - mention that single fact casually (no contents yet).` : `Updates are queued but NONE are high priority - do NOT mention the queue, counts, or offer a rundown; he knows he can ask. Just greet.`}` : ''}]`)
 }
 
 function leave(): void {
@@ -1996,6 +1970,10 @@ export function initWendy(client: Client): void {
     return
   }
   clientRef = client
+  ledger.load()
+  // Restarts kill finish-waiter child processes silently - re-arm every
+  // dispatch that never reported done (quick exit on re-arm = legit finish).
+  for (const [id, v] of ledger.unfinished(45 * 60000)) setTimeout(() => armFinishWatch(id, v.label, true), 15000)
   const followOwner = (oldState: VoiceState, newState: VoiceState): void => {
     if (newState.member?.user.id !== owner) return
     if (dormant) return

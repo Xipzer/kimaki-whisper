@@ -1,6 +1,6 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
-import { AttentionQueue } from '../src/attention/queue.ts'
+import { AttentionQueue } from '../dist/attention/queue.js'
 
 test('caps: held keeps newest 12, pending newest 8, live/digest unbounded', () => {
   const q = new AttentionQueue()
