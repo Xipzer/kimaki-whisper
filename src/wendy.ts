@@ -28,6 +28,7 @@ import { Readable } from 'node:stream'
 import { execFile, spawn } from 'node:child_process'
 import { loadConfig, log } from './config.js'
 import { diag, pruneDiagnostics } from './diag.js'
+import { AttentionQueue } from './attention/queue.js'
 import { SYSTEM_PROMPT } from './prompt.js'
 import { TOOLS } from './tools/specs.js'
 import { isDispatchTool, isThreadDispatchTool, dispatchSucceeded, claimsSend, soundsLikePromise, dispatchKey, collapsePriorityTags, isUrgentUpdate, queueDedupeMarkers, repairHistory, SESSION_ID, isSessionId, stripReminderPrefix } from './brain/guards.js'
@@ -1053,11 +1054,9 @@ setInterval(() => void runTaskSlice(), 20000).unref()
 // ── FEATURE A: watchlist - passive notifications on thread replies ──
 type Watch = { id: string; label: string; fp: string; baselined: boolean; expires: number; seen?: boolean; idle?: number; more?: boolean }
 const watchlist: Watch[] = []
-const pendingAnnouncements: string[] = []
-const digestQueue: string[] = []
+const attention = new AttentionQueue()
 // ── silence mode: OWNER-ONLY, explicitly requested, never self-activated ──
 let silencedUntil = 0
-const heldWhileSilent: string[] = []
 let dnd = false
 let dormant = false
 let clientRef: Client | null = null
@@ -1165,7 +1164,7 @@ export function wendySnapshot(): Snapshot {
     tgProfiles = Object.keys(JSON.parse(fs.readFileSync(path.join(d, 'profiles.json'), 'utf-8')) as object).length
     tgMuted = Object.keys(JSON.parse(fs.readFileSync(path.join(d, 'people-policy.json'), 'utf-8')) as object).length
   } catch {}
-  const allHeld = [...digestQueue, ...convoEvents, ...pendingAnnouncements, ...heldWhileSilent]
+  const allHeld = attention.all()
   return {
     mode: dormant ? 'ASLEEP' : connection ? 'IN VOICE' : 'AWAKE',
     inVc: !!connection, dnd, silencedMin: silencedUntil > now ? Math.ceil((silencedUntil - now) / 60000) : 0,
@@ -1192,7 +1191,7 @@ export async function wendyStatus(): Promise<string> {
   const silLeft = silencedUntil > Date.now() ? Math.ceil((silencedUntil - Date.now()) / 60000) : 0
   const idxAge = lastIndexRefresh ? Math.round((Date.now() - lastIndexRefresh) / 60000) : -1
   const highs = highCount()
-  const queued = digestQueue.length + convoEvents.length + pendingAnnouncements.length + heldWhileSilent.length
+  const queued = attention.total()
   return [
     `mode: ${dormant ? 'ASLEEP' : connection ? 'in voice' : 'awake, not in voice'}`,
     `brain: ${brain ? 'up' : 'DOWN'}${lastBrainTps ? ` | last speed ${lastBrainTps} tok/s (${Math.round((Date.now() - lastBrainTpsAt) / 60000)}m ago)` : ''}`,
@@ -1206,7 +1205,7 @@ export async function wendyStatus(): Promise<string> {
 let lastDeliveredAt = 0
 let lastHighNudge = 0
 function highCount(): number {
-  return [...digestQueue, ...convoEvents, ...pendingAnnouncements, ...heldWhileSilent].filter((x) => x.includes('[HIGH]')).length
+  return attention.highCount()
 }
 // DND pressure valve: the ONLY thing that speaks under do-not-disturb
 setInterval(() => {
@@ -1228,8 +1227,8 @@ setInterval(() => {
     saveModeState()
     resumeOnContact = true
     log('wendy: silence period expired')
-    if (connection && heldWhileSilent.length) {
-      void speak(`I'm back - ${heldWhileSilent.length === 1 ? 'one thing' : heldWhileSilent.length + ' things'} moved while I was quiet. Want the rundown?`)
+    if (connection && attention.has('held')) {
+      void speak(`I'm back - ${attention.count('held') === 1 ? 'one thing' : attention.count('held') + ' things'} moved while I was quiet. Want the rundown?`)
     }
   }
 }, 20000).unref()
@@ -1237,11 +1236,7 @@ function tierFor(sessionId: string): NotifyTier {
   for (const r of Object.values(loadRoutes())) if (r.id === sessionId) return r.tier ?? 'digest'
   return 'digest'
 }
-function dropQueuedMatching(marker: string): void {
-  for (const q of [digestQueue, pendingAnnouncements, heldWhileSilent]) {
-    for (let i = q.length - 1; i >= 0; i--) if (q[i].includes(marker)) q.splice(i, 1)
-  }
-}
+function dropQueuedMatching(marker: string): void { attention.dropMatching(marker) }
 let lastTextPing = 0
 function textPingOwner(line: string): void {
   // He is not in voice - a queued item he is WAITING on must still reach him.
@@ -1268,32 +1263,23 @@ function announce(text: string, tier: NotifyTier, srcId?: string): void {
   const hm = new Date().toISOString().slice(11, 16)
   text = `${text} [queued ${hm}Z${srcId ? ` src:${srcId}` : ''}]`
   diag('announce', { tier, text: text.slice(0, 300), inVc: !!connection })
-  if (isSilenced()) {
-    heldWhileSilent.push(text)
-    if (heldWhileSilent.length > 12) heldWhileSilent.splice(0, heldWhileSilent.length - 12)
-    return
-  }
-  if (tier === 'interrupt' && connection) { convoEvents.push(text); return }
+  if (isSilenced()) { attention.push('held', text); return }
+  if (tier === 'interrupt' && connection) { attention.push('live', text); return }
   // Owner absent + something he is waiting on: voice delivery is impossible,
   // so escalate to a text ping (observed: 'correct the record the second it
   // lands' silently became 'wait until he rejoins').
   if (!connection && isUrgentUpdate(text)) {
     textPingOwner(text.replace(/\[queued [^\]]+\]/g, '').trim())
   }
-  if (tier === 'onjoin' || !connection || isSilenced()) {
-    pendingAnnouncements.push(text)
-    if (pendingAnnouncements.length > 8) pendingAnnouncements.splice(0, pendingAnnouncements.length - 8)
-    return
-  }
-  digestQueue.push(text)
+  if (tier === 'onjoin' || !connection || isSilenced()) { attention.push('pending', text); return }
+  attention.push('digest', text)
 }
 let lastDigestAsk = 0
 setInterval(() => {
-  if (!digestQueue.length) return
-  const items = digestQueue.splice(0, 6)
+  if (!attention.has('digest')) return
+  const items = attention.take('digest', 6)
   if (connection && !busy && !isSilenced()) {
-    heldWhileSilent.push(...items)
-    if (heldWhileSilent.length > 12) heldWhileSilent.splice(0, heldWhileSilent.length - 12)
+    attention.push('held', ...items)
     if (!dnd && Date.now() > askSnoozedUntil && Date.now() - lastDeliveredAt > 10 * 60 * 1000 && Date.now() - lastDigestAsk > 30 * 60 * 1000) {
       lastDigestAsk = Date.now()
       const asks = [
@@ -1305,8 +1291,7 @@ setInterval(() => {
       void speak(asks[Math.floor(Math.random() * asks.length)])
     }
   } else {
-    pendingAnnouncements.push(...items)
-    if (pendingAnnouncements.length > 8) pendingAnnouncements.splice(0, pendingAnnouncements.length - 8)
+    attention.push('pending', ...items)
   }
 }, 15 * 60 * 1000).unref()
 function fingerprint(tail: string): string { return tail.slice(-3000) }
@@ -1708,14 +1693,13 @@ function markVerified(id: string): void { if (isSessionId(id)) verifiedIds.set(i
 let lastConvoActivity = 0
 let supersededAnswer: { text: string; at: number } | null = null
 const recentDispatches: { key: string; ts: number; tool: string }[] = []
-const convoEvents: string[] = []
 let lastBgDelivery = 0
 // Deliver background results only when the conversation has space:
 // nobody talking, nothing playing, no turn running, >10s since last exchange.
 setInterval(() => {
-  if (!convoEvents.length || !connection || busy || capturing || isSilenced() || playerActive() || resumeOnContact) return
+  if (!attention.has('live') || !connection || busy || capturing || isSilenced() || playerActive() || resumeOnContact) return
   if (dnd || Date.now() < askSnoozedUntil) {
-    if (convoEvents.length > 15) convoEvents.splice(0, convoEvents.length - 15)
+    attention.trim('live', 15)
     return
   }
   if (Date.now() - lastConvoActivity < 10000) return
@@ -1723,10 +1707,10 @@ setInterval(() => {
   // WAITING on - the 4-min anti-spam cooldown exists for routine chatter and
   // must not throttle completion pings (observed: three FINISHED notices sat
   // 3+ minutes behind a routine batch while the owner sat in silence).
-  const urgent = convoEvents.some(isUrgentUpdate)
+  const urgent = attention.some('live', isUrgentUpdate)
   if (!urgent && Date.now() - lastBgDelivery < 4 * 60 * 1000) return
   lastBgDelivery = Date.now()
-  const events = convoEvents.splice(0, 4)
+  const events = attention.take('live', 4)
   lastDeliveredAt = Date.now()
   log(`wendy: conversation idle - delivering ${events.length} background event(s)`)
   diag('bg_delivery', { count: events.length })
@@ -1774,20 +1758,20 @@ async function runTurn(text: string): Promise<void> {
         silencedUntil = 0
         saveModeState()
         log('wendy: unmuted by owner voice command')
-        await speak(heldWhileSilent.length
-          ? `I'm back - ${heldWhileSilent.length === 1 ? 'one thing' : heldWhileSilent.length + ' things'} moved while I was quiet. Want the rundown?`
+        await speak(attention.has('held')
+          ? `I'm back - ${attention.count('held') === 1 ? 'one thing' : attention.count('held') + ' things'} moved while I was quiet. Want the rundown?`
           : `I'm back.`)
       } else log(`wendy: silenced - dropped "${text.slice(0, 60)}"`)
       return
     }
     resumeOnContact = false
-    if (Date.now() - joinedAt < 90000 && !text.startsWith('[') && (heldWhileSilent.length || convoEvents.length || digestQueue.length || pendingAnnouncements.length)) {
+    if (Date.now() - joinedAt < 90000 && !text.startsWith('[') && attention.total() > 0) {
       // Fresh join and he is TALKING: his first words are his agenda. Serve
       // them clean - the queue stays held and injects on a later turn/lull.
       diag('join_priority_clean_turn', {})
       text = `[The owner joined moments ago and this is his FIRST real input - answer EXACTLY what he says and nothing else. Do NOT deliver, mention, or allude to any queued updates this turn unless he explicitly asks for them.]\n${text}`
-    } else if ((heldWhileSilent.length || (dnd && (convoEvents.length || digestQueue.length))) && !text.startsWith('[')) {
-      const held = [...heldWhileSilent.splice(0), ...(dnd ? [...convoEvents.splice(0), ...digestQueue.splice(0)] : [])]
+    } else if ((attention.has('held') || (dnd && (attention.has('live') || attention.has('digest')))) && !text.startsWith('[')) {
+      const held = [...attention.take('held'), ...(dnd ? [...attention.take('live'), ...attention.take('digest')] : [])]
       lastDeliveredAt = Date.now()
       text = `[Context - updates queued while you were quiet or the owner was away (each tagged HIGH/MED/LOW): ${held.join(' | ')}. You may have offered a catch-up. Deliver HIGH items first, then MED; skip LOW unless they want everything. Items carry [queued HH:MMZ src:ses_...] - for items older than ~3 minutes, read_session the src first and deliver the CURRENT state, not the stale summary. TELEGRAM items carry <tg:ChatName>: ALWAYS telegram_chat that chat first and report the CURRENT state - a queued chat summary is usually several messages behind by the time you speak it. Never speak the bracketed metadata or the <tg:...> marker. Updates may describe YOU in third person ("Wendy", "the assistant") - you are still Wendy speaking directly to your owner; never slip into narrating yourself from the outside. NO editorial framing or preamble ("two things worth knowing", "all polish, nothing structural") - open directly with the first item's substance; verdicts only if asked. Dismissal rule: ONLY treat their words as declining updates if you ACTUALLY offered updates and they are clearly responding to that offer - if you never offered, their words are about something else entirely: just answer them (the queued items are silent context, not the topic). A genuine dismissal -> snooze_updates and drop the subject instantly. If the owner wants everything, deliver it concisely. If they ask for the most urgent or most recent only, REASON over the list yourself, pick the single most important item (breakages and blockers beat progress notes; newest beats oldest), deliver just that one, and stop - no extra digging, no spillover into other updates unless asked.]\n${text}`
     }
@@ -2056,18 +2040,14 @@ async function joinAndServe(channel: VoiceBasedChannel, userId: string): Promise
     })()
   })
   listenTo(channel, userId)
-  const queued = pendingAnnouncements.splice(0)
-  if (queued.length) {
-    heldWhileSilent.push(...queued)
-    if (heldWhileSilent.length > 12) heldWhileSilent.splice(0, heldWhileSilent.length - 12)
-  }
+  attention.promote('pending', 'held')
   if (Date.now() - lastGreetedAt < 90000) {
     log('wendy: greeting suppressed (already greeted moments ago)')
     return
   }
   lastGreetedAt = Date.now()
-  const totalHeld = heldWhileSilent.length
-  const hi = heldWhileSilent.filter((x) => x.includes('[HIGH]')).length
+  const totalHeld = attention.count('held')
+  const hi = attention.highCount('held')
   void runTurn(`[The owner just joined voice. Greet them briefly and naturally - ONE short line, warm but efficient, no jokes or bits. Vary it; never a stock phrase.${dispatchGroundTruth()} EXCEPTION: if the recent history shows a restart interrupted them mid-speech, acknowledge that first and respond to what they had been saying.${totalHeld ? ` ${hi ? `One queued update is HIGH priority - mention that single fact casually (no contents yet).` : `Updates are queued but NONE are high priority - do NOT mention the queue, counts, or offer a rundown; he knows he can ask. Just greet.`}` : ''}]`)
 }
 
