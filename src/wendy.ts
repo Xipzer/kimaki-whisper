@@ -2608,7 +2608,12 @@ setInterval(() => {
     return
   }
   if (Date.now() - lastConvoActivity < 10000) return
-  if (Date.now() - lastBgDelivery < 4 * 60 * 1000) return
+  // Urgency bypass: a finished dispatch or [HIGH] item is something he is
+  // WAITING on - the 4-min anti-spam cooldown exists for routine chatter and
+  // must not throttle completion pings (observed: three FINISHED notices sat
+  // 3+ minutes behind a routine batch while the owner sat in silence).
+  const urgent = convoEvents.some((x) => x.includes('just FINISHED') || x.includes('[HIGH]') || x.includes('Background task finished'))
+  if (!urgent && Date.now() - lastBgDelivery < 4 * 60 * 1000) return
   lastBgDelivery = Date.now()
   const events = convoEvents.splice(0, 4)
   lastDeliveredAt = Date.now()
