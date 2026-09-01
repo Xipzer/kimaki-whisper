@@ -2766,9 +2766,10 @@ function listenTo(channel: VoiceBasedChannel, userId: string): void {
       for (let i = 0; i < c.length; i += 8) { const v = c.readInt16LE(i - (i % 2)); sumSqLive += v * v }
       // barge-in: ~0.7s of sustained AND genuinely loud speech while she's talking.
       // Duration alone false-triggered on fan hum / speaker bleed (seen live at RMS 48).
-      if (!interrupted && bytes > 67200 && playerActive()) {
+      const joinGrace = Date.now() - joinedAt < 90000
+      if (!interrupted && bytes > (joinGrace ? 24000 : 67200) && playerActive()) {
         const rmsLive = Math.sqrt(sumSqLive / (bytes / 8))
-        if (rmsLive >= calBargeGate) {
+        if (rmsLive >= calBargeGate * (joinGrace ? 0.55 : 1)) {
           interrupted = true
           cutSpeech = interruptSpeech()
           log('wendy: barge-in - owner spoke over me, playback cut')
@@ -2829,7 +2830,8 @@ function listenTo(channel: VoiceBasedChannel, userId: string): void {
         if (isSilenced()) diag('dropped', { text: text.slice(0, 60), why: 'silenced', noSpeech: +noSpeech.toFixed(2), logprob: +logprob.toFixed(2) })
         // Whisper's own confidence: silence-hallucinations carry high no_speech_prob
         // and low avg_logprob. Real speech is typically logprob > -0.5, noSpeech < 0.3.
-        if (noSpeech > (borderline ? 0.4 : 0.55) || logprob < (borderline ? -0.7 : -0.9)) {
+        const joinLenient = Date.now() - joinedAt < 20000
+        if (!joinLenient && (noSpeech > (borderline ? 0.4 : 0.55) || logprob < (borderline ? -0.7 : -0.9))) {
           diag('dropped', { text: text.slice(0, 60), why: 'low_confidence', noSpeech: +noSpeech.toFixed(2), logprob: +logprob.toFixed(2) })
           resumeIfPhantom()
           return
@@ -2893,12 +2895,14 @@ function listenTo(channel: VoiceBasedChannel, userId: string): void {
 
 let currentChannelId = ''
 let lastGreetedAt = 0
+let joinedAt = 0
 async function joinAndServe(channel: VoiceBasedChannel, userId: string): Promise<void> {
   if (connection && currentChannelId === channel.id) {
     log('wendy: already in that channel - ignoring duplicate join')
     return
   }
   currentChannelId = channel.id
+  joinedAt = Date.now()
   leave()
   capturing = false
   pendingUtterance = null
