@@ -31,9 +31,10 @@ import { diag, pruneDiagnostics } from './diag.js'
 import { AttentionQueue } from './attention/queue.js'
 import { SYSTEM_PROMPT } from './prompt.js'
 import { TOOLS } from './tools/specs.js'
+import { executeTelegramTool } from './tools/telegram.js'
 import { isDispatchTool, isThreadDispatchTool, dispatchSucceeded, claimsSend, soundsLikePromise, dispatchKey, collapsePriorityTags, isUrgentUpdate, queueDedupeMarkers, repairHistory, SESSION_ID, isSessionId, stripReminderPrefix } from './brain/guards.js'
 import { brainUrl, brainRequest, brainFetch, brainText, brainHealth, type BrainOut } from './brain/client.js'
-import { startTelegram, telegramInbox, setTelegramFlaggedHandler, telegramGroupsStatus, telegramGroupSetMuted, telegramSend, telegramGrant, telegramSetTone, telegramPolicyStatus, telegramAutoDrain, telegramLowBudgets, setTelegramAutonomousHandler, telegramPendingSummaries, telegramDrainChat, telegramDrainChatStats, telegramWatchMode, telegramChatDigest, telegramWho, telegramRoster, telegramMutePerson, telegramPendingPeopleSummaries, telegramDrainPerson, telegramPeopleStatus, telegramProfile, telegramProfileList, telegramProfilesDue, telegramProfileWrite, telegramProfileNote, telegramChatMembers, telegramPrivacyFor, telegramSetPrivacy, telegramPrivacyMode, telegramPrivacyStatus, telegramEffectiveTone, telegramSetPersonTone, telegramSentLog, telegramRoomContext, telegramPersonThread, setOwnerAutonomy, ownerAutonomyStatus, telegramReplyHere, setReplyTarget, telegramSearch } from './telegram.js'
+import { startTelegram, setTelegramFlaggedHandler, telegramAutoDrain, telegramLowBudgets, setTelegramAutonomousHandler, telegramPendingSummaries, telegramDrainChatStats, telegramPendingPeopleSummaries, telegramDrainPerson, telegramProfile, telegramProfilesDue, telegramProfileWrite, telegramPrivacyFor, telegramEffectiveTone, telegramRoomContext, telegramPersonThread, setReplyTarget } from './telegram.js'
 
 // ── config accessors ─────────────────────────────────────────────
 function ownerId(): string | undefined {
@@ -168,6 +169,8 @@ async function executeTool(name: string, args: Record<string, unknown>): Promise
   return result
 }
 async function executeToolInner(name: string, args: Record<string, unknown>): Promise<string> {
+  const tg = await executeTelegramTool(name, args)
+  if (tg !== undefined) return tg
   if (name === 'list_projects') {
     return runKimaki(['project', 'list', '--json'])
   }
@@ -379,77 +382,6 @@ async function executeToolInner(name: string, args: Record<string, unknown>): Pr
     return hits.length
       ? hits.map((e) => `[${new Date(e.ts).toISOString().slice(0, 10)}] ${e.s}`).join('\n')
       : 'nothing in the journal matches - it may predate my memory system or genuinely never came up'
-  }
-  if (name === 'telegram_reply') {
-    return telegramReplyHere(String(args.text ?? ''), args.quote === undefined ? true : Boolean(args.quote))
-  }
-  if (name === 'telegram_send') {
-    return telegramSend(String(args.target ?? ''), String(args.text ?? ''))
-  }
-  if (name === 'owner_autonomy') {
-    return setOwnerAutonomy(String(args.scope ?? 'chat'), String(args.mode ?? 'enforced'), args.target as string | undefined)
-  }
-  if (name === 'owner_autonomy_status') {
-    return ownerAutonomyStatus()
-  }
-  if (name === 'telegram_privacy') {
-    return telegramSetPrivacy(String(args.target ?? ''), String(args.level ?? 'open'))
-  }
-  if (name === 'privacy_mode') {
-    return telegramPrivacyMode(Boolean(args.on))
-  }
-  if (name === 'telegram_privacy_status') {
-    return telegramPrivacyStatus()
-  }
-  if (name === 'telegram_watch') {
-    return telegramWatchMode(String(args.target ?? ''), String(args.mode ?? 'threshold'), Number(args.threshold) || undefined)
-  }
-  if (name === 'person_profile') {
-    const n = String(args.name ?? '').trim()
-    if (!n) return telegramProfileList()
-    return telegramProfile(n) || `no profile for "${n}" yet`
-  }
-  if (name === 'person_tone') {
-    return telegramSetPersonTone(String(args.name ?? ''), String(args.tone ?? 'professional'))
-  }
-  if (name === 'person_note') {
-    return telegramProfileNote(String(args.name ?? ''), String(args.note ?? ''))
-  }
-  if (name === 'telegram_mute_person') {
-    return telegramMutePerson(String(args.name ?? ''), args.count === undefined ? undefined : Number(args.count))
-  }
-  if (name === 'telegram_chat') {
-    return telegramChatDigest(String(args.target ?? ''), Math.min(Math.max(Number(args.count) || 25, 5), 300), Boolean(args.all) || !!args.hours, Number(args.hours) || undefined)
-  }
-  if (name === 'telegram_sent') {
-    return telegramSentLog(Math.min(Math.max(Number(args.limit) || 12, 1), 50))
-  }
-  if (name === 'telegram_members') {
-    return telegramChatMembers(String(args.target ?? ''))
-  }
-  if (name === 'telegram_search') {
-    return telegramSearch(String(args.query ?? ''), { chat: args.chat as string | undefined, from: args.from as string | undefined, limit: Number(args.limit) || undefined })
-  }
-  if (name === 'telegram_who') {
-    const direct = await telegramWho(String(args.name ?? ''), args.chat as string | undefined)
-    return direct.startsWith('no handle') ? `${direct}\n\nHandles currently on record:\n${telegramRoster().slice(0, 600)}` : direct
-  }
-  if (name === 'telegram_grant') {
-    return telegramGrant(String(args.target ?? ''), Number(args.count ?? 0), args.tone as string | undefined, args.scope as string | undefined, Number(args.hours) || 12, args.person as string | undefined)
-  }
-  if (name === 'telegram_tone') {
-    return telegramSetTone(String(args.target ?? ''), String(args.tone ?? 'professional'))
-  }
-  if (name === 'telegram_policy') {
-    return telegramPolicyStatus()
-  }
-  if (name === 'telegram_groups') {
-    const action = String(args.action ?? 'list')
-    if (action === 'list') return telegramGroupsStatus()
-    return telegramGroupSetMuted(String(args.group ?? ''), action === 'mute')
-  }
-  if (name === 'telegram_inbox') {
-    return telegramInbox(Math.min(Math.max(Number(args.hours) || 24, 1), 168))
   }
   if (name === 'brain_health') {
     const url = brainUrl()
