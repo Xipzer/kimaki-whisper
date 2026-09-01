@@ -2272,11 +2272,33 @@ function shouldAnnounce(id: string, tail: string): boolean {
 // digest cooldown. Completions announce in arrival order (FIFO by finish).
 const finishWatches = new Set<string>()
 const everDispatched = new Set<string>()
-function armFinishWatch(id: string, label: string): void {
+type DispatchEntry = { label: string; at: number; done?: number }
+const dispatchStatus = new Map<string, DispatchEntry>()
+function dispatchStatusPath(): string { return path.join(workspaceDir(), 'dispatch-status.json') }
+function saveDispatchStatus(): void {
+  try { fs.writeFileSync(dispatchStatusPath(), JSON.stringify([...dispatchStatus.entries()])) } catch {}
+}
+function loadDispatchStatus(): void {
+  try {
+    for (const [k, v] of JSON.parse(fs.readFileSync(dispatchStatusPath(), 'utf-8')) as Array<[string, DispatchEntry]>) dispatchStatus.set(k, v)
+  } catch {}
+}
+/** Deterministic ground truth for greeting/status turns - memory lies, this does not. */
+function dispatchGroundTruth(): string {
+  const now = Date.now()
+  const recent = [...dispatchStatus.entries()].filter(([, v]) => now - v.at < 4 * 3600000)
+  if (!recent.length) return ''
+  const done = recent.filter(([, v]) => v.done).map(([, v]) => `"${v.label}" FINISHED ${Math.max(1, Math.round((now - (v.done ?? now)) / 60000))}m ago`)
+  const running = recent.filter(([, v]) => !v.done).map(([, v]) => `"${v.label}" running ${Math.round((now - v.at) / 60000)}m`)
+  return ` GROUND TRUTH on dispatched work (TRUST THIS over your memory - never claim something is still running unless it is in the running list, and never promise to announce work listed as FINISHED - he has likely already read it): ${done.length ? `FINISHED: ${done.join('; ')}. ` : ''}${running.length ? `RUNNING: ${running.join('; ')}.` : ''}`
+}
+function armFinishWatch(id: string, label: string, reArmed = false): void {
   if (id) everDispatched.add(id)
   if (!id || finishWatches.has(id)) return
   finishWatches.add(id)
-  diag('finish_watch_armed', { id })
+  if (!reArmed || !dispatchStatus.has(id)) dispatchStatus.set(id, { label: label || threadIdent(id).slice(0, 60), at: dispatchStatus.get(id)?.at ?? Date.now() })
+  saveDispatchStatus()
+  diag('finish_watch_armed', { id, reArmed })
   // Delay before attaching: waiting on a session that has not begun processing
   // yet returns immediately with stale content (a false "finished").
   setTimeout(() => {
@@ -2288,8 +2310,10 @@ function armFinishWatch(id: string, label: string): void {
       // An exit within seconds means it attached to an already-idle session
       // (the dispatch had not started or the inline reply already covered it) -
       // the 45s pollers own that case. Only announce believable completions.
-      if (ranMs < 8000) { diag('finish_watch_instant_ignored', { id, ms: ranMs }); return }
-      diag('finish_watch_fired', { id, ms: ranMs })
+      if (ranMs < 8000 && !reArmed) { diag('finish_watch_instant_ignored', { id, ms: ranMs }); return }
+      const entry = dispatchStatus.get(id)
+      if (entry) { entry.done = Date.now(); saveDispatchStatus() }
+      diag('finish_watch_fired', { id, ms: ranMs, reArmed })
       announce(`[MED] "${labelFor(id, label)}" just FINISHED its output - the full result is ready. Read it with read_session and report to the owner.`, 'interrupt', id)
     })
   }, 12000)
@@ -2978,7 +3002,7 @@ async function joinAndServe(channel: VoiceBasedChannel, userId: string): Promise
   lastGreetedAt = Date.now()
   const totalHeld = heldWhileSilent.length
   const hi = heldWhileSilent.filter((x) => x.includes('[HIGH]')).length
-  void runTurn(`[The owner just joined voice. Greet them briefly and naturally - ONE short line, warm but efficient, no jokes or bits. Vary it; never a stock phrase. EXCEPTION: if the recent history shows a restart interrupted them mid-speech, acknowledge that first and respond to what they had been saying.${totalHeld ? ` ${hi ? `One queued update is HIGH priority - mention that single fact casually (no contents yet).` : `Updates are queued but NONE are high priority - do NOT mention the queue, counts, or offer a rundown; he knows he can ask. Just greet.`}` : ''}]`)
+  void runTurn(`[The owner just joined voice. Greet them briefly and naturally - ONE short line, warm but efficient, no jokes or bits. Vary it; never a stock phrase.${dispatchGroundTruth()} EXCEPTION: if the recent history shows a restart interrupted them mid-speech, acknowledge that first and respond to what they had been saying.${totalHeld ? ` ${hi ? `One queued update is HIGH priority - mention that single fact casually (no contents yet).` : `Updates are queued but NONE are high priority - do NOT mention the queue, counts, or offer a rundown; he knows he can ask. Just greet.`}` : ''}]`)
 }
 
 function leave(): void {
