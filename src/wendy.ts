@@ -2147,6 +2147,21 @@ function dropQueuedMatching(marker: string): void {
     for (let i = q.length - 1; i >= 0; i--) if (q[i].includes(marker)) q.splice(i, 1)
   }
 }
+let lastTextPing = 0
+function textPingOwner(line: string): void {
+  // He is not in voice - a queued item he is WAITING on must still reach him.
+  // Post to the #wendy channel: a real Discord notification on his devices.
+  const cfg = loadConfig() as { wendyChannelId?: string; ownerId?: string }
+  if (!cfg.wendyChannelId || !clientRef) return
+  if (Date.now() - lastTextPing < 3 * 60000) return
+  lastTextPing = Date.now()
+  const ch = clientRef.channels.cache.get(cfg.wendyChannelId)
+  if (ch && 'send' in ch) {
+    void (ch as { send: (s: string) => Promise<unknown> }).send(`\u{1F514} <@${cfg.ownerId}> ${line.slice(0, 1800)}`)
+      .then(() => diag('text_ping_sent', { line: line.slice(0, 80) }))
+      .catch((e) => log(`wendy: text ping failed: ${String(e)}`))
+  }
+}
 function announce(text: string, tier: NotifyTier, srcId?: string): void {
   // Collapse stacked priority tags ("[MED] [LOW] ..." from a summarizer that
   // emitted its own tag) down to the intended leading one.
@@ -2175,6 +2190,12 @@ function announce(text: string, tier: NotifyTier, srcId?: string): void {
     return
   }
   if (tier === 'interrupt' && connection) { convoEvents.push(text); return }
+  // Owner absent + something he is waiting on: voice delivery is impossible,
+  // so escalate to a text ping (observed: 'correct the record the second it
+  // lands' silently became 'wait until he rejoins').
+  if (!connection && (text.includes('just FINISHED') || text.includes('[HIGH]') || text.includes('Background task finished'))) {
+    textPingOwner(text.replace(/\[queued [^\]]+\]/g, '').trim())
+  }
   if (tier === 'onjoin' || !connection || isSilenced()) {
     pendingAnnouncements.push(text)
     if (pendingAnnouncements.length > 8) pendingAnnouncements.splice(0, pendingAnnouncements.length - 8)
