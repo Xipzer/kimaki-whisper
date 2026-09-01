@@ -1,0 +1,63 @@
+import { test } from 'node:test'
+import assert from 'node:assert/strict'
+import { claimsSend, soundsLikePromise, dispatchKey, collapsePriorityTags, repairHistory, queueDedupeMarkers, isUrgentUpdate, dispatchSucceeded, isDispatchTool, stripReminderPrefix } from '../src/brain/guards.ts'
+
+test('claimsSend catches first-person completed sends, not third-party', () => {
+  for (const t of ['Sent it — investigating first.', "It's in there now — the pinned thread.", 'I passed that along to the builder.', 'I sent him the summary.']) assert.equal(claimsSend(t), true, t)
+  for (const t of ['He sent me a photo earlier.', 'They sent the report over.', 'The tests pass and the build is green.', 'Want me to dig in?']) assert.equal(claimsSend(t), false, t)
+})
+
+test('soundsLikePromise', () => {
+  assert.equal(soundsLikePromise("I'll check the thread and get back."), true)
+  assert.equal(soundsLikePromise('The launcher is on Base.'), false)
+})
+
+test('dispatchKey normalises whitespace/case, keeps target', () => {
+  const a = dispatchKey('ask_thread', { session_id: 'ses_x', prompt: 'Hello   World' })
+  const b = dispatchKey('ask_thread', { session_id: 'ses_x', prompt: 'hello world' })
+  assert.equal(a, b)
+  assert.notEqual(a, dispatchKey('ask_thread', { session_id: 'ses_y', prompt: 'hello world' }))
+})
+
+test('collapsePriorityTags', () => {
+  assert.equal(collapsePriorityTags('[MED] [LOW] Telegram from Jian: hi'), '[MED] Telegram from Jian: hi')
+  assert.equal(collapsePriorityTags('[HIGH] one'), '[HIGH] one')
+  assert.equal(collapsePriorityTags('no tag'), 'no tag')
+})
+
+test('repairHistory merges adjacent assistant text, keeps tool calls, adds nudge', () => {
+  const m = [
+    { role: 'user', content: 'q' },
+    { role: 'assistant', content: 'a1' },
+    { role: 'assistant', content: 'a2' },
+    { role: 'assistant', content: null, tool_calls: [{}] },
+    { role: 'tool', content: 'r' },
+    { role: 'assistant', content: 'a3' },
+  ]
+  const out = repairHistory(m, 'resume')
+  assert.deepEqual(out.map((x) => x.role), ['user', 'assistant', 'assistant', 'tool', 'assistant', 'user'])
+  assert.equal(out[1].content, 'a1\na2')
+  assert.equal(out[out.length - 1].content, 'resume')
+  // no nudge when history ends on user/tool
+  assert.equal(repairHistory([{ role: 'user', content: 'x' }], 'resume').length, 1)
+})
+
+test('queueDedupeMarkers', () => {
+  assert.deepEqual(queueDedupeMarkers('[LOW] "X" has 3 new messages. <tg:X>'), ['<tg:X>'])
+  assert.deepEqual(queueDedupeMarkers('[LOW] New commit in BaseStonk: msg', 'ses_a'), ['src:ses_a', 'New commit in BaseStonk'])
+  assert.deepEqual(queueDedupeMarkers('[MED] Telegram from Babycow (@bc): hi'), ['Telegram from Babycow'])
+})
+
+test('urgency + result classification', () => {
+  assert.equal(isUrgentUpdate('[MED] "x" just FINISHED its output'), true)
+  assert.equal(isUrgentUpdate('[LOW] New commit'), false)
+  assert.equal(dispatchSucceeded('sent to GROUP'), true)
+  for (const r of ['ERROR: x', 'BLOCKED by', 'DUPLICATE BLOCKED', 'HELD - owner', 'STOP: filter']) assert.equal(dispatchSucceeded(r), false, r)
+  assert.equal(isDispatchTool('telegram_send'), true)
+  assert.equal(isDispatchTool('read_session'), false)
+})
+
+test('stripReminderPrefix', () => {
+  assert.equal(stripReminderPrefix('Reminder: do x'), 'do x')
+  assert.equal(stripReminderPrefix('do x'), 'do x')
+})

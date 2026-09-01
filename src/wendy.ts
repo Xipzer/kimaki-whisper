@@ -30,6 +30,7 @@ import { loadConfig, log } from './config.js'
 import { diag, pruneDiagnostics } from './diag.js'
 import { SYSTEM_PROMPT } from './prompt.js'
 import { TOOLS } from './tools/specs.js'
+import { isDispatchTool, isThreadDispatchTool, dispatchSucceeded, claimsSend, soundsLikePromise, dispatchKey, collapsePriorityTags, isUrgentUpdate, queueDedupeMarkers, repairHistory, SESSION_ID, isSessionId, stripReminderPrefix } from './brain/guards.js'
 import { brainUrl, brainRequest, brainFetch, brainText, brainHealth, type BrainOut } from './brain/client.js'
 import { startTelegram, telegramInbox, setTelegramFlaggedHandler, telegramGroupsStatus, telegramGroupSetMuted, telegramSend, telegramGrant, telegramSetTone, telegramPolicyStatus, telegramAutoDrain, telegramLowBudgets, setTelegramAutonomousHandler, telegramPendingSummaries, telegramDrainChat, telegramDrainChatStats, telegramWatchMode, telegramChatDigest, telegramWho, telegramRoster, telegramMutePerson, telegramPendingPeopleSummaries, telegramDrainPerson, telegramPeopleStatus, telegramProfile, telegramProfileList, telegramProfilesDue, telegramProfileWrite, telegramProfileNote, telegramChatMembers, telegramPrivacyFor, telegramSetPrivacy, telegramPrivacyMode, telegramPrivacyStatus, telegramEffectiveTone, telegramSetPersonTone, telegramSentLog, telegramRoomContext, telegramPersonThread, setOwnerAutonomy, ownerAutonomyStatus, telegramReplyHere, setReplyTarget, telegramSearch } from './telegram.js'
 
@@ -160,7 +161,7 @@ async function executeTool(name: string, args: Record<string, unknown>): Promise
   log(`wendy tool: ${name}(${JSON.stringify(args).slice(0, 120)})`)
   const t0 = Date.now()
   const result = await executeToolInner(name, args)
-  for (const m of result.matchAll(/\bses_\w{10,}\b/g)) markVerified(m[0])
+  for (const m of result.matchAll(SESSION_ID)) markVerified(m[0])
   diag('tool', { name, args, ms: Date.now() - t0, result: result.slice(0, 2000) })
   if (result.startsWith('ERROR')) diag('tool_error', { name, err: result.slice(0, 150) })
   return result
@@ -617,14 +618,7 @@ export async function think(userText: string, onSentence?: (s: string) => void):
   // "Cannot have 2 or more assistant messages at the end of the list").
   // History can legitimately contain them (superseded turns, error acks) -
   // coalesce plain-text neighbours instead of failing the whole turn.
-  for (let i = messages.length - 1; i > 0; i--) {
-    const a = messages[i - 1] as { role: string; content?: unknown; tool_calls?: unknown }
-    const b = messages[i] as { role: string; content?: unknown; tool_calls?: unknown }
-    if (a.role === 'assistant' && b.role === 'assistant' && !a.tool_calls && !b.tool_calls) {
-      a.content = `${String(a.content ?? '')}\n${String(b.content ?? '')}`.trim()
-      messages.splice(i, 1)
-    }
-  }
+  repairHistory(messages)
 
   const fail = (text: string): string => {
     history.push({ role: 'assistant', content: text })
@@ -700,9 +694,9 @@ export async function think(userText: string, onSentence?: (s: string) => void):
           : missing.length
             ? `ERROR: missing required argument(s): ${missing.join(', ')}. Call ${tc.function.name} again with ALL required fields filled in.`
             : await (async () => {
-                const isSend = ['send_to_session', 'ask_thread', 'dispatch_task', 'telegram_send', 'telegram_reply'].includes(tc.function.name)
+                const isSend = isDispatchTool(tc.function.name)
                 const targetId = String(args.session_id ?? '')
-                if (['send_to_session', 'ask_thread'].includes(tc.function.name) && /^ses_/.test(targetId)) {
+                if (isThreadDispatchTool(tc.function.name) && isSessionId(targetId)) {
                   const seen = verifiedIds.get(targetId)
                   if (!seen || Date.now() - seen > 10 * 60000) {
                     // Session ids share long prefixes (ses_fb35bcab... vs
@@ -730,13 +724,13 @@ export async function think(userText: string, onSentence?: (s: string) => void):
                 }
                 const r = await executeTool(tc.function.name, args)
                 if (r.startsWith('BLOCKED') && (tc.function.name === 'telegram_send' || tc.function.name === 'telegram_reply')) blockedSendsThisTurn++
-                if (isSend && !r.startsWith('ERROR') && !r.startsWith('BLOCKED')) {
+                if (isSend && dispatchSucceeded(r)) {
                   recentDispatches.push({ key: dispatchKey(tc.function.name, args), ts: Date.now(), tool: tc.function.name })
                   if (recentDispatches.length > 40) recentDispatches.splice(0, recentDispatches.length - 40)
                 }
                 return r
               })()
-        if (!result.startsWith('ERROR') && !result.startsWith('BLOCKED') && !result.startsWith('DUPLICATE') && ['send_to_session', 'ask_thread', 'dispatch_task', 'telegram_send', 'telegram_reply'].includes(tc.function.name)) dispatchToolsRun.add(tc.function.name)
+        if (dispatchSucceeded(result) && isDispatchTool(tc.function.name)) dispatchToolsRun.add(tc.function.name)
         messages.push({ role: 'tool', content: result, tool_call_id: tc.id, name: tc.function.name })
       }
       continue
@@ -754,9 +748,8 @@ export async function think(userText: string, onSentence?: (s: string) => void):
     // Hallucinated dispatch guard: "Sent it" with zero send tools called this
     // turn means NOTHING left (seen live: owner waited on a dispatch that never
     // existed). Deterministic check - the ledger cannot be sweet-talked.
-    const SEND_CLAIM = /(?<!\b(?:he|she|they|you|xipz|who|owner)\s)\b(sent( it| that| this| him| her| them)?|dispatched|fired (it|that|this) (off|into|to)|relayed|forwarded|passed (it|that|this) (along|on)|told (him|her|them|the (thread|builder|agent))|asked the (thread|builder|agent)|it'?s in there|in the (pinned )?thread now)\b/i
     const recentSendBacksClaim = recentDispatches.some((d) => Date.now() - d.ts < 10 * 60000)
-    if (!claimChecked && !dispatchToolsRun.size && !recentSendBacksClaim && hop < MAX_HOPS - 2 && SEND_CLAIM.test(text)) {
+    if (!claimChecked && !dispatchToolsRun.size && !recentSendBacksClaim && hop < MAX_HOPS - 2 && claimsSend(text)) {
       claimChecked = true
       log('wendy: send claim with empty dispatch ledger - forcing the real call')
       diag('send_claim_unbacked', { text: text.slice(0, 120) })
@@ -764,9 +757,8 @@ export async function think(userText: string, onSentence?: (s: string) => void):
       messages.push({ role: 'user', content: '(system: your reply claims something was SENT, but you called NO send tool this turn - nothing was actually dispatched. Either call the right tool NOW (ask_thread / send_to_session / telegram_send) and then confirm, or correct yourself honestly. Never claim a send that did not happen.)' })
       continue
     }
-    const BROAD_PROMISE = /\b(i'?ll|i will|let me|gonna|going to|one (sec|second|moment)|hold on|right back|having (a bit of )?trouble|can'?t seem to|struggling to|keep looking)\b/i
     let isPromise = false
-    if (!nudged && hop < MAX_HOPS - 2 && BROAD_PROMISE.test(text)) {
+    if (!nudged && hop < MAX_HOPS - 2 && soundsLikePromise(text)) {
       const v = await brainRequest('conversation', {
         model: 'local-fast', cache_prompt: true, max_tokens: 5,
         messages: [
@@ -964,7 +956,7 @@ setInterval(() => {
             : 'no real movement since my last update.'
         announce(`Scheduled check${d.note ? ` on ${d.note}` : ''}: ${summary}`, 'interrupt', d.sessionId)
       } else {
-        announce(`Reminder: ${d.note.replace(/^\s*reminder:?\s*/i, '')}`, 'interrupt')
+        announce(`Reminder: ${stripReminderPrefix(d.note)}`, 'interrupt')
       }
     }
   })()
@@ -1000,17 +992,7 @@ async function runTaskSlice(): Promise<void> {
   // b10705 rejects histories with consecutive assistant messages (worker
   // thinking-notes accumulate exactly that) and generation must not resume
   // from a bare trailing assistant - repair both before every request.
-  for (let i = t.msgs.length - 1; i > 0; i--) {
-    const a = t.msgs[i - 1] as { role: string; content?: unknown; tool_calls?: unknown }
-    const b = t.msgs[i] as { role: string; content?: unknown; tool_calls?: unknown }
-    if (a.role === 'assistant' && b.role === 'assistant' && !a.tool_calls && !b.tool_calls) {
-      a.content = `${String(a.content ?? '')}\n${String(b.content ?? '')}`.trim()
-      t.msgs.splice(i, 1)
-    }
-  }
-  if ((t.msgs[t.msgs.length - 1] as { role?: string })?.role === 'assistant') {
-    t.msgs.push({ role: 'user', content: '(system: resume - keep working with your tools; reply RESULT:/FAILED: only when finished)' })
-  }
+  repairHistory(t.msgs, '(system: resume - keep working with your tools; reply RESULT:/FAILED: only when finished)')
   const url = brainUrl()
   if (!url) return
   sliceRunning = true
@@ -1278,22 +1260,11 @@ function textPingOwner(line: string): void {
 function announce(text: string, tier: NotifyTier, srcId?: string): void {
   // Collapse stacked priority tags ("[MED] [LOW] ..." from a summarizer that
   // emitted its own tag) down to the intended leading one.
-  const stacked = text.match(/^((?:\[(?:HIGH|MED|LOW)\]\s*){2,})/i)
-  if (stacked) {
-    const first = stacked[1].match(/\[(?:HIGH|MED|LOW)\]/i)![0]
-    text = `${first} ${text.slice(stacked[1].length)}`
-  }
-  // A chat-activity pointer supersedes any older pointer for the same chat:
-  // "N new messages" queued every sweep was stacking near-identical entries.
-  const tg = text.match(/<tg:[^>]+>/)
-  if (tg) dropQueuedMatching(tg[0])
-  // One queued item per source: a session announcing 20x in 7h churned the
-  // 12-slot queue 267 times - joins delivered a random tail, not a digest.
-  if (srcId) dropQueuedMatching(`src:${srcId}`)
-  const commitRepo = text.match(/New commit in ([\w.-]+)/)
-  if (commitRepo) dropQueuedMatching(`New commit in ${commitRepo[1]}`)
-  const dmFrom = text.match(/Telegram from ([^(:\n]+)/)
-  if (dmFrom) dropQueuedMatching(`Telegram from ${dmFrom[1].trim()}`)
+  text = collapsePriorityTags(text)
+  // One queued item per source (chat pointer, session, repo, DM sender) -
+  // freshest wins. Stacked near-duplicates churned the queue and made
+  // joins deliver a random tail instead of a digest.
+  for (const marker of queueDedupeMarkers(text, srcId)) dropQueuedMatching(marker)
   const hm = new Date().toISOString().slice(11, 16)
   text = `${text} [queued ${hm}Z${srcId ? ` src:${srcId}` : ''}]`
   diag('announce', { tier, text: text.slice(0, 300), inVc: !!connection })
@@ -1306,7 +1277,7 @@ function announce(text: string, tier: NotifyTier, srcId?: string): void {
   // Owner absent + something he is waiting on: voice delivery is impossible,
   // so escalate to a text ping (observed: 'correct the record the second it
   // lands' silently became 'wait until he rejoins').
-  if (!connection && (text.includes('just FINISHED') || text.includes('[HIGH]') || text.includes('Background task finished'))) {
+  if (!connection && isUrgentUpdate(text)) {
     textPingOwner(text.replace(/\[queued [^\]]+\]/g, '').trim())
   }
   if (tier === 'onjoin' || !connection || isSilenced()) {
@@ -1733,15 +1704,10 @@ let lastRelayAck = 0
 // Ids proven real in the last few minutes by an actual lookup/read - a
 // dispatch to anything else is memory, and memory confuses sibling ids.
 const verifiedIds = new Map<string, number>()
-function markVerified(id: string): void { if (/^ses_\w{10,}$/.test(id)) verifiedIds.set(id, Date.now()) }
+function markVerified(id: string): void { if (isSessionId(id)) verifiedIds.set(id, Date.now()) }
 let lastConvoActivity = 0
 let supersededAnswer: { text: string; at: number } | null = null
 const recentDispatches: { key: string; ts: number; tool: string }[] = []
-function dispatchKey(name: string, args: Record<string, unknown>): string {
-  const target = String(args.session_id ?? args.target ?? args.title ?? '')
-  const body = String(args.prompt ?? args.text ?? '').toLowerCase().replace(/\s+/g, ' ').trim()
-  return `${name}|${target}|${body}`
-}
 const convoEvents: string[] = []
 let lastBgDelivery = 0
 // Deliver background results only when the conversation has space:
@@ -1757,7 +1723,7 @@ setInterval(() => {
   // WAITING on - the 4-min anti-spam cooldown exists for routine chatter and
   // must not throttle completion pings (observed: three FINISHED notices sat
   // 3+ minutes behind a routine batch while the owner sat in silence).
-  const urgent = convoEvents.some((x) => x.includes('just FINISHED') || x.includes('[HIGH]') || x.includes('Background task finished'))
+  const urgent = convoEvents.some(isUrgentUpdate)
   if (!urgent && Date.now() - lastBgDelivery < 4 * 60 * 1000) return
   lastBgDelivery = Date.now()
   const events = convoEvents.splice(0, 4)

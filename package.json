@@ -14,7 +14,8 @@
   "scripts": {
     "build": "tsc",
     "dev": "tsx src/cli.ts",
-    "typecheck": "tsc --noEmit"
+    "typecheck": "tsc --noEmit",
+    "test": "node --experimental-strip-types --test test/*.test.ts"
   },
   "engines": {
     "node": ">=20"
