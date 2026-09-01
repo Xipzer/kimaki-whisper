@@ -955,6 +955,7 @@ async function executeTool(name: string, args: Record<string, unknown>): Promise
   log(`wendy tool: ${name}(${JSON.stringify(args).slice(0, 120)})`)
   const t0 = Date.now()
   const result = await executeToolInner(name, args)
+  for (const m of result.matchAll(/\bses_\w{10,}\b/g)) markVerified(m[0])
   diag('tool', { name, args, ms: Date.now() - t0, result: result.slice(0, 2000) })
   if (result.startsWith('ERROR')) diag('tool_error', { name, err: result.slice(0, 150) })
   return result
@@ -1016,7 +1017,7 @@ async function executeToolInner(name: string, args: Record<string, unknown>): Pr
     ], 12000, 500_000, true)
     if (Date.now() - t0 >= 11000) {
       watchSession(askId, String(args.prompt ?? '').slice(0, 40))
-      return 'still working - result will arrive as a [BACKGROUND UPDATE] when ready. Tell the owner it is underway; you are free to keep talking or fire off more tasks in parallel.'
+      return `DELIVERED TO: "${threadIdent(askId)}" (${askId}) - still working, result will arrive as a [BACKGROUND UPDATE]. If that is NOT the thread the owner meant, say so immediately and resend. Tell the owner it is underway; you are free to keep talking or fire off more tasks in parallel.`
     }
     return `[reply from "${threadIdent(askId)}" - VERIFY this is the thread you meant]\n` + (out.slice(-4000) || 'no reply captured')
   }
@@ -1026,7 +1027,7 @@ async function executeToolInner(name: string, args: Record<string, unknown>): Pr
       '--prompt', String(args.prompt ?? ''),
     ], 60000)
     watchSession(String(args.session_id), String(args.prompt ?? '').slice(0, 40))
-    return `[sent to "${threadIdent(String(args.session_id ?? ''))}" - VERIFY this is the thread you meant] ` + (out.slice(-300) || 'dispatched')
+    return `DELIVERED TO: "${threadIdent(String(args.session_id ?? ''))}" (${String(args.session_id ?? '')}). If that is NOT the thread the owner meant, say so immediately and resend to the right one. ` + (out.slice(-300) || 'dispatched')
   }
   if (name === 'read_session') {
     const deep = Number(args.chars) || 0
@@ -1594,6 +1595,17 @@ export async function think(userText: string, onSentence?: (s: string) => void):
             ? `ERROR: missing required argument(s): ${missing.join(', ')}. Call ${tc.function.name} again with ALL required fields filled in.`
             : await (async () => {
                 const isSend = ['send_to_session', 'ask_thread', 'dispatch_task', 'telegram_send', 'telegram_reply'].includes(tc.function.name)
+                const targetId = String(args.session_id ?? '')
+                if (['send_to_session', 'ask_thread'].includes(tc.function.name) && /^ses_/.test(targetId)) {
+                  const seen = verifiedIds.get(targetId)
+                  if (!seen || Date.now() - seen > 10 * 60000) {
+                    // Session ids share long prefixes (ses_fb35bcab... vs
+                    // ses_fb3f7013...) - recalled-from-memory ids land in
+                    // sibling threads. Force a fresh lookup instead.
+                    diag('unverified_target_blocked', { id: targetId, tool: tc.function.name })
+                    return `BLOCKED: you have not looked up ${targetId} recently, so it may be a MISREMEMBERED id - session ids share long prefixes and near-misses silently hit the wrong thread. Nothing was sent. Call lookup_thread (or read_session) for the thread you actually mean, confirm the title in the result, then dispatch to the id it returns.`
+                  }
+                }
                 if (isSend && !userText.startsWith('[') && (turnSeq !== inputSeq || capturing || pendingUtterance)) {
                   diag('action_held_owner_talking', { tool: tc.function.name })
                   return 'HELD - the owner resumed speaking mid-turn, so this action was NOT taken (acting on a half-finished thought sends half-finished instructions). Their full input arrives next turn: acknowledge briefly and redo this action then, with the complete picture.'
@@ -2634,6 +2646,10 @@ let busyAckGiven = false
 let turnStartedAt = 0
 let lastBusyAck = 0
 let lastRelayAck = 0
+// Ids proven real in the last few minutes by an actual lookup/read - a
+// dispatch to anything else is memory, and memory confuses sibling ids.
+const verifiedIds = new Map<string, number>()
+function markVerified(id: string): void { if (/^ses_\w{10,}$/.test(id)) verifiedIds.set(id, Date.now()) }
 let lastConvoActivity = 0
 let supersededAnswer: { text: string; at: number } | null = null
 const recentDispatches: { key: string; ts: number; tool: string }[] = []
