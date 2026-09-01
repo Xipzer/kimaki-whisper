@@ -33,7 +33,7 @@ import { DispatchLedger } from './state/ledgers.js'
 import { SYSTEM_PROMPT } from './prompt.js'
 import { TOOLS } from './tools/specs.js'
 import { executeTelegramTool } from './tools/telegram.js'
-import { isDispatchTool, isThreadDispatchTool, dispatchSucceeded, claimsSend, soundsLikePromise, dispatchKey, collapsePriorityTags, isUrgentUpdate, queueDedupeMarkers, repairHistory, SESSION_ID, isSessionId, stripReminderPrefix } from './brain/guards.js'
+import { isDispatchTool, isThreadDispatchTool, dispatchSucceeded, claimsSend, sendClaimAck, soundsLikePromise, dispatchKey, collapsePriorityTags, isUrgentUpdate, queueDedupeMarkers, repairHistory, SESSION_ID, isSessionId, stripReminderPrefix } from './brain/guards.js'
 import { brainUrl, brainRequest, brainFetch, brainText, brainHealth, type BrainOut } from './brain/client.js'
 import { startTelegram, setTelegramFlaggedHandler, telegramAutoDrain, telegramLowBudgets, setTelegramAutonomousHandler, telegramPendingSummaries, telegramDrainChatStats, telegramPendingPeopleSummaries, telegramDrainPerson, telegramProfile, telegramProfilesDue, telegramProfileWrite, telegramPrivacyFor, telegramEffectiveTone, telegramRoomContext, telegramPersonThread, setReplyTarget } from './telegram.js'
 
@@ -681,12 +681,13 @@ export async function think(userText: string, onSentence?: (s: string) => void):
     // turn means NOTHING left (seen live: owner waited on a dispatch that never
     // existed). Deterministic check - the ledger cannot be sweet-talked.
     const recentSendBacksClaim = ledger.sentRecently()
-    if (!claimChecked && !dispatchToolsRun.size && !recentSendBacksClaim && hop < MAX_HOPS - 2 && claimsSend(text)) {
+    const claimAck = !claimChecked && !dispatchToolsRun.size && !recentSendBacksClaim && hop < MAX_HOPS - 2 ? sendClaimAck(text) : null
+    if (claimAck) {
       claimChecked = true
       log('wendy: send claim with empty dispatch ledger - forcing the real call')
-      diag('send_claim_unbacked', { text: text.slice(0, 120) })
+      diag('send_claim_unbacked', { phrase: claimAck.phrase, len: text.length })
       messages.push({ role: 'assistant', content: text })
-      messages.push({ role: 'user', content: '(system: your reply claims something was SENT, but you called NO send tool this turn - nothing was actually dispatched. Either call the right tool NOW (ask_thread / send_to_session / telegram_send) and then confirm, or correct yourself honestly. Never claim a send that did not happen.)' })
+      messages.push({ role: 'user', content: `(system: your reply says "${claimAck.phrase.trim()}" but you called NO send tool this turn - nothing was dispatched. If a send was intended, call the right tool NOW (ask_thread / send_to_session / telegram_send) and then confirm. If not, RESTATE YOUR FULL ANSWER with that claim removed - keep every other sentence; do not shrink the reply to an apology.)` })
       continue
     }
     let isPromise = false

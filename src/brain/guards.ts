@@ -17,6 +17,16 @@ export const dispatchSucceeded = (result: string): boolean =>
  *  ("he sent me a photo") are excluded by lookbehind. */
 export const SEND_CLAIM = /(?<!\b(?:he|she|they|you|xipz|who|owner)\s)\b(sent( it| that| this| him| her| them)?|dispatched|fired (it|that|this) (off|into|to)|relayed|forwarded|passed (it|that|this) (along|on)|told (him|her|them|the (thread|builder|agent))|asked the (thread|builder|agent)|it'?s in there|in the (pinned )?thread now)\b/i
 export const claimsSend = (text: string): boolean => SEND_CLAIM.test(text)
+/** An ACK-shaped send claim: the claim carries the reply. A long answer with a
+ *  send-word buried mid-paragraph is not one (live false positive: a 1.5k-char
+ *  assessment was replaced by an apology because of one clause in paragraph 4). */
+export function sendClaimAck(text: string): { phrase: string } | null {
+  const m = text.match(SEND_CLAIM)
+  if (!m || m.index === undefined) return null
+  const short = text.length <= 350
+  const early = m.index <= 160
+  return short || early ? { phrase: text.slice(Math.max(0, m.index - 30), m.index + m[0].length + 20) } : null
+}
 
 /** Future-tense commitments to act that the turn must not end on. */
 export const BROAD_PROMISE = /\b(i'?ll|i will|let me|gonna|going to|one (sec|second|moment)|hold on|right back|having (a bit of )?trouble|can'?t seem to|struggling to|keep looking)\b/i

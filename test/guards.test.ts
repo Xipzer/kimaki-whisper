@@ -61,3 +61,12 @@ test('stripReminderPrefix', () => {
   assert.equal(stripReminderPrefix('Reminder: do x'), 'do x')
   assert.equal(stripReminderPrefix('do x'), 'do x')
 })
+
+test('sendClaimAck fires on ack-shaped replies only', async () => {
+  const { sendClaimAck } = await import('../dist/brain/guards.js')
+  assert.ok(sendClaimAck('Sent it — investigating first, back when it lands.'))
+  assert.ok(sendClaimAck('Done. I passed that along to the builder and it is working through it now, should be a few minutes at most given the size of the change.'))
+  const long = 'Assessed it end to end. Net verdict: a genuine upgrade. '.repeat(12) + 'If a message gets lost, say so and I will have it forwarded. ' + 'More assessment follows here about caches and lanes. '.repeat(6)
+  assert.equal(sendClaimAck(long), null)
+  assert.equal(sendClaimAck('The tests are green.'), null)
+})
