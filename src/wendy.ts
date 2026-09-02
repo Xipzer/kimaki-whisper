@@ -2019,18 +2019,31 @@ async function joinAndServe(channel: VoiceBasedChannel, userId: string): Promise
   capturing = false
   pendingUtterance = null
   log(`wendy: joining #${channel.name}`)
-  connection = joinVoiceChannel({
-    channelId: channel.id,
-    guildId: channel.guild.id,
-    adapterCreator: channel.guild.voiceAdapterCreator,
-    selfDeaf: false,
-  })
-  player = createAudioPlayer()
-  player.on('error', (e) => log('wendy playback error:', e.message))
-  connection.subscribe(player)
-  const ok = await entersState(connection, VoiceConnectionStatus.Ready, 15000).catch(() => null)
-  if (!ok) { log('wendy: voice connection failed'); leave(); return }
-  const conn = connection
+  // Discord's voice handshake stalls transiently (seen live: one 15s timeout,
+  // silent surrender, owner heard nothing). Retry with a fresh connection,
+  // and if it still fails, TELL him - in text, since voice is what broke.
+  let ok: unknown = null
+  for (let attempt = 1; attempt <= 3 && !ok; attempt++) {
+    if (attempt > 1) { log(`wendy: voice connect retry ${attempt}`); diag('voice_connect_retry', { attempt }); leave(); await new Promise((r) => setTimeout(r, 1500)) }
+    connection = joinVoiceChannel({
+      channelId: channel.id,
+      guildId: channel.guild.id,
+      adapterCreator: channel.guild.voiceAdapterCreator,
+      selfDeaf: false,
+    })
+    player = createAudioPlayer()
+    player.on('error', (e) => log('wendy playback error:', e.message))
+    connection.subscribe(player)
+    const conn = connection
+    ok = await entersState(conn, VoiceConnectionStatus.Ready, 15000).catch(() => null)
+    if (!ok) diag('voice_connect_failed', { attempt, state: conn.state.status })
+  }
+  if (!ok) {
+    log('wendy: voice connection failed after 3 attempts')
+    textPingOwner('I could not connect to the voice channel (Discord voice handshake kept timing out). Leave and rejoin the VC to retry, or check Discord voice status.')
+    leave(); return
+  }
+  const conn = connection!
   conn.on('error', (e) => log('wendy voice error:', e.message))
   conn.on(VoiceConnectionStatus.Disconnected, () => {
     void (async () => {
