@@ -214,7 +214,15 @@ async function executeToolInner(name: string, args: Record<string, unknown>): Pr
             `, active ${Math.round(ms / 86400000)}d ago`
           const sub = /@\w+ subagent/i.test(h.title) ? ' [subagent offshoot]' : ''
           const b = briefingCache.get(h.id)
-          const brief = b && Date.now() - b.at < 15 * 60 * 1000 ? ` | BRIEFING (${Math.max(1, Math.round((Date.now() - b.at) / 60000))}m old): ${b.s.slice(0, 220)}` : ''
+          // A briefing is a snapshot of a MOVING thread. For an active thread
+          // anything older than ~90s is stale by definition (live: a 3-minute-old
+          // briefing had her report a 'paused, waiting on a decision' state the
+          // thread had long left). Active: fresh-only. Idle: 15 min.
+          const active = ms !== null && ms < 3600000
+          const briefAge = b ? Date.now() - b.at : Infinity
+          const brief = b && briefAge < (active ? 90000 : 15 * 60 * 1000)
+            ? ` | BRIEFING (${Math.max(1, Math.round(briefAge / 60000))}m old): ${b.s.slice(0, 220)}`
+            : (b && active ? ' | (briefing stale - thread has moved since; read_session before repeating anything about its state)' : '')
           return `${nicknames[h.id] ? `[${nicknames[h.id]}] ` : ''}${h.title} - session ${h.id} (project: ${h.dir.split('/').pop()}${age})${threadLocation(h.threadId)}${sub}${brief}`
         }).join('\n')
       : `no matches in index${runningSpawns().length ? ` - NOTE: your running spawned agents (may not be indexed yet): ${runningSpawns().slice(-5).map((d) => `"${d.label}" = ${d.id}`).join('; ')}` : ' - try search_sessions for a deep search'}`
@@ -250,9 +258,15 @@ async function executeToolInner(name: string, args: Record<string, unknown>): Pr
   }
   if (name === 'read_session') {
     const deep = Number(args.chars) || 0
+    const rid = String(args.session_id ?? '')
+    // Same hazard as sends: an id recalled from context lands on a sibling
+    // thread (live: read the chain-hardcoding subagent while reporting on the
+    // Robinhood thread). Reading is allowed, but the mismatch must be loud.
+    const unverified = isSessionId(rid) && !ledger.isVerified(rid)
+    if (unverified) diag('unverified_read', { id: rid })
     const out = await runKimaki(['session', 'read', String(args.session_id ?? '')], 60000, 500_000, true)
     if (out.startsWith('ERROR')) return out
-    const hdr = `[LIVE TRANSCRIPT of "${threadIdent(String(args.session_id ?? ''))}" - fetched seconds ago, OVERRIDES anything said earlier. VERIFY this is the thread the owner meant before reporting.]\n`
+    const hdr = `[LIVE TRANSCRIPT of "${threadIdent(rid)}"${unverified ? ' - WARNING: this id did NOT come from a lookup this turn; it may be a sibling of the thread you meant. Check the title above against what the owner asked about before reporting anything from it.' : ''} - fetched seconds ago, OVERRIDES anything said earlier. VERIFY this is the thread the owner meant before reporting.]\n`
     if (deep) return hdr + (out.replace(/\S{400,}/g, '[attachment]').slice(-Math.min(Math.max(deep, 500), 30000)) || 'empty session')
     return hdr + (recentMessages(out, 4) || 'empty session')
   }
