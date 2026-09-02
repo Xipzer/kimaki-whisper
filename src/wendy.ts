@@ -678,9 +678,10 @@ export async function think(userText: string, onSentence?: (s: string) => void):
                   diag('dispatch_held_self_directive', { tool: tc.function.name })
                   return 'HELD: the owner told you to do this YOURSELF ("independently" / "on your own" / "yourself"). Do not delegate it to a thread - use read_session (deep, with chars), bash, notes and your own reasoning, then answer him directly.'
                 }
-                if (isSend && !userText.startsWith('[') && (turnSeq !== inputSeq || capturing || pendingUtterance)) {
+                const goAhead = !!pendingUtterance && isAffirmative(pendingUtterance) && pendingUtterance.trim().split(/\s+/).length <= 6
+                if (isSend && !userText.startsWith('[') && !goAhead && (turnSeq !== inputSeq || capturing || pendingUtterance)) {
                   diag('action_held_owner_talking', { tool: tc.function.name })
-                  return 'HELD - the owner resumed speaking mid-turn, so this action was NOT taken (acting on a half-finished thought sends half-finished instructions). Their full input arrives next turn: acknowledge briefly and redo this action then, with the complete picture.'
+                  return 'HELD - the owner is still speaking (or spoke again), so this action was NOT taken: acting on a half-finished thought sends half-finished instructions. His complete input arrives next turn - answer that, then redo this action with the full picture. Do NOT tell him he interrupted or cut in; he did not.'
                 }
                 if (isSend) {
                   const key = dispatchKey(tc.function.name, args)
@@ -1547,6 +1548,7 @@ export const spokenTranscript: string[] = []
 let lastSpokenText = ''
 let lastSpeechEnd = 0
 let fragmentHold: { text: string; timer: NodeJS.Timeout } | null = null
+let monologueBuf = ''
 // Whisper's silence hallucinations: short stock phrases that need strong confidence to be believed.
 const STOCK_GHOST = /^(thank you|thanks|okay|ok|you|bye|yeah)[.!\s]*$/i
 let speechEpoch = 0
@@ -1816,6 +1818,7 @@ function listenTo(channel: VoiceBasedChannel, userId: string): void {
   receiver.speaking.on('start', (speakingUserId) => {
     if (speakingUserId !== userId || capturing) return
     capturing = true
+    let rotations = 0
     const captureGuard = setInterval(() => {
       if (!capturing) { clearInterval(captureGuard); return }
       if (!chunks.length) {
@@ -1833,9 +1836,14 @@ function listenTo(channel: VoiceBasedChannel, userId: string): void {
       // Stream never hit 900ms of silence (noise floor / open mic / long
       // monologue). Rotate: transcribe what we have, keep recording - the
       // owner is never cut off and never unheard.
-      log('wendy: long capture - rotating a 60s segment for transcription, stream stays open')
-      diag('capture_rotated', { bytes: chunks.reduce((a, c) => a + c.length, 0) })
-      void finishSegment(chunks.splice(0))
+      // He is STILL TALKING. Transcribe the segment into a buffer; the turn
+      // fires when he actually stops (natural close) with everything merged.
+      // Acting on a mid-monologue segment made her talk over him and then
+      // read his continuing speech as an interruption ("you cut in").
+      rotations++
+      log(`wendy: long capture - rotating segment ${rotations} into the monologue buffer`)
+      diag('capture_rotated', { bytes: chunks.reduce((a, c) => a + c.length, 0), segment: rotations })
+      void finishSegment(chunks.splice(0), rotations >= 4 ? 'force' : 'buffer')
       interrupted = false
     }, 60000)
     const opus = receiver.subscribe(speakingUserId, {
@@ -1869,7 +1877,7 @@ function listenTo(channel: VoiceBasedChannel, userId: string): void {
     opus.on('close', () => { clearInterval(captureGuard); capturing = false })
     opus.on('error', () => { clearInterval(captureGuard); capturing = false })
     decoder.on('close', () => { clearInterval(captureGuard); capturing = false })
-    const finishSegment = async (segChunks: Buffer[]): Promise<void> => {
+    const finishSegment = async (segChunks: Buffer[], mode: 'final' | 'buffer' | 'force' = 'final'): Promise<void> => {
       {
         const resumeIfPhantom = (): void => {
           // a streamed reply that's still draining will continue on its own -
@@ -1984,6 +1992,12 @@ function listenTo(channel: VoiceBasedChannel, userId: string): void {
           fragmentHold = { text: held, timer: setTimeout(() => { if (fragmentHold?.text === held) { fragmentHold = null; void runTurn(held) } }, 2500) }
           return
         }
+        if (mode === 'buffer') {
+          monologueBuf = monologueBuf ? `${monologueBuf} ${text}` : text
+          diag('monologue_buffered', { chars: monologueBuf.length })
+          return
+        }
+        if (monologueBuf) { text = `${monologueBuf} ${text}`; monologueBuf = ''; diag('monologue_merged', { chars: text.length, forced: mode === 'force' }) }
         let turnText = text
         if (interrupted && cutSpeech.length) {
           // Real interruption: hand her the unfinished thought so she can reason
@@ -2080,6 +2094,7 @@ function leave(): void {
   capturing = false
   liveCapture = null
   if (fragmentHold) { clearTimeout(fragmentHold.timer); fragmentHold = null }
+  monologueBuf = ''
 }
 
 export function initWendy(client: Client): void {
