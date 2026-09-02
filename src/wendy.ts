@@ -1790,7 +1790,18 @@ function listenTo(channel: VoiceBasedChannel, userId: string): void {
     capturing = true
     const captureGuard = setInterval(() => {
       if (!capturing) { clearInterval(captureGuard); return }
-      if (!chunks.length) return
+      if (!chunks.length) {
+        // Opened but never received audio (Discord fires 'speaking' without a
+        // stream sometimes). Left alone, capturing stays true forever and every
+        // later utterance is ignored - she goes DEAF. Release it.
+        log('wendy: capture guard - empty stuck capture released')
+        diag('capture_stuck_released', { empty: true })
+        clearInterval(captureGuard)
+        try { opus.destroy() } catch {}
+        capturing = false
+        liveCapture = null
+        return
+      }
       // Stream never hit 900ms of silence (noise floor / open mic / long
       // monologue). Rotate: transcribe what we have, keep recording - the
       // owner is never cut off and never unheard.
@@ -2023,6 +2034,11 @@ function leave(): void {
   connection?.destroy()
   connection = null
   player = null
+  // Never carry capture state across a voice session - a stuck flag here
+  // would make her deaf on the next join.
+  capturing = false
+  liveCapture = null
+  if (fragmentHold) { clearTimeout(fragmentHold.timer); fragmentHold = null }
 }
 
 export function initWendy(client: Client): void {
