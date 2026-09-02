@@ -215,7 +215,7 @@ async function executeToolInner(name: string, args: Record<string, unknown>): Pr
           const sub = /@\w+ subagent/i.test(h.title) ? ' [subagent offshoot]' : ''
           const b = briefingCache.get(h.id)
           const brief = b && Date.now() - b.at < 15 * 60 * 1000 ? ` | BRIEFING (${Math.max(1, Math.round((Date.now() - b.at) / 60000))}m old): ${b.s.slice(0, 220)}` : ''
-          return `${nicknames[h.id] ? `[${nicknames[h.id]}] ` : ''}${h.title} - session ${h.id} (project: ${h.dir.split('/').pop()}${age})${sub}${brief}`
+          return `${nicknames[h.id] ? `[${nicknames[h.id]}] ` : ''}${h.title} - session ${h.id} (project: ${h.dir.split('/').pop()}${age})${threadLocation(h.threadId)}${sub}${brief}`
         }).join('\n')
       : `no matches in index${runningSpawns().length ? ` - NOTE: your running spawned agents (may not be indexed yet): ${runningSpawns().slice(-5).map((d) => `"${d.label}" = ${d.id}`).join('; ')}` : ' - try search_sessions for a deep search'}`
   }
@@ -575,10 +575,20 @@ export async function think(userText: string, onSentence?: (s: string) => void):
   let blockedSendsThisTurn = 0
   const dispatchToolsRun = new Set<string>()
   const MAX_HOPS = 14
+  const hopT0Turn = Date.now()
+  let progressSpoken = false
   for (let hop = 0; hop < MAX_HOPS; hop++) {
     const hopT0 = Date.now()
-    const lastLap = hop === MAX_HOPS - 1
-    if (lastLap) messages.push({ role: 'user', content: '(system: tool budget exhausted - no more tool calls available. Give the owner your best answer RIGHT NOW from what you already found. If something is still unfinished, say exactly what and offer to follow up.)' })
+    const elapsed = Date.now() - hopT0Turn
+    if (elapsed > 45000 && !progressSpoken && !userText.startsWith('[')) {
+      progressSpoken = true
+      void speak('Still on it - digging through a few things, give me a moment.')
+      diag('turn_progress_ack', { ms: elapsed })
+    }
+    const overBudget = elapsed > 100000 && !userText.startsWith('[')
+    if (overBudget && hop < MAX_HOPS - 1) diag('turn_time_budget', { ms: elapsed, hop })
+    const lastLap = hop === MAX_HOPS - 1 || overBudget
+    if (lastLap && !messages.some((m) => String(m.content ?? '').startsWith('(system: tool budget exhausted'))) messages.push({ role: 'user', content: '(system: tool budget exhausted - no more tool calls available. Give the owner your best answer RIGHT NOW from what you already found. If something is still unfinished, say exactly what and offer to follow up.)' })
     // One retry after a short pause: idle keep-alive sockets to llama.cpp get
     // closed server-side and the first reuse fails instantly with a reset.
     let out: BrainOut = { content: '', toolCalls: [], error: 'unreachable' }
@@ -749,7 +759,7 @@ export async function think(userText: string, onSentence?: (s: string) => void):
 let lastBrainWake = 0
 
 // ── auto-refreshed index of ALL sessions across ALL projects ──────
-type ThreadIndexEntry = { id: string; title: string; dir: string; updated?: number }
+type ThreadIndexEntry = { id: string; title: string; dir: string; updated?: number; threadId?: string }
 let threadIndex: ThreadIndexEntry[] = []
 let lastIndexRefresh = 0
 let lastBrainTps = 0
@@ -761,9 +771,15 @@ const nicknamesPath = () => path.join(workspaceDir(), 'nicknames.json')
 let nicknames: Record<string, string> = {}
 try { nicknames = JSON.parse(fs.readFileSync(nicknamesPath(), 'utf-8')) } catch {}
 function labelFor(id: string, title: string): string { return nicknames[id] ?? title }
+function threadLocation(threadId?: string): string {
+  if (!threadId || !clientRef) return ''
+  const ch = clientRef.channels.cache.get(threadId) as { guild?: { name?: string }; parent?: { name?: string } | null } | undefined
+  if (!ch?.guild?.name) return ''
+  return ` in Discord "${ch.guild.name}"${ch.parent?.name ? ` #${ch.parent.name}` : ''}${threadId ? ` thread ${threadId}` : ''}`
+}
 function threadIdent(id: string): string {
   const e = threadIndex.find((x) => x.id === id)
-  return e ? `${labelFor(id, e.title)} (${path.basename(e.dir)})` : id
+  return e ? `${labelFor(id, e.title)} (${path.basename(e.dir)})${threadLocation(e.threadId)}` : id
 }
 function extractJsonArray(raw: string): unknown[] {
   // kimaki CLI wraps --json output in log lines (which contain brackets);
@@ -799,10 +815,10 @@ async function refreshThreadIndexInner(): Promise<void> {
     if (!p.directory) continue
     const raw = await runKimaki(['session', 'list', '--project', p.directory, '--json'], 45000, 2_000_000)
     if (raw.startsWith('ERROR')) log(`wendy: index walk ${p.directory.split('/').pop()}: ${raw.slice(0, 90)}`)
-    for (const sess of extractJsonArray(raw) as Array<{ id?: string; title?: string; updated?: string | number; time?: { updated?: number } }>) {
+    for (const sess of extractJsonArray(raw) as Array<{ id?: string; title?: string; updated?: string | number; time?: { updated?: number }; threadId?: string }>) {
       if (!sess.id || !sess.title) continue
       const upd = Number(sess.time?.updated ?? (typeof sess.updated === 'string' ? Date.parse(sess.updated) : sess.updated)) || 0
-      next.push({ id: sess.id, title: sess.title, dir: p.directory, updated: upd })
+      next.push({ id: sess.id, title: sess.title, dir: p.directory, updated: upd, threadId: sess.threadId && sess.threadId !== 'None' ? String(sess.threadId) : undefined })
     }
   }
   log(`wendy: index walk done - ${next.length} sessions`)
@@ -1314,7 +1330,17 @@ function armFinishWatch(id: string, label: string, reArmed = false): void {
     execFile('bash', ['-c', `exec kimaki session wait '${id.replace(/[^A-Za-z0-9_-]/g, '')}'`], { timeout: 45 * 60000, maxBuffer: 8 * 1024 * 1024, killSignal: 'SIGKILL' }, (err, stdout) => {
       finishWatches.delete(id)
       const ranMs = Date.now() - t0
-      if (err && !String(stdout ?? '').trim()) { diag('finish_watch_dead', { id, ms: ranMs }); return }
+      if (err && !String(stdout ?? '').trim()) {
+        // kimaki's wait caps at ~30min. A long-running task is not dead - keep
+        // watching (fresh waiter, up to 4h from dispatch) so the finish still fires.
+        const started = ledger.startedAt(id)
+        if (ranMs > 25 * 60000 && started && Date.now() - started < 4 * 3600000) {
+          diag('finish_watch_rearm', { id, ms: ranMs })
+          armFinishWatch(id, label, true)
+          return
+        }
+        diag('finish_watch_dead', { id, ms: ranMs }); return
+      }
       // An exit within seconds means it attached to an already-idle session
       // (the dispatch had not started or the inline reply already covered it) -
       // the 45s pollers own that case. Only announce believable completions.
@@ -1355,7 +1381,9 @@ async function pollWatchlist(): Promise<void> {
       const first = !w.seen
       w.seen = true; w.idle = 0; w.fp = nfp
       diag('watch_delta', { id: w.id, label: w.label, first })
-      if (first && shouldAnnounce(w.id, tail)) {
+      const justDispatched = (ledger.startedAt(w.id) ?? 0) > Date.now() - 5 * 60000
+      if (first && justDispatched) diag('watch_first_delta_suppressed', { id: w.id })
+      if (first && !justDispatched && shouldAnnounce(w.id, tail)) {
         const brief = await summarizeForVoice(w.label, recentMessages(tail, 3))
         briefingCache.set(w.id, { s: brief, at: Date.now() })
         announce(brief, 'interrupt', w.id)

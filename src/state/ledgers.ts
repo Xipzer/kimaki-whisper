@@ -40,6 +40,7 @@ export class DispatchLedger {
     if (e) { e.done = this.now(); this.save() }
   }
   has(id: string): boolean { return this.status.has(id) }
+  startedAt(id: string): number | undefined { return this.status.get(id)?.at }
   everDispatched(id: string): boolean { return this.ever.has(id) }
   /** Unfinished dispatches younger than maxAgeMs - what to re-arm on boot. */
   unfinished(maxAgeMs: number): Array<[string, DispatchEntry]> {

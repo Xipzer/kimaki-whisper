@@ -600,7 +600,7 @@ export function telegramChatDigest(target: string, n = 25, all = false, hours?: 
 }
 
 // - person profiles: cross-chat, persistent, auto-consolidated -
-type Profile = { name: string; handle?: string; firstSeen: number; lastSeen: number; interactions: number; sinceRefresh: number; profile: string; recent: string[]; tone?: 'professional' | 'casual' | 'banter' }
+type Profile = { name: string; handle?: string; firstSeen: number; lastSeen: number; interactions: number; sinceRefresh: number; refreshedAt?: number; profile: string; recent: string[]; tone?: 'professional' | 'casual' | 'banter' }
 // hot per-chat tails, bounded - keeps room context O(1) as the log grows
 const roomRing = new Map<string, TgMsg[]>()
 function pushRing(m: TgMsg): void {
@@ -705,8 +705,11 @@ export function telegramProfileList(): string {
 }
 /** People due a profile refresh (enough new interactions since the last one). */
 export function telegramProfilesDue(): Array<{ key: string; name: string; recent: string; existing: string }> {
+  // 164 rewrites/day observed (owner 29x, one chatter 24x) - each a brain call.
+  // The owner has memory.md; everyone else refreshes at most every 30 minutes.
+  const now = Date.now()
   return Object.entries(profiles)
-    .filter(([, p]) => p.sinceRefresh >= 6)
+    .filter(([key, p]) => p.sinceRefresh >= 6 && key !== String(OWNER_TG_ID) && key !== OWNER_TG_HANDLE && p.name !== 'Xipz' && now - (p.refreshedAt ?? 0) > 30 * 60000)
     .map(([key, p]) => ({ key, name: p.name, recent: p.recent.join('\n'), existing: p.profile }))
 }
 export function telegramProfileWrite(key: string, text: string): void {
@@ -714,6 +717,7 @@ export function telegramProfileWrite(key: string, text: string): void {
   if (!p) return
   p.profile = text.slice(0, 700)
   p.sinceRefresh = 0
+  p.refreshedAt = Date.now()
   saveProfiles()
 }
 /** Owner/Wendy manual note about someone. */
