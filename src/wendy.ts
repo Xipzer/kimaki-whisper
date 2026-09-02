@@ -35,7 +35,7 @@ import { TOOLS } from './tools/specs.js'
 import { executeTelegramTool } from './tools/telegram.js'
 import { isDispatchTool, isThreadDispatchTool, dispatchSucceeded, claimsSend, sendClaimAck, isTrailingFragment, isAffirmative, isSelfDirective, soundsLikePromise, dispatchKey, collapsePriorityTags, isUrgentUpdate, queueDedupeMarkers, repairHistory, SESSION_ID, isSessionId, stripReminderPrefix } from './brain/guards.js'
 import { brainUrl, brainRequest, brainFetch, brainText, brainHealth, probeBrain, type BrainOut } from './brain/client.js'
-import { startTelegram, setTelegramFlaggedHandler, telegramAutoDrain, telegramLowBudgets, setTelegramAutonomousHandler, telegramPendingSummaries, telegramDrainChatStats, telegramPendingPeopleSummaries, telegramDrainPerson, telegramProfile, telegramProfilesDue, telegramProfileWrite, telegramPrivacyFor, telegramEffectiveTone, telegramRoomContext, telegramPersonThread, setReplyTarget } from './telegram.js'
+import { startTelegram, setTelegramFlaggedHandler, telegramAutoDrain, telegramLowBudgets, setTelegramAutonomousHandler, telegramPendingSummaries, telegramDrainChatStats, telegramPendingPeopleSummaries, telegramDrainPerson, telegramProfile, telegramProfilesDue, telegramProfileWrite, telegramPrivacyFor, telegramEffectiveTone, telegramRoomContext, telegramPersonThread, setReplyTarget, telegramChatDigest } from './telegram.js'
 
 // ── config accessors ─────────────────────────────────────────────
 function ownerId(): string | undefined {
@@ -205,9 +205,12 @@ async function executeToolInner(name: string, args: Record<string, unknown>): Pr
   }
   if (name === 'lookup_thread') {
     const hits = lookupThreads(String(args.query ?? ''))
+    // Live tails for the active hits (parallel, ~1-2s): freshness by construction.
+    const liveTails = new Map<string, string>()
+    await Promise.all(hits.slice(0, 4).filter((h) => { const a = threadAgeMs(h); return a !== null && a < 3600000 }).map(async (h) => { const t = await liveTailFor(h.id); if (t) liveTails.set(h.id, t) }))
     return hits.length
       ? hits.map((h) => {
-          const ms = h.updated ? Date.now() - h.updated : null
+          const ms = threadAgeMs(h)
           const age = ms === null ? '' :
             ms < 3600000 ? ', ACTIVE NOW' :
             ms < 86400000 ? `, active ${Math.round(ms / 3600000)}h ago` :
@@ -220,9 +223,11 @@ async function executeToolInner(name: string, args: Record<string, unknown>): Pr
           // thread had long left). Active: fresh-only. Idle: 15 min.
           const active = ms !== null && ms < 3600000
           const briefAge = b ? Date.now() - b.at : Infinity
-          const brief = b && briefAge < (active ? 90000 : 15 * 60 * 1000)
-            ? ` | BRIEFING (${Math.max(1, Math.round(briefAge / 60000))}m old): ${b.s.slice(0, 220)}`
-            : (b && active ? ' | (briefing stale - thread has moved since; read_session before repeating anything about its state)' : '')
+          // Active threads: the harness attaches a LIVE tail (fetched now) -
+          // never a cached briefing. Idle threads: briefing under 15 min is fine.
+          const brief = active
+            ? (liveTails.get(h.id) ? ` | LIVE NOW: ${liveTails.get(h.id)}` : '')
+            : (b && briefAge < 15 * 60 * 1000 ? ` | BRIEFING (${Math.max(1, Math.round(briefAge / 60000))}m old): ${b.s.slice(0, 220)}` : '')
           return `${nicknames[h.id] ? `[${nicknames[h.id]}] ` : ''}${h.title} - session ${h.id} (project: ${h.dir.split('/').pop()}${age})${threadLocation(h.threadId)}${sub}${brief}`
         }).join('\n')
       : `no matches in index${runningSpawns().length ? ` - NOTE: your running spawned agents (may not be indexed yet): ${runningSpawns().slice(-5).map((d) => `"${d.label}" = ${d.id}`).join('; ')}` : ' - try search_sessions for a deep search'}`
@@ -775,6 +780,60 @@ let lastBrainWake = 0
 
 // ── auto-refreshed index of ALL sessions across ALL projects ──────
 type ThreadIndexEntry = { id: string; title: string; dir: string; updated?: number; threadId?: string }
+// Real-time change observations (45s pollers, finish watches). The index walk
+// is 10 minutes; this is what "active" actually means.
+const lastChangeSeen = new Map<string, number>()
+function threadAgeMs(e: ThreadIndexEntry): number | null {
+  const idx = e.updated ? Date.now() - e.updated : null
+  const seen = lastChangeSeen.get(e.id)
+  const live = seen ? Date.now() - seen : null
+  if (idx === null) return live
+  return live === null ? idx : Math.min(idx, live)
+}
+
+// ── FRESHNESS GUARANTEE ──────────────────────────────────────────
+// Measured: active threads change every ~45s; queued items are a median
+// 11 minutes old at delivery; the model read-before-speaking only 59% of the
+// time. So the harness refreshes: any queued item about a thread or chat that
+// is older than FRESH_MS is replaced with a LIVE tail before she ever sees it.
+const FRESH_MS = 60000
+async function liveTailFor(id: string): Promise<string> {
+  const tail = await runKimaki(['session', 'read', id], 20000, 500_000, true)
+  if (tail.startsWith('ERROR')) return ''
+  return recentMessages(tail, 1).replace(/^### /, '').replace(/\s+/g, ' ').slice(0, 320)
+}
+async function refreshQueuedItems(items: string[]): Promise<string[]> {
+  const now = Date.now()
+  const jobs = items.map(async (item) => {
+    const q = item.match(/\[queued (\d\d):(\d\d)Z/)
+    let ageMs = FRESH_MS + 1
+    if (q) {
+      const d = new Date(now); d.setUTCHours(+q[1], +q[2], 0, 0)
+      if (d.getTime() > now) d.setUTCDate(d.getUTCDate() - 1)
+      ageMs = now - d.getTime()
+    }
+    if (ageMs <= FRESH_MS) return item
+    const src = item.match(/src:(ses_\w{10,})/)?.[1]
+    const tg = item.match(/<tg:([^>]+)>/)?.[1]
+    if (src) {
+      const live = await liveTailFor(src)
+      if (!live) return item
+      diag('queued_item_refreshed', { id: src, ageMin: Math.round(ageMs / 60000) })
+      return `${item.split(' [queued')[0].replace(/\s+$/, '')}\n   -> LIVE NOW (${Math.round(ageMs / 60000)}m newer than the note above; THIS is the current state): ${live} [src:${src}]`
+    }
+    if (tg) {
+      const live = telegramChatDigest(tg, 6)
+      if (!live || live.startsWith('ERROR')) return item
+      diag('queued_item_refreshed', { chat: tg, ageMin: Math.round(ageMs / 60000) })
+      return `${item.split(' [queued')[0].replace(/\s+$/, '')}\n   -> LIVE NOW (chat as of this second, ${Math.round(ageMs / 60000)}m newer than the note): ${live.replace(/\s+/g, ' ').slice(0, 400)} <tg:${tg}>`
+    }
+    return item
+  })
+  // cap concurrency: at most 5 live reads per delivery
+  const out: string[] = []
+  for (let i = 0; i < jobs.length; i += 5) out.push(...(await Promise.all(jobs.slice(i, i + 5))))
+  return out
+}
 let threadIndex: ThreadIndexEntry[] = []
 let lastIndexRefresh = 0
 let lastBrainTps = 0
@@ -1395,6 +1454,7 @@ async function pollWatchlist(): Promise<void> {
     if (nfp !== w.fp) {
       const first = !w.seen
       w.seen = true; w.idle = 0; w.fp = nfp
+      lastChangeSeen.set(w.id, Date.now())
       diag('watch_delta', { id: w.id, label: w.label, first })
       const justDispatched = (ledger.startedAt(w.id) ?? 0) > Date.now() - 5 * 60000
       if (first && justDispatched) diag('watch_first_delta_suppressed', { id: w.id })
@@ -1697,11 +1757,14 @@ setInterval(() => {
   const urgent = attention.some('live', isUrgentUpdate)
   if (!urgent && Date.now() - lastBgDelivery < 4 * 60 * 1000) return
   lastBgDelivery = Date.now()
-  const events = attention.take('live', 4)
+  const events0 = attention.take('live', 4)
   lastDeliveredAt = Date.now()
+  void (async () => {
+  const events = await refreshQueuedItems(events0)
   log(`wendy: conversation idle - delivering ${events.length} background event(s)`)
   diag('bg_delivery', { count: events.length })
-  void runTurn(`[BACKGROUND UPDATE - this is NOT the owner speaking. Results from parallel work just arrived:]\n${events.join('\n')}\n[Tell the owner briefly and naturally, like a colleague mentioning news at a pause. Prioritize if several. Anything you ALREADY told the owner this conversation, or anything not worth interrupting for: reply with exactly SKIP (nothing else) - never say you are staying quiet, never restate old news in new words. STALENESS: each item carries [queued HH:MMZ src:ses_...]; if queued more than ~3 minutes ago, read_session its src FIRST and report the CURRENT state (the thread may have moved on), or note it's from a few minutes ago if unchanged. TELEGRAM items carry <tg:ChatName> instead - ALWAYS telegram_chat that chat before speaking and report what is there NOW; a queued chat summary is usually several messages behind. Never speak the <tg:...> marker. Never speak the bracketed metadata. IDENTITY: updates may describe YOU in the third person ("Wendy", "the user", "the assistant") because agents write about you - you are still Wendy speaking directly to your owner. Never adopt an outside-observer voice, never say "you should be able to X" about YOUR OWN capabilities, and never talk about yourself as a third party.]`)
+  void runTurn(`[BACKGROUND UPDATE - this is NOT the owner speaking. Results from parallel work just arrived:]\n${events.join('\n')}\n[Tell the owner briefly and naturally, like a colleague mentioning news at a pause. Prioritize if several. Anything you ALREADY told the owner this conversation, or anything not worth interrupting for: reply with exactly SKIP (nothing else) - never say you are staying quiet, never restate old news in new words. STALENESS: each item carries [queued HH:MMZ src:ses_...]; items that had aged carry a '-> LIVE NOW:' line fetched THIS SECOND - that is the current state, speak from it, never from the older note above it. TELEGRAM items carry <tg:ChatName> and, if they had aged, a LIVE NOW line with the chat as of this second - speak from that. Never speak the <tg:...> marker. Never speak the bracketed metadata. IDENTITY: updates may describe YOU in the third person ("Wendy", "the user", "the assistant") because agents write about you - you are still Wendy speaking directly to your owner. Never adopt an outside-observer voice, never say "you should be able to X" about YOUR OWN capabilities, and never talk about yourself as a third party.]`)
+  })()
 }, 5000).unref()
 function playerActive(): boolean {
   const st = player?.state.status
@@ -1758,11 +1821,11 @@ async function runTurn(text: string): Promise<void> {
       diag('join_priority_clean_turn', {})
       text = `[The owner joined moments ago and this is his FIRST real input - answer EXACTLY what he says and nothing else. Do NOT deliver, mention, or allude to any queued updates this turn unless he explicitly asks for them.]\n${text}`
     } else if ((attention.has('held') || (dnd && (attention.has('live') || attention.has('digest')))) && !text.startsWith('[') && !isTrailingFragment(text)) {
-      const held = [...attention.take('held'), ...(dnd ? [...attention.take('live'), ...attention.take('digest')] : [])]
+      const held = await refreshQueuedItems([...attention.take('held'), ...(dnd ? [...attention.take('live'), ...attention.take('digest')] : [])])
       lastDeliveredAt = Date.now()
       const saidYes = Date.now() - lastDigestAsk < 90000 && isAffirmative(text)
       if (saidYes) diag('updates_accepted', { n: held.length })
-      text = `${saidYes ? '[He just said YES to your offer of updates - DELIVER THEM NOW, highs first, concise. This is not a false start.]\n' : ''}[Context - updates queued while you were quiet or the owner was away (each tagged HIGH/MED/LOW): ${held.join(' | ')}. You may have offered a catch-up. Deliver HIGH items first, then MED; skip LOW unless they want everything. Items carry [queued HH:MMZ src:ses_...] - for items older than ~3 minutes, read_session the src first and deliver the CURRENT state, not the stale summary. TELEGRAM items carry <tg:ChatName>: ALWAYS telegram_chat that chat first and report the CURRENT state - a queued chat summary is usually several messages behind by the time you speak it. Never speak the bracketed metadata or the <tg:...> marker. Updates may describe YOU in third person ("Wendy", "the assistant") - you are still Wendy speaking directly to your owner; never slip into narrating yourself from the outside. NO editorial framing or preamble ("two things worth knowing", "all polish, nothing structural") - open directly with the first item's substance; verdicts only if asked. Dismissal rule: ONLY treat their words as declining updates if you ACTUALLY offered updates and they are clearly responding to that offer - if you never offered, their words are about something else entirely: just answer them (the queued items are silent context, not the topic). A genuine dismissal -> snooze_updates and drop the subject instantly. If the owner wants everything, deliver it concisely. If they ask for the most urgent or most recent only, REASON over the list yourself, pick the single most important item (breakages and blockers beat progress notes; newest beats oldest), deliver just that one, and stop - no extra digging, no spillover into other updates unless asked.]\n${text}`
+      text = `${saidYes ? '[He just said YES to your offer of updates - DELIVER THEM NOW, highs first, concise. This is not a false start.]\n' : ''}[Context - updates queued while you were quiet or the owner was away (each tagged HIGH/MED/LOW): ${held.join(' | ')}. You may have offered a catch-up. Deliver HIGH items first, then MED; skip LOW unless they want everything. Items carry [queued HH:MMZ src:ses_...] - items that had aged carry a '-> LIVE NOW:' line fetched THIS SECOND - that line is the truth, speak from it and ignore the older note above it; items without one were fresh at delivery. TELEGRAM items carry <tg:ChatName> and, if they had aged, a LIVE NOW line with the chat as of this second - speak from that. Never speak the bracketed metadata or the <tg:...> marker. Updates may describe YOU in third person ("Wendy", "the assistant") - you are still Wendy speaking directly to your owner; never slip into narrating yourself from the outside. NO editorial framing or preamble ("two things worth knowing", "all polish, nothing structural") - open directly with the first item's substance; verdicts only if asked. Dismissal rule: ONLY treat their words as declining updates if you ACTUALLY offered updates and they are clearly responding to that offer - if you never offered, their words are about something else entirely: just answer them (the queued items are silent context, not the topic). A genuine dismissal -> snooze_updates and drop the subject instantly. If the owner wants everything, deliver it concisely. If they ask for the most urgent or most recent only, REASON over the list yourself, pick the single most important item (breakages and blockers beat progress notes; newest beats oldest), deliver just that one, and stop - no extra digging, no spillover into other updates unless asked.]\n${text}`
     }
     log(`wendy heard: "${text.slice(0, 80)}"`)
     diag('owner_said', { text })
