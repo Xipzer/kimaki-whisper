@@ -34,7 +34,7 @@ import { SYSTEM_PROMPT } from './prompt.js'
 import { TOOLS } from './tools/specs.js'
 import { executeTelegramTool } from './tools/telegram.js'
 import { isDispatchTool, isThreadDispatchTool, dispatchSucceeded, claimsSend, sendClaimAck, isTrailingFragment, isAffirmative, isSelfDirective, soundsLikePromise, dispatchKey, collapsePriorityTags, isUrgentUpdate, queueDedupeMarkers, repairHistory, SESSION_ID, isSessionId, stripReminderPrefix } from './brain/guards.js'
-import { brainUrl, brainRequest, brainFetch, brainText, brainHealth, type BrainOut } from './brain/client.js'
+import { brainUrl, brainRequest, brainFetch, brainText, brainHealth, probeBrain, type BrainOut } from './brain/client.js'
 import { startTelegram, setTelegramFlaggedHandler, telegramAutoDrain, telegramLowBudgets, setTelegramAutonomousHandler, telegramPendingSummaries, telegramDrainChatStats, telegramPendingPeopleSummaries, telegramDrainPerson, telegramProfile, telegramProfilesDue, telegramProfileWrite, telegramPrivacyFor, telegramEffectiveTone, telegramRoomContext, telegramPersonThread, setReplyTarget } from './telegram.js'
 
 // ── config accessors ─────────────────────────────────────────────
@@ -570,6 +570,7 @@ export async function think(userText: string, onSentence?: (s: string) => void):
   }
   const turnSeq = inputSeq
   let nudged = false
+  let waitedForBrain = false
   let claimChecked = false
   let blockedSendsThisTurn = 0
   const dispatchToolsRun = new Set<string>()
@@ -595,7 +596,23 @@ export async function think(userText: string, onSentence?: (s: string) => void):
         if (!wake) return fail('My reasoning engine is unreachable and I have no wake command configured.')
         log('wendy: brain unreachable - running configured wake command')
         execFile('bash', ['-c', wake], { timeout: 60000, killSignal: 'SIGKILL' }, () => {})
-        return fail('My reasoning engine was asleep - waking it now. Give me about thirty seconds and ask again.')
+        void speak('My reasoning engine was asleep - waking it now, hang on.')
+      }
+      // The server is waking/loading, not broken: wait for it (up to 90s,
+      // polling health) and retry the same hop, so he never has to repeat
+      // himself - his question is still right here.
+      if (netFail || out.error.startsWith('HTTP 503')) {
+        if (Date.now() - lastBrainWake < 180000 && !waitedForBrain) {
+          waitedForBrain = true
+          log('wendy: brain loading - waiting for it')
+          diag('brain_wait_for_load', {})
+          for (let i = 0; i < 18; i++) {
+            await new Promise((r) => setTimeout(r, 5000))
+            await probeBrain()
+            if (brainHealth().up) break
+          }
+          if (brainHealth().up) { hop--; continue }
+        }
       }
       return fail('I hit an error reaching my reasoning engine - mind repeating that?')
     }
