@@ -503,21 +503,41 @@ function pcm48kMonoToWav(pcm: Buffer): Buffer {
   return Buffer.concat([header, pcm])
 }
 
-type SttResult = { text: string; noSpeech: number; logprob: number }
+type SttResult = { text: string; noSpeech: number; logprob: number; failed?: boolean }
 async function stt(wav: Buffer): Promise<SttResult> {
-  const form = new FormData()
-  form.append('file', new Blob([new Uint8Array(wav)], { type: 'audio/wav' }), 'utterance.wav')
-  form.append('model', 'Systran/faster-whisper-large-v3')
-  form.append('language', 'en')
-  form.append('response_format', 'verbose_json')
-  const res = await fetch(`${speachesUrl()}/v1/audio/transcriptions`, { method: 'POST', body: form, signal: AbortSignal.timeout(30000) })
-    .catch((e) => new Error(String(e)))
-  if (res instanceof Error || !res.ok) return { text: '', noSpeech: 1, logprob: -10 }
-  const d = (await res.json().catch(() => ({}))) as { text?: string; segments?: Array<{ no_speech_prob?: number; avg_logprob?: number }> }
-  const segs = d.segments ?? []
-  const noSpeech = segs.length ? Math.min(...segs.map((x) => x.no_speech_prob ?? 0)) : 0
-  const logprob = segs.length ? segs.reduce((a, x) => a + (x.avg_logprob ?? 0), 0) / segs.length : 0
-  return { text: (d.text ?? '').trim(), noSpeech, logprob }
+  // 16-bit mono 48k: 96,000 bytes per second of audio
+  const seconds = Math.max(1, Math.round((wav.length - 44) / 96000))
+  // Timeout scales with clip length (large-v3 on a GPU shared with TTS): a
+  // fixed 30s silently ate a 60s+ monologue. One retry on failure. A final
+  // failure is LOUD - logged, diag'd, audio saved - never an empty string.
+  const timeoutMs = Math.min(150000, 20000 + seconds * 1500)
+  let lastErr = ''
+  for (let attempt = 1; attempt <= 2; attempt++) {
+    const form = new FormData()
+    form.append('file', new Blob([new Uint8Array(wav)], { type: 'audio/wav' }), 'utterance.wav')
+    form.append('model', 'Systran/faster-whisper-large-v3')
+    form.append('language', 'en')
+    form.append('response_format', 'verbose_json')
+    const t0 = Date.now()
+    const res = await fetch(`${speachesUrl()}/v1/audio/transcriptions`, { method: 'POST', body: form, signal: AbortSignal.timeout(timeoutMs) })
+      .catch((e) => new Error(String(e)))
+    if (res instanceof Error) { lastErr = res.message.slice(0, 120); diag('stt_error', { attempt, seconds, ms: Date.now() - t0, err: lastErr }); continue }
+    if (!res.ok) { lastErr = `HTTP ${res.status}`; diag('stt_error', { attempt, seconds, ms: Date.now() - t0, err: lastErr }); continue }
+    const d = (await res.json().catch(() => ({}))) as { text?: string; segments?: Array<{ no_speech_prob?: number; avg_logprob?: number }> }
+    const segs = d.segments ?? []
+    const noSpeech = segs.length ? Math.min(...segs.map((x) => x.no_speech_prob ?? 0)) : 0
+    const logprob = segs.length ? segs.reduce((a, x) => a + (x.avg_logprob ?? 0), 0) / segs.length : 0
+    if (seconds >= 8) diag('stt_ok', { seconds, ms: Date.now() - t0, chars: (d.text ?? '').length })
+    return { text: (d.text ?? '').trim(), noSpeech, logprob }
+  }
+  // Both attempts failed: preserve the audio and surface the loss.
+  try {
+    const dir = path.join(configDir(), 'lost-audio'); fs.mkdirSync(dir, { recursive: true })
+    fs.writeFileSync(path.join(dir, `${new Date().toISOString().replace(/[:.]/g, '-')}-${seconds}s.wav`), wav)
+  } catch {}
+  log(`wendy: STT FAILED on a ${seconds}s clip (${lastErr}) - audio saved to lost-audio/`)
+  diag('stt_failed', { seconds, err: lastErr })
+  return { text: '', noSpeech: 1, logprob: -10, failed: true }
 }
 
 async function tts(text: string): Promise<Buffer | null> {
@@ -1897,12 +1917,14 @@ function listenTo(channel: VoiceBasedChannel, userId: string): void {
   if (!connection) return
   const receiver = connection.receiver
   receiver.speaking.on('start', (speakingUserId) => {
-    if (speakingUserId !== userId || capturing) return
+    if (speakingUserId !== userId) return
+    if (capturing) { diag('capture_open_ignored_busy', {}); return }
+    diag('capture_open', {})
     capturing = true
     let rotations = 0
     const captureGuard = setInterval(() => {
       if (!capturing) { clearInterval(captureGuard); return }
-      if (!chunks.length) {
+      if (!chunks.length && rotations === 0) {
         // Opened but never received audio (Discord fires 'speaking' without a
         // stream sometimes). Left alone, capturing stays true forever and every
         // later utterance is ignored - she goes DEAF. Release it.
@@ -1917,6 +1939,7 @@ function listenTo(channel: VoiceBasedChannel, userId: string): void {
       // Stream never hit 900ms of silence (noise floor / open mic / long
       // monologue). Rotate: transcribe what we have, keep recording - the
       // owner is never cut off and never unheard.
+      if (!chunks.length) return // open but momentarily silent after a rotation - nothing to transcribe yet
       // He is STILL TALKING. Transcribe the segment into a buffer; the turn
       // fires when he actually stops (natural close) with everything merged.
       // Acting on a mid-monologue segment made her talk over him and then
@@ -1924,9 +1947,9 @@ function listenTo(channel: VoiceBasedChannel, userId: string): void {
       rotations++
       log(`wendy: long capture - rotating segment ${rotations} into the monologue buffer`)
       diag('capture_rotated', { bytes: chunks.reduce((a, c) => a + c.length, 0), segment: rotations })
-      void finishSegment(chunks.splice(0), rotations >= 4 ? 'force' : 'buffer')
+      void finishSegment(chunks.splice(0), rotations >= 8 ? 'force' : 'buffer')
       interrupted = false
-    }, 60000)
+    }, 30000)
     const opus = receiver.subscribe(speakingUserId, {
       end: { behavior: EndBehaviorType.AfterSilence, duration: 900 },
     })
@@ -1955,9 +1978,21 @@ function listenTo(channel: VoiceBasedChannel, userId: string): void {
         }
       }
     })
-    opus.on('close', () => { clearInterval(captureGuard); capturing = false })
-    opus.on('error', () => { clearInterval(captureGuard); capturing = false })
-    decoder.on('close', () => { clearInterval(captureGuard); capturing = false })
+    // ANY exit that is not decoder 'end' used to drop the captured audio on
+    // the floor with no trace. Every exit now flushes what was captured.
+    let flushed = false
+    const flushOnExit = (why: string) => (): void => {
+      clearInterval(captureGuard)
+      capturing = false
+      if (flushed) return
+      flushed = true
+      const bytes = chunks.reduce((a, c) => a + c.length, 0)
+      diag('capture_exit', { why, bytes, buffered: monologueBuf.length })
+      if (bytes > 24000 || monologueBuf) { liveCapture = null; void finishSegment(chunks.splice(0)) }
+    }
+    opus.on('close', flushOnExit('opus_close'))
+    opus.on('error', flushOnExit('opus_error'))
+    decoder.on('close', flushOnExit('decoder_close'))
     const finishSegment = async (segChunks: Buffer[], mode: 'final' | 'buffer' | 'force' = 'final'): Promise<void> => {
       {
         const resumeIfPhantom = (): void => {
@@ -1999,7 +2034,15 @@ function listenTo(channel: VoiceBasedChannel, userId: string): void {
         const stt0 = await stt(pcm48kMonoToWav(pcm))
         let text = stt0.text
         const { noSpeech, logprob } = stt0
-        if (!text || text.length < 2) { resumeIfPhantom(); return }
+        if (stt0.failed) {
+          // His words are on disk, not in her head. Say so NOW - silence here
+          // is the one failure he cannot detect from his side.
+          if (monologueBuf) { text = monologueBuf; monologueBuf = ''; diag('monologue_partial_after_stt_failure', {}) }
+          else { void speak('Sorry - my ears choked on that, it was a long one. Say it again?'); return }
+        } else if (!text || text.length < 2) {
+          if (pcm.length > 2 * 96000) diag('stt_empty_on_substantial_audio', { seconds: Math.round(pcm.length / 96000), noSpeech: +noSpeech.toFixed(2) })
+          resumeIfPhantom(); return
+        }
         // Silence wake-word: DETERMINISTIC - checked before every other gate so
         // nothing (confidence, artifact, noise filters) can eat a wake attempt.
         if (isSilenced() && /\bw[ei]+nd[iy]e?\b/i.test(text)) {
@@ -2094,9 +2137,12 @@ function listenTo(channel: VoiceBasedChannel, userId: string): void {
       clearInterval(captureGuard)
       capturing = false
       liveCapture = null
+      if (flushed) return
+      flushed = true
+      diag('capture_exit', { why: 'end', bytes: chunks.reduce((a, c) => a + c.length, 0), buffered: monologueBuf.length })
       void finishSegment(chunks)
     })
-    decoder.on('error', () => { clearInterval(captureGuard); capturing = false })
+    decoder.on('error', flushOnExit('decoder_error'))
   })
 }
 
