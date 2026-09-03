@@ -1773,7 +1773,11 @@ function playerActive(): boolean {
 
 async function runTurn(text: string): Promise<void> {
   if (draining) return
-  const seq = ++inputSeq
+  // Only OWNER speech supersedes an in-flight reply. Background turns that
+  // arrive mid-turn queue behind it and must never outrank him (live: a
+  // 27s search found his answer, a queued thread ping bumped the sequence,
+  // the answer was binned and he had to ask again ten minutes later).
+  const seq = text.startsWith('[') ? inputSeq : ++inputSeq
   if (busy) {
     // Telegram/background turns queue properly instead of overwriting each other;
     // owner speech keeps the merge behaviour (latest intent wins).
