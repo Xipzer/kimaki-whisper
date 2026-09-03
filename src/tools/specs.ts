@@ -703,4 +703,12 @@ export const TOOLS = [
   },
   { type: 'function', function: { name: 'thread_triggers', description: 'List armed triggers and fire counts.', parameters: { type: 'object', properties: {} } } },
   { type: 'function', function: { name: 'thread_trigger_remove', description: 'Disarm a trigger by id.', parameters: { type: 'object', properties: { id: { type: 'string' } }, required: ['id'] } } },
+  {
+    type: 'function',
+    function: {
+      name: 'name_only_mode',
+      description: 'For calls with other people in them: ON = ignore everything the owner says unless he addresses you by name ("Wendy, ..."), while still delivering updates at pauses and never barging in. OFF = normal. Only on his explicit request ("name only", "only listen when I say your name", "I have someone in the call").',
+      parameters: { type: 'object', properties: { on: { type: 'boolean' } }, required: ['on'] },
+    },
+  },
 ] as const

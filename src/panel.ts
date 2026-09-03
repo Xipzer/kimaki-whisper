@@ -9,7 +9,7 @@ import {
 import { execFile } from 'node:child_process'
 import { loadConfig } from './config.js'
 import {
-  wendySnapshot, wendySleep, wendyWake, wendySetDnd, wendyUnsilence, wendySilence, wendyIsDormant,
+  wendySnapshot, wendySleep, wendyWake, wendySetDnd, wendyUnsilence, wendySilence, wendySetNameOnly, wendyIsDormant,
 } from './wendy.js'
 import {
   telegramPolicyStatus, telegramSentLog, telegramPrivacyStatus, telegramProfileList,
@@ -61,16 +61,20 @@ export function buildPanel(): { embeds: EmbedBuilder[]; components: ActionRowBui
   }
   embed.setFooter({ text: `updated ${new Date().toLocaleTimeString('en-GB')}` })
 
+  // Row 1: lifecycle. Row 2: attention modes (Discord caps a row at 5).
   const buttons = new ActionRowBuilder<ButtonBuilder>().addComponents(
     new ButtonBuilder().setCustomId('wp:refresh').setLabel('Refresh').setEmoji('🔄').setStyle(ButtonStyle.Secondary),
     wendyIsDormant()
       ? new ButtonBuilder().setCustomId('wp:wake').setLabel('Start').setEmoji('▶️').setStyle(ButtonStyle.Success)
       : new ButtonBuilder().setCustomId('wp:sleep').setLabel('Stop').setEmoji('⏸️').setStyle(ButtonStyle.Danger),
-    new ButtonBuilder().setCustomId('wp:dnd').setLabel(s.dnd ? 'DND off' : 'DND on').setEmoji('🔕').setStyle(ButtonStyle.Secondary),
-    s.silencedMin
-      ? new ButtonBuilder().setCustomId('wp:unsilence').setLabel(`Unmute (${s.silencedMin}m left)`).setEmoji('🔊').setStyle(ButtonStyle.Secondary)
-      : new ButtonBuilder().setCustomId('wp:silence').setLabel('Mute 30m').setEmoji('🔇').setStyle(ButtonStyle.Secondary),
     new ButtonBuilder().setCustomId('wp:brain').setLabel('Brain').setEmoji('🧠').setStyle(ButtonStyle.Secondary),
+  )
+  const modes = new ActionRowBuilder<ButtonBuilder>().addComponents(
+    new ButtonBuilder().setCustomId('wp:nameonly').setLabel(s.nameOnly ? 'Name-only: ON' : 'Name-only').setEmoji('🗣️').setStyle(s.nameOnly ? ButtonStyle.Primary : ButtonStyle.Secondary),
+    new ButtonBuilder().setCustomId('wp:dnd').setLabel(s.dnd ? 'DND: ON' : 'DND').setEmoji('🔕').setStyle(s.dnd ? ButtonStyle.Primary : ButtonStyle.Secondary),
+    s.silencedMin
+      ? new ButtonBuilder().setCustomId('wp:unsilence').setLabel(`Unmute (${s.silencedMin}m left)`).setEmoji('🔊').setStyle(ButtonStyle.Primary)
+      : new ButtonBuilder().setCustomId('wp:silence').setLabel('Mute 30m').setEmoji('🔇').setStyle(ButtonStyle.Secondary),
   )
   const menu = new ActionRowBuilder<StringSelectMenuBuilder>().addComponents(
     new StringSelectMenuBuilder().setCustomId('wp:inspect').setPlaceholder('Inspect…').addOptions(
@@ -82,7 +86,7 @@ export function buildPanel(): { embeds: EmbedBuilder[]; components: ActionRowBui
       { label: 'Issues & logs', value: 'errors', description: 'errors, warnings, recent activity', emoji: '⚠️' },
     ),
   )
-  return { embeds: [embed], components: [buttons, menu] }
+  return { embeds: [embed], components: [buttons, modes, menu] }
 }
 
 /** Phone-friendly block: no code fences (they scroll sideways on mobile),
@@ -145,6 +149,7 @@ export async function handlePanelInteraction(i: ButtonInteraction | StringSelect
   else if (id === 'wp:dnd') note = wendySetDnd(!wendySnapshot().dnd)
   else if (id === 'wp:unsilence') note = wendyUnsilence()
   else if (id === 'wp:silence') note = wendySilence(30)
+  else if (id === 'wp:nameonly') note = wendySetNameOnly(!wendySnapshot().nameOnly)
   else if (id === 'wp:brain') {
     const wake = loadConfig().brainWakeCommand
     const stop = (wake ?? '').replace(/start\s+\w+/, 'stop')

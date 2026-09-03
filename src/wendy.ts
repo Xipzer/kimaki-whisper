@@ -354,6 +354,9 @@ async function executeToolInner(name: string, args: Record<string, unknown>): Pr
     setTimeout(() => void refreshThreadIndex(), 60000)
     return `spawned "${label}" on ${mdl.alias} (${newId}) in the wendy channel - ledgered, watched, owner can see it`
   }
+  if (name === 'name_only_mode') {
+    return wendySetNameOnly(Boolean(args.on))
+  }
   if (name === 'thread_model_pin') {
     const mdl = resolveSpawnModel(String(args.model))
     if (!mdl) return 'ERROR: unknown model - only local, opus, or fable are permitted'
@@ -1162,17 +1165,22 @@ const attention = new AttentionQueue()
 // ── silence mode: OWNER-ONLY, explicitly requested, never self-activated ──
 let silencedUntil = 0
 let dnd = false
+// Name-only: she ignores everything he says unless it is addressed to her by
+// name, but background updates keep flowing. For calls with other people in
+// them - Discord offers no way to selectively deafen a bot.
+let nameOnly = false
 let dormant = false
 let clientRef: Client | null = null
 let askSnoozedUntil = 0
 const statePath = () => path.join(workspaceDir(), 'state.json')
 function saveModeState(): void {
-  try { fs.writeFileSync(statePath(), JSON.stringify({ silencedUntil, dnd, dormant })) } catch {}
+  try { fs.writeFileSync(statePath(), JSON.stringify({ silencedUntil, dnd, dormant, nameOnly })) } catch {}
 }
 try {
-  const st = JSON.parse(fs.readFileSync(statePath(), 'utf-8')) as { silencedUntil?: number; dnd?: boolean; dormant?: boolean }
+  const st = JSON.parse(fs.readFileSync(statePath(), 'utf-8')) as { nameOnly?: boolean; silencedUntil?: number; dnd?: boolean; dormant?: boolean }
   if (st.silencedUntil && st.silencedUntil > Date.now()) silencedUntil = st.silencedUntil
   dnd = Boolean(st.dnd)
+  nameOnly = Boolean(st.nameOnly)
   // dormant is deliberately NOT restored: starting the process IS the start
   // command. /wendy-stop parks her (and the GPU) until someone starts her again.
   dormant = false
@@ -1225,13 +1233,19 @@ export function wendySilence(minutes: number): string {
   saveModeState()
   return `Silenced for ${mins} minutes - saying "Wendy" in voice wakes her early.`
 }
+export function wendySetNameOnly(on: boolean): string {
+  nameOnly = on
+  saveModeState()
+  diag('name_only', { on })
+  return on ? 'Name-only on: I ignore the conversation unless you say "Wendy" - updates still come through at pauses.' : 'Name-only off: listening to everything again.'
+}
 export function wendyUnsilence(): string {
   silencedUntil = 0
   saveModeState()
   return 'Silence lifted.'
 }
 export type Snapshot = {
-  mode: string; inVc: boolean; dnd: boolean; silencedMin: number
+  mode: string; inVc: boolean; dnd: boolean; nameOnly: boolean; silencedMin: number
   brainUp: boolean; tps: number; ctxPct: number
   selfTasks: { active: number; done: number; list: Array<{ goal: string; status: string; slices: number }> }
   spawns: Array<{ label: string; status: string; ageMin: number; result?: string }>
@@ -1271,7 +1285,7 @@ export function wendySnapshot(): Snapshot {
   const allHeld = attention.all()
   return {
     mode: dormant ? 'ASLEEP' : connection ? 'IN VOICE' : 'AWAKE',
-    inVc: !!connection, dnd, silencedMin: silencedUntil > now ? Math.ceil((silencedUntil - now) / 60000) : 0,
+    inVc: !!connection, dnd, nameOnly, silencedMin: silencedUntil > now ? Math.ceil((silencedUntil - now) / 60000) : 0,
     brainUp: brainHealth().checked ? brainHealth().up : (!lastBrainTpsAt || now - lastBrainTpsAt < 30 * 60000), tps: lastBrainTps,
     ctxPct: lastPromptTokens ? Math.round((lastPromptTokens / brainHealth().ctxMax) * 1000) / 10 : 0,
     selfTasks: {
@@ -2033,7 +2047,7 @@ function listenTo(channel: VoiceBasedChannel, userId: string): void {
       // barge-in: ~0.7s of sustained AND genuinely loud speech while she's talking.
       // Duration alone false-triggered on fan hum / speaker bleed (seen live at RMS 48).
       const joinGrace = Date.now() - joinedAt < 90000
-      if (!interrupted && bytes > (joinGrace ? 24000 : 67200) && playerActive()) {
+      if (!nameOnly && !interrupted && bytes > (joinGrace ? 24000 : 67200) && playerActive()) {
         const rmsLive = Math.sqrt(sumSqLive / (bytes / 8))
         if (rmsLive >= calBargeGate * (joinGrace ? 0.55 : 1)) {
           interrupted = true
@@ -2115,6 +2129,11 @@ function listenTo(channel: VoiceBasedChannel, userId: string): void {
           void runTurn(text)
           return
         }
+        if (nameOnly && !/\bw[ei]+nd[iy]e?\b/i.test(text) && !monologueBuf) {
+          diag('dropped', { text: text.slice(0, 60), why: 'name_only' })
+          resumeIfPhantom()
+          return
+        }
         if (isSilenced()) diag('dropped', { text: text.slice(0, 60), why: 'silenced', noSpeech: +noSpeech.toFixed(2), logprob: +logprob.toFixed(2) })
         // Whisper's own confidence: silence-hallucinations carry high no_speech_prob
         // and low avg_logprob. Real speech is typically logprob > -0.5, noSpeech < 0.3.
@@ -2182,6 +2201,7 @@ function listenTo(channel: VoiceBasedChannel, userId: string): void {
           return
         }
         if (mode === 'buffer') {
+          if (nameOnly && !monologueBuf && !/\bw[ei]+nd[iy]e?\b/i.test(text)) { diag('dropped', { text: text.slice(0, 60), why: 'name_only' }); return }
           monologueBuf = monologueBuf ? `${monologueBuf} ${text}` : text
           diag('monologue_buffered', { chars: monologueBuf.length })
           return
