@@ -182,6 +182,7 @@ async function executeToolInner(name: string, args: Record<string, unknown>): Pr
     return runKimaki(['project', 'list', '--json'])
   }
   if (name === 'dispatch_task') {
+    if (isSessionId(String(args.channel_id ?? ''))) return 'ERROR: dispatch_task creates a NEW thread in a channel and needs a channel_id (from list_projects). You passed a session id - to message an EXISTING thread use send_to_session (fire-and-forget) or ask_thread (wait for reply).'
     const out = await runKimaki([
       'send',
       '--channel', String(args.channel_id ?? ''),
@@ -754,8 +755,10 @@ export async function think(userText: string, onSentence?: (s: string) => void):
                   return 'HELD: the owner told you to do this YOURSELF ("independently" / "on your own" / "yourself"). Do not delegate it to a thread - use read_session (deep, with chars), bash, notes and your own reasoning, then answer him directly.'
                 }
                 const goAhead = !!pendingUtterance && isAffirmative(pendingUtterance) && pendingUtterance.trim().split(/\s+/).length <= 6
-                if (isSend && !userText.startsWith('[') && !goAhead && (turnSeq !== inputSeq || capturing || pendingUtterance)) {
+                const stillTalkingToHer = nameOnly ? turnSeq !== inputSeq : (turnSeq !== inputSeq || capturing || pendingUtterance)
+                if (isSend && !userText.startsWith('[') && !goAhead && stillTalkingToHer) {
                   diag('action_held_owner_talking', { tool: tc.function.name })
+                  heldActions.push({ name: tc.function.name, args, at: Date.now() })
                   return 'HELD - the owner is still speaking (or spoke again), so this action was NOT taken: acting on a half-finished thought sends half-finished instructions. His complete input arrives next turn - answer that, then redo this action with the full picture. Do NOT tell him he interrupted or cut in; he did not.'
                 }
                 if (isSend) {
@@ -1722,6 +1725,19 @@ let lastSpokenText = ''
 let lastSpeechEnd = 0
 let fragmentHold: { text: string; timer: NodeJS.Timeout } | null = null
 let monologueBuf = ''
+// Actions held mid-turn because he seemed to be still speaking. If no
+// follow-up turn arrives, the hold was wrong - the original action stands.
+let heldActions: { name: string; args: Record<string, unknown>; at: number }[] = []
+function scheduleHeldActionRecovery(seqAtEnd: number): void {
+  if (!heldActions.length) return
+  const batch = heldActions.splice(0)
+  setTimeout(() => {
+    if (inputSeq !== seqAtEnd || busy) { diag('held_actions_superseded', { n: batch.length }); return }
+    diag('held_actions_autofire', { n: batch.length, tools: batch.map((b) => b.name) })
+    const summary = batch.map((b) => `${b.name}(${JSON.stringify(b.args).slice(0, 600)})`).join('\n')
+    void runTurn(`[system: the owner did NOT continue speaking after you held these actions - the hold was a false alarm. Execute them NOW exactly as intended, then confirm in one short line:\n${summary}]`)
+  }, 12000)
+}
 // Whisper's silence hallucinations: short stock phrases that need strong confidence to be believed.
 const STOCK_GHOST = /^(thank you|thanks|okay|ok|you|bye|yeah)[.!\s]*$/i
 let speechEpoch = 0
@@ -1877,6 +1893,7 @@ async function runTurn(text: string): Promise<void> {
   // 27s search found his answer, a queued thread ping bumped the sequence,
   // the answer was binned and he had to ask again ten minutes later).
   const seq = text.startsWith('[') ? inputSeq : ++inputSeq
+  if (!text.startsWith('[')) heldActions = []
   if (busy) {
     // Telegram/background turns queue properly instead of overwriting each other;
     // owner speech keeps the merge behaviour (latest intent wins).
@@ -1960,6 +1977,7 @@ async function runTurn(text: string): Promise<void> {
     }
     const reply = await think(text, streamer)
     diag('turn_done', { ms: Date.now() - turnT0, reply: reply.slice(0, 800), superseded: seq !== inputSeq, streamed: streamedCount })
+    if (!text.startsWith('[')) scheduleHeldActionRecovery(inputSeq)
     if (!reply.trim()) return
     if (seq !== inputSeq) {
       // Do not bin finished work: hand it to the next turn so she can fold it in
