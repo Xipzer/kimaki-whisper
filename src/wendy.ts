@@ -1377,6 +1377,9 @@ function announce(text: string, tier: NotifyTier, srcId?: string): void {
   // Collapse stacked priority tags ("[MED] [LOW] ..." from a summarizer that
   // emitted its own tag) down to the intended leading one.
   text = collapsePriorityTags(text)
+  // A tag with no body is not news (seen: a bare '[HIGH]' text ping after the
+  // summariser returned empty).
+  if (!text.replace(/\[(HIGH|MED|LOW)\]/gi, '').replace(/<tg:[^>]+>/g, '').trim()) { diag('announce_empty_dropped', { tier, srcId }); return }
   // One queued item per source (chat pointer, session, repo, DM sender) -
   // freshest wins. Stacked near-duplicates churned the queue and made
   // joins deliver a random tail instead of a digest.
@@ -2361,6 +2364,22 @@ export function initWendy(client: Client): void {
     }
   }
   client.on('voiceStateUpdate', followOwner)
+  // He may already be in a voice channel when she (re)starts - deploys,
+  // wakes, crashes. Find him and join instead of waiting for a state change.
+  const joinIfAlreadyInVoice = (): void => {
+    if (dormant || connection) return
+    for (const g of client.guilds.cache.values()) {
+      const vs = g.voiceStates.cache.get(owner)
+      if (vs?.channel) {
+        log(`wendy: owner already in #${vs.channel.name} at startup - joining`)
+        diag('startup_autojoin', { channel: vs.channel.name })
+        void joinAndServe(vs.channel, owner)
+        return
+      }
+    }
+  }
+  if (client.isReady()) setTimeout(joinIfAlreadyInVoice, 1500)
+  else client.once('clientReady', () => setTimeout(joinIfAlreadyInVoice, 1500))
   // Foreign-guild identity: the dedicated "Wendy" application. Voice-only
   // surface - no slash commands, no panel, no message handlers - so what gets
   // invited into other people's servers carries the minimum possible control.
@@ -2373,7 +2392,17 @@ export function initWendy(client: Client): void {
       if (gid && client.guilds.cache.has(gid)) return
       followOwner(o, n)
     })
-    foreign.once('clientReady', () => log(`wendy: foreign identity online as ${foreign.user?.tag} (${foreign.guilds.cache.size} foreign guild(s))`))
+    foreign.once('clientReady', () => {
+      log(`wendy: foreign identity online as ${foreign.user?.tag} (${foreign.guilds.cache.size} foreign guild(s))`)
+      setTimeout(() => {
+        if (dormant || connection) return
+        for (const g of foreign.guilds.cache.values()) {
+          if (client.guilds.cache.has(g.id)) continue
+          const vs = g.voiceStates.cache.get(owner)
+          if (vs?.channel) { log(`wendy: owner already in foreign #${vs.channel.name} - joining`); diag('startup_autojoin', { channel: vs.channel.name, foreign: true }); void joinAndServe(vs.channel, owner); return }
+        }
+      }, 2500)
+    })
     foreign.login(foreignToken).catch((e) => log(`wendy: foreign identity login failed: ${String(e)}`))
   }
   startTelegram()
