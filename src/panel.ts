@@ -9,7 +9,7 @@ import {
 import { execFile } from 'node:child_process'
 import { loadConfig } from './config.js'
 import {
-  wendySnapshot, wendySleep, wendyWake, wendySetDnd, wendyUnsilence, wendyIsDormant,
+  wendySnapshot, wendySleep, wendyWake, wendySetDnd, wendyUnsilence, wendySilence, wendyIsDormant,
 } from './wendy.js'
 import {
   telegramPolicyStatus, telegramSentLog, telegramPrivacyStatus, telegramProfileList,
@@ -67,7 +67,9 @@ export function buildPanel(): { embeds: EmbedBuilder[]; components: ActionRowBui
       ? new ButtonBuilder().setCustomId('wp:wake').setLabel('Start').setEmoji('▶️').setStyle(ButtonStyle.Success)
       : new ButtonBuilder().setCustomId('wp:sleep').setLabel('Stop').setEmoji('⏸️').setStyle(ButtonStyle.Danger),
     new ButtonBuilder().setCustomId('wp:dnd').setLabel(s.dnd ? 'DND off' : 'DND on').setEmoji('🔕').setStyle(ButtonStyle.Secondary),
-    new ButtonBuilder().setCustomId('wp:unsilence').setLabel('Unmute').setEmoji('🔊').setStyle(ButtonStyle.Secondary).setDisabled(!s.silencedMin),
+    s.silencedMin
+      ? new ButtonBuilder().setCustomId('wp:unsilence').setLabel(`Unmute (${s.silencedMin}m left)`).setEmoji('🔊').setStyle(ButtonStyle.Secondary)
+      : new ButtonBuilder().setCustomId('wp:silence').setLabel('Mute 30m').setEmoji('🔇').setStyle(ButtonStyle.Secondary),
     new ButtonBuilder().setCustomId('wp:brain').setLabel('Brain').setEmoji('🧠').setStyle(ButtonStyle.Secondary),
   )
   const menu = new ActionRowBuilder<StringSelectMenuBuilder>().addComponents(
@@ -142,6 +144,7 @@ export async function handlePanelInteraction(i: ButtonInteraction | StringSelect
   else if (id === 'wp:wake') note = wendyWake()
   else if (id === 'wp:dnd') note = wendySetDnd(!wendySnapshot().dnd)
   else if (id === 'wp:unsilence') note = wendyUnsilence()
+  else if (id === 'wp:silence') note = wendySilence(30)
   else if (id === 'wp:brain') {
     const wake = loadConfig().brainWakeCommand
     const stop = (wake ?? '').replace(/start\s+\w+/, 'stop')
