@@ -2129,10 +2129,21 @@ function listenTo(channel: VoiceBasedChannel, userId: string): void {
           void runTurn(text)
           return
         }
-        if (nameOnly && !/\bw[ei]+nd[iy]e?\b/i.test(text) && !monologueBuf) {
-          diag('dropped', { text: text.slice(0, 60), why: 'name_only' })
-          resumeIfPhantom()
-          return
+        if (nameOnly) {
+          const addressed = /\bw[ei]+nd[iy]e?\b/i.test(text)
+          if (!addressed && !monologueBuf) {
+            diag('dropped', { text: text.slice(0, 60), why: 'name_only' })
+            resumeIfPhantom()
+            return
+          }
+          // Addressed by name while she is talking: that IS the interruption.
+          // Loudness-based barge-in is off in this mode (a friend in the call
+          // must not cut her), so the cut happens here, on the transcript.
+          if (addressed && playerActive() && !interrupted) {
+            interrupted = true
+            cutSpeech = interruptSpeech()
+            diag('barge_in_by_name', {})
+          }
         }
         if (isSilenced()) diag('dropped', { text: text.slice(0, 60), why: 'silenced', noSpeech: +noSpeech.toFixed(2), logprob: +logprob.toFixed(2) })
         // Whisper's own confidence: silence-hallucinations carry high no_speech_prob
