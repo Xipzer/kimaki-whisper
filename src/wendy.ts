@@ -30,6 +30,7 @@ import { loadConfig, log } from './config.js'
 import { diag, pruneDiagnostics } from './diag.js'
 import { AttentionQueue } from './attention/queue.js'
 import { DispatchLedger } from './state/ledgers.js'
+import { ModelPins, currentModel } from './senses/modelPins.js'
 import { SYSTEM_PROMPT } from './prompt.js'
 import { TOOLS } from './tools/specs.js'
 import { executeTelegramTool } from './tools/telegram.js'
@@ -243,8 +244,9 @@ async function executeToolInner(name: string, args: Record<string, unknown>): Pr
     // Proxy in and wait for the agent's reply; return only the tail (speech needs a summary, not a transcript).
     const askId = String(args.session_id ?? '')
     const t0 = Date.now()
+    const keepA = modelPins.pinned(askId)?.model ?? currentModel(askId)
     const out = await runKimaki([
-      'send', '--session', askId,
+      'send', '--session', askId, ...(keepA ? ['--model', keepA] : []),
       '--prompt', String(args.prompt ?? ''), '--wait',
     ], 12000, 500_000, true)
     if (Date.now() - t0 >= 11000) {
@@ -254,8 +256,9 @@ async function executeToolInner(name: string, args: Record<string, unknown>): Pr
     return `[reply from "${threadIdent(askId)}" - VERIFY this is the thread you meant]\n` + (out.slice(-4000) || 'no reply captured')
   }
   if (name === 'send_to_session') {
+    const keepS = modelPins.pinned(String(args.session_id ?? ''))?.model ?? currentModel(String(args.session_id ?? ''))
     const out = await runKimaki([
-      'send', '--session', String(args.session_id ?? ''),
+      'send', '--session', String(args.session_id ?? ''), ...(keepS ? ['--model', keepS] : []),
       '--prompt', String(args.prompt ?? ''),
     ], 60000)
     watchSession(String(args.session_id), String(args.prompt ?? '').slice(0, 40))
@@ -350,6 +353,36 @@ async function executeToolInner(name: string, args: Record<string, unknown>): Pr
     watchSession(newId, label)
     setTimeout(() => void refreshThreadIndex(), 60000)
     return `spawned "${label}" on ${mdl.alias} (${newId}) in the wendy channel - ledgered, watched, owner can see it`
+  }
+  if (name === 'thread_model_pin') {
+    const mdl = resolveSpawnModel(String(args.model))
+    if (!mdl) return 'ERROR: unknown model - only local, opus, or fable are permitted'
+    const sid = String(args.session_id ?? '')
+    if (!isSessionId(sid)) return 'ERROR: need a ses_ id from lookup_thread'
+    watchSession(sid, threadIdent(sid).slice(0, 40))
+    return modelPins.pin(sid, mdl.id, threadIdent(sid).replace(/ in Discord.*$/, ''))
+  }
+  if (name === 'thread_model_unpin') return modelPins.unpin(String(args.session_id ?? ''))
+  if (name === 'thread_model_pins') return modelPins.status()
+  if (name === 'thread_trigger') {
+    const sid = String(args.session_id ?? '')
+    if (!isSessionId(sid)) return 'ERROR: need a ses_ id from lookup_thread'
+    try { new RegExp(String(args.pattern ?? ''), 'i') } catch { return 'ERROR: pattern is not a valid regex' }
+    const action = String(args.action ?? 'ping') as Trigger['action']
+    if (!['ping', 'send', 'both'].includes(action)) return 'ERROR: action must be ping, send or both'
+    if ((action === 'send' || action === 'both') && !String(args.prompt ?? '').trim()) return 'ERROR: a send/both trigger needs a prompt'
+    const tr: Trigger = { id: `tr_${Date.now().toString(36)}`, sessionId: sid, label: String(args.label ?? args.pattern ?? '').slice(0, 60), pattern: String(args.pattern), action, prompt: args.prompt ? String(args.prompt) : undefined, at: Date.now(), fired: 0, once: Boolean(args.once) }
+    triggers.push(tr); saveTriggers()
+    watchSession(sid, threadIdent(sid).slice(0, 40))
+    diag('trigger_created', { id: tr.id, sessionId: sid, pattern: tr.pattern, action })
+    return `trigger ${tr.id} armed on "${threadIdent(sid)}": when new content matches /${tr.pattern}/i -> ${action}${tr.once ? ' (once)' : ''}. Checked every 45s.`
+  }
+  if (name === 'thread_triggers') {
+    return triggers.length ? triggers.map((t) => `${t.id} "${t.label}" on "${threadIdent(t.sessionId).replace(/ in Discord.*$/, '')}" /${t.pattern}/ -> ${t.action}, fired ${t.fired}x${t.once ? ', once' : ''}`).join('\n') : 'no triggers armed'
+  }
+  if (name === 'thread_trigger_remove') {
+    const n = triggers.length; triggers = triggers.filter((t) => t.id !== String(args.id)); saveTriggers()
+    return n === triggers.length ? 'no such trigger' : 'removed'
   }
   if (name === 'switch_thread_model') {
     const mdl = resolveSpawnModel(String(args.model))
@@ -1412,6 +1445,34 @@ function shouldAnnounce(id: string, tail: string): boolean {
 // digest cooldown. Completions announce in arrival order (FIFO by finish).
 const finishWatches = new Set<string>()
 const ledger = new DispatchLedger(path.join(workspaceDir(), 'dispatch-status.json'))
+const modelPins = new ModelPins(workspaceDir(), (line) => announce(line, 'interrupt'))
+setInterval(() => { try { modelPins.sweep() } catch (e) { log('wendy: model pin sweep error', String(e)) } }, 15000).unref()
+
+// ── content triggers: watch a thread for a pattern, fire an action ─────
+type Trigger = { id: string; sessionId: string; label: string; pattern: string; action: 'ping' | 'send' | 'both'; prompt?: string; at: number; fired: number; lastMatch?: string; once: boolean }
+let triggers: Trigger[] = []
+const triggersPath = (): string => path.join(workspaceDir(), 'triggers.json')
+try { triggers = JSON.parse(fs.readFileSync(triggersPath(), 'utf-8')) } catch {}
+function saveTriggers(): void { try { fs.writeFileSync(triggersPath(), JSON.stringify(triggers)) } catch {} }
+async function evaluateTriggers(sessionId: string, tail: string): Promise<void> {
+  const fresh = recentMessages(tail, 2)
+  for (const tr of triggers.filter((x) => x.sessionId === sessionId)) {
+    let re: RegExp
+    try { re = new RegExp(tr.pattern, 'i') } catch { continue }
+    const m = fresh.match(re)
+    if (!m) continue
+    const key = fresh.slice(Math.max(0, (m.index ?? 0) - 40), (m.index ?? 0) + m[0].length + 40)
+    if (tr.lastMatch === key) continue
+    tr.lastMatch = key; tr.fired++; saveTriggers()
+    diag('trigger_fired', { id: tr.id, sessionId, pattern: tr.pattern, action: tr.action, fired: tr.fired })
+    if (tr.action === 'send' || tr.action === 'both') {
+      const mdl = modelPins.pinned(sessionId)?.model ?? currentModel(sessionId)
+      await runKimaki(['send', '--session', sessionId, ...(mdl ? ['--model', mdl] : []), '--prompt', tr.prompt ?? ''], 60000)
+    }
+    if (tr.action === 'ping' || tr.action === 'both') announce(`[HIGH] Trigger "${tr.label}" fired on "${threadIdent(sessionId)}": matched "${m[0].slice(0, 80)}"${tr.action === 'both' ? ' - counter-message sent' : ''}.`, 'interrupt', sessionId)
+    if (tr.once) { triggers = triggers.filter((x) => x.id !== tr.id); saveTriggers() }
+  }
+}
 function armFinishWatch(id: string, label: string, reArmed = false): void {
   if (!id || finishWatches.has(id)) { if (id) ledger.record(id, label || threadIdent(id).slice(0, 60), true); return }
   finishWatches.add(id)
@@ -1466,7 +1527,10 @@ function watchSession(id: string, label: string): void {
 async function pollWatchlist(): Promise<void> {
   for (let i = watchlist.length - 1; i >= 0; i--) {
     const w = watchlist[i]
-    if (Date.now() > w.expires) { watchlist.splice(i, 1); continue }
+    if (Date.now() > w.expires) {
+      if (triggers.some((x) => x.sessionId === w.id)) { w.expires = Date.now() + 45 * 60 * 1000 } // triggers keep their watch alive
+      else { watchlist.splice(i, 1); continue }
+    }
     if (!w.baselined) continue
     const tail = await runKimaki(['session', 'read', w.id], 45000, 500_000, true)
     if (tail.startsWith('ERROR')) continue
@@ -1476,6 +1540,7 @@ async function pollWatchlist(): Promise<void> {
       w.seen = true; w.idle = 0; w.fp = nfp
       lastChangeSeen.set(w.id, Date.now())
       diag('watch_delta', { id: w.id, label: w.label, first })
+      if (triggers.some((x) => x.sessionId === w.id)) void evaluateTriggers(w.id, tail)
       const justDispatched = (ledger.startedAt(w.id) ?? 0) > Date.now() - 5 * 60000
       if (first && justDispatched) diag('watch_first_delta_suppressed', { id: w.id })
       if (first && !justDispatched && shouldAnnounce(w.id, tail)) {

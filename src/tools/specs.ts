@@ -672,4 +672,35 @@ export const TOOLS = [
       },
     },
   },
+  {
+    type: 'function',
+    function: {
+      name: 'thread_model_pin',
+      description: 'PIN a thread to a model: writes the override now and re-asserts it within seconds whenever anything (cross-thread messages, kimaki defaults) resets it, telling the owner each time. Use when he says a thread keeps falling back to the global model. Models: local, opus, fable.',
+      parameters: { type: 'object', properties: { session_id: { type: 'string' }, model: { type: 'string', description: 'local | opus | fable' } }, required: ['session_id', 'model'] },
+    },
+  },
+  { type: 'function', function: { name: 'thread_model_unpin', description: 'Remove a model pin from a thread.', parameters: { type: 'object', properties: { session_id: { type: 'string' } }, required: ['session_id'] } } },
+  { type: 'function', function: { name: 'thread_model_pins', description: 'List active model pins and how often each has had to be re-asserted.', parameters: { type: 'object', properties: {} } } },
+  {
+    type: 'function',
+    function: {
+      name: 'thread_trigger',
+      description: 'Watch a thread for a PATTERN in its new content and fire an ACTION the moment it appears (checked every 45s): ping = tell the owner; send = send a counter-message into the thread (with prompt); both. This is the general "when X happens in that thread, do Y" tool.',
+      parameters: {
+        type: 'object',
+        properties: {
+          session_id: { type: 'string' },
+          pattern: { type: 'string', description: 'regex (case-insensitive) matched against new thread content' },
+          action: { type: 'string', description: 'ping | send | both' },
+          prompt: { type: 'string', description: 'message to send into the thread when it fires (send/both)' },
+          label: { type: 'string', description: 'short human name for this trigger' },
+          once: { type: 'boolean', description: 'disarm after the first fire' },
+        },
+        required: ['session_id', 'pattern', 'action'],
+      },
+    },
+  },
+  { type: 'function', function: { name: 'thread_triggers', description: 'List armed triggers and fire counts.', parameters: { type: 'object', properties: {} } } },
+  { type: 'function', function: { name: 'thread_trigger_remove', description: 'Disarm a trigger by id.', parameters: { type: 'object', properties: { id: { type: 'string' } }, required: ['id'] } } },
 ] as const
