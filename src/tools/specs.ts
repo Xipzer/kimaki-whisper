@@ -676,8 +676,8 @@ export const TOOLS = [
     type: 'function',
     function: {
       name: 'thread_model_pin',
-      description: 'PIN a thread to a model: writes the override now and re-asserts it within seconds whenever anything (cross-thread messages, kimaki defaults) resets it, telling the owner each time. Use when he says a thread keeps falling back to the global model. Models: local, opus, fable.',
-      parameters: { type: 'object', properties: { session_id: { type: 'string' }, model: { type: 'string', description: 'local | opus | fable' } }, required: ['session_id', 'model'] },
+      description: 'PIN a thread to a model: re-asserts it within seconds whenever anything resets it, telling the owner each time. Use when he says a thread keeps falling back to the global default. model: "current" (keep what the thread has NOW - the usual case when he says "keep it on X"), a full id like anthropic/claude-fable-5-1, or an alias (local/opus/fable). A pin that would CHANGE the model is refused unless confirm_change is true.',
+      parameters: { type: 'object', properties: { session_id: { type: 'string' }, model: { type: 'string', description: '"current" | full provider/model id | alias' }, confirm_change: { type: 'boolean', description: 'true only when the owner explicitly wants a DIFFERENT model than the thread has now' } }, required: ['session_id', 'model'] },
     },
   },
   { type: 'function', function: { name: 'thread_model_unpin', description: 'Remove a model pin from a thread.', parameters: { type: 'object', properties: { session_id: { type: 'string' } }, required: ['session_id'] } } },

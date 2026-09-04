@@ -359,12 +359,24 @@ async function executeToolInner(name: string, args: Record<string, unknown>): Pr
     return wendySetNameOnly(Boolean(args.on))
   }
   if (name === 'thread_model_pin') {
-    const mdl = resolveSpawnModel(String(args.model))
-    if (!mdl) return 'ERROR: unknown model - only local, opus, or fable are permitted'
     const sid = String(args.session_id ?? '')
     if (!isSessionId(sid)) return 'ERROR: need a ses_ id from lookup_thread'
+    const current = currentModel(sid)
+    const want = String(args.model ?? '').trim()
+    // Resolution order: no model / "current" -> what the thread has now;
+    // full provider/model id -> as given; alias -> config mapping.
+    let target: string | null = null
+    if (!want || /^(current|same|keep|as.is)$/i.test(want)) target = current
+    else if (want.includes('/')) target = want
+    else target = resolveSpawnModel(want)?.id ?? null
+    if (!target) return current ? `ERROR: unknown model "${want}". The thread is currently on ${current} - say "current" to pin that, or give a full id like anthropic/claude-fable-5-1.` : 'ERROR: unknown model and the thread has no override to keep'
+    // A pin must never quietly change the model. Seen live: alias "fable"
+    // resolved to claude-fable-5 and downgraded three threads from 5-1.
+    if (current && target !== current && !args.confirm_change) {
+      return `REFUSED: the thread is on ${current} but "${want}" resolves to ${target}. Pinning would CHANGE its model. If he wants ${current} kept, call again with model "current". If he truly wants ${target}, call again with confirm_change: true and tell him the model is changing.`
+    }
     watchSession(sid, threadIdent(sid).slice(0, 40))
-    return modelPins.pin(sid, mdl.id, threadIdent(sid).replace(/ in Discord.*$/, ''))
+    return modelPins.pin(sid, target, threadIdent(sid).replace(/ in Discord.*$/, ''))
   }
   if (name === 'thread_model_unpin') return modelPins.unpin(String(args.session_id ?? ''))
   if (name === 'thread_model_pins') return modelPins.status()
@@ -1827,6 +1839,21 @@ async function drainAndExit(): Promise<void> {
   // give an in-flight utterance a moment to end naturally
   const start = Date.now()
   while (capturing && Date.now() - start < 6000) await new Promise((r) => setTimeout(r, 200))
+  // A reply in flight must land before we die - restarts were killing
+  // answers mid-turn and the owner heard nothing. Up to 45s.
+  if (busy) {
+    log('wendy: drain - waiting for the in-flight turn to finish')
+    const t0 = Date.now()
+    while (busy && Date.now() - t0 < 45000) await new Promise((r) => setTimeout(r, 250))
+    if (busy) {
+      diag('drain_turn_abandoned', { ms: Date.now() - t0 })
+      history.push({ role: 'assistant', content: '(I was restarted before I could finish answering that - pick it up first thing when we reconnect.)' })
+    } else {
+      // let the last sentence actually play out
+      const p0 = Date.now()
+      while (playerActive() && Date.now() - p0 < 15000) await new Promise((r) => setTimeout(r, 250))
+    }
+  }
   // still talking? salvage the buffer as-is (the continuous-speech case)
   const chunks = liveCapture
   if (chunks?.length) {

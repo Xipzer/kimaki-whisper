@@ -22,6 +22,8 @@ import { sendPanel, handlePanelInteraction } from './panel.js'
 import { wendySnapshot } from './wendy.js'
 import { initWendy, wendySleep, wendyWake, wendySetDnd, wendySilence, wendyUnsilence, wendyStatus } from './wendy.js'
 
+// Set once Discord is connected: lets any subsystem re-assert our commands.
+export let reRegisterCommands: (() => Promise<void>) | null = null
 function prefix(): string {
   return loadConfig().commandPrefix ?? 'whisper'
 }
@@ -226,7 +228,19 @@ export async function startDiscord(token: string): Promise<void> {
     if (i.commandName.startsWith('wendy-')) return void handleWendyCommand(i)
   })
 
-  client.on('messageCreate', (m) => void handleRetranscribe(m))
+  client.on('messageCreate', (m) => {
+    // Escape hatch: when a bulk-PUT has wiped our slash commands, the owner
+    // cannot use /wendy to fix it. Plain text works regardless.
+    if (!m.author.bot && m.content.trim().toLowerCase() === '!wendy-commands') {
+      void (async () => {
+        await m.react('⏳').catch(() => {})
+        await registerAll()
+        await m.reply('Slash commands re-registered: `/wendy`, `/wendy-wake`, `/wendy-sleep`, `/wendy-status`. Give Discord a few seconds.').catch(() => {})
+      })()
+      return
+    }
+    void handleRetranscribe(m)
+  })
   initWendy(client)
 
   await client.login(token)
@@ -249,8 +263,25 @@ export async function startDiscord(token: string): Promise<void> {
     log(`/${prefix()}-* registered in ${guilds.size} guild(s)`)
   }
   await registerAll()
-  // Kimaki bulk-PUTs its own set on restart, which wipes ours - re-register
-  // periodically (POST is an upsert; 4 cmds × 4/day stays far under rate limits).
+  reRegisterCommands = registerAll
+  // Kimaki bulk-PUTs its own set on restart, which WIPES ours (observed: all
+  // four commands gone from all three guilds). A 6h re-assert left the owner
+  // without /wendy for hours, so also detect the wipe every 10 minutes and
+  // heal immediately - one cheap GET per guild.
+  const healIfWiped = async (): Promise<void> => {
+    try {
+      const guilds = await client.guilds.fetch()
+      for (const [guildId] of guilds) {
+        const existing = (await rest.get(Routes.applicationGuildCommands(appId, guildId)).catch(() => null)) as Array<{ name: string }> | null
+        if (existing && !existing.some((c) => c.name === 'wendy')) {
+          log(`commands wiped in guild ${guildId} - re-registering`)
+          await registerAll()
+          return
+        }
+      }
+    } catch { /* transient */ }
+  }
+  setInterval(() => void healIfWiped(), 10 * 60 * 1000).unref()
   setInterval(() => void registerAll(), 6 * 60 * 60 * 1000).unref()
   log(`connected as ${client.user?.tag}`)
 }
