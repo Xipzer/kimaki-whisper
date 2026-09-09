@@ -1405,7 +1405,10 @@ function announce(text: string, tier: NotifyTier, srcId?: string): void {
   // so escalate to a text ping (observed: 'correct the record the second it
   // lands' silently became 'wait until he rejoins').
   if (!connection && isUrgentUpdate(text)) {
-    textPingOwner(text.replace(/\[queued [^\]]+\]/g, '').trim())
+    const body = text.replace(/\[queued [^\]]+\]/g, '').replace(/\[(HIGH|MED|LOW)\]/gi, '').replace(/^[^:]{0,60}:\s*/, '').trim()
+    // A title with nothing behind it is not worth a phone buzz.
+    if (body.length >= 40) textPingOwner(text.replace(/\[queued [^\]]+\]/g, '').trim())
+    else diag('text_ping_skipped_thin', { len: body.length })
   }
   if (tier === 'onjoin' || !connection || isSilenced()) { attention.push('pending', text); return }
   attention.push('digest', text)
@@ -2180,7 +2183,7 @@ function listenTo(channel: VoiceBasedChannel, userId: string): void {
         if (nameOnly) {
           const addressed = /\bw[ei]+nd[iy]e?\b/i.test(text)
           if (!addressed && !monologueBuf) {
-            diag('dropped', { text: text.slice(0, 60), why: 'name_only' })
+            diag('dropped', { why: 'name_only', seconds: Math.round(pcm.length / 96000) }) // never persist room-chat text
             resumeIfPhantom()
             return
           }
@@ -2260,7 +2263,7 @@ function listenTo(channel: VoiceBasedChannel, userId: string): void {
           return
         }
         if (mode === 'buffer') {
-          if (nameOnly && !monologueBuf && !/\bw[ei]+nd[iy]e?\b/i.test(text)) { diag('dropped', { text: text.slice(0, 60), why: 'name_only' }); return }
+          if (nameOnly && !monologueBuf && !/\bw[ei]+nd[iy]e?\b/i.test(text)) { diag('dropped', { why: 'name_only' }); return }
           monologueBuf = monologueBuf ? `${monologueBuf} ${text}` : text
           diag('monologue_buffered', { chars: monologueBuf.length })
           return
