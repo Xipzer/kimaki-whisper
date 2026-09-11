@@ -1208,9 +1208,13 @@ export function wendySleep(stopBrain = true): string {
   leave()
   let brainNote = ''
   if (stopBrain) {
-    const wake = loadConfig().brainWakeCommand
-    const stop = (wake ?? '').replace(/start\s+\w+/, 'stop')
-    if (wake && stop !== wake) {
+    const cfg = loadConfig() as { brainWakeCommand?: string; brainStopCommand?: string }
+    const wake = cfg.brainWakeCommand
+    // Explicit stop command. The old regex-derived one ("start A" -> "stop")
+    // left the wake-flag touch in place, so the watcher restarted the brain a
+    // minute later - Stop appeared to do nothing.
+    const stop = cfg.brainStopCommand ?? (wake ?? '').replace(/start\s+\w+/, 'stop')
+    if (stop && stop !== wake) {
       execFile('bash', ['-c', stop], { timeout: 60000, killSignal: 'SIGKILL' }, () => {})
       brainNote = ' GPU brain stopped - VRAM released.'
       log('wendy: dormant - brain stop issued')
@@ -1219,6 +1223,40 @@ export function wendySleep(stopBrain = true): string {
   log('wendy: dormant (slash command)')
   return `Wendy is asleep - no voice, no replies.${brainNote} Updates keep accumulating; /wendy-start brings her back.`
 }
+/** Run a brain command and report what actually happened. Never claims success
+ *  on a fire-and-forget - the panel was reporting 'starting' for a host that
+ *  was unreachable. */
+export async function brainControl(action: 'start' | 'stop' | 'restart'): Promise<string> {
+  const cfg = loadConfig() as { brainWakeCommand?: string; brainStartCommand?: string; brainStopCommand?: string }
+  const start = cfg.brainStartCommand ?? cfg.brainWakeCommand
+  const stop = cfg.brainStopCommand
+  if (!start || !stop) return 'ERROR: brainStartCommand / brainStopCommand not configured'
+  const run = (cmd: string, ms: number): Promise<{ code: number; err: string }> => new Promise((res) => {
+    execFile('bash', ['-c', cmd], { timeout: ms, killSignal: 'SIGKILL' }, (e, _o, se) => res({ code: e ? 1 : 0, err: String(se ?? e ?? '').slice(0, 200) }))
+  })
+  const healthy = async (): Promise<boolean> => { await probeBrain(); return brainHealth().up }
+  if (action === 'stop' || action === 'restart') {
+    const r = await run(stop, 60000)
+    if (r.code && /Connection reset|Connection refused|No route|timed out|kex_exchange/i.test(r.err)) {
+      return `Could not reach the GPU host - it is off, or its WSL/SSH is not running. Nothing was changed. (${r.err.split('\n')[0].slice(0, 90)})`
+    }
+    if (action === 'stop') {
+      for (let i = 0; i < 6; i++) { if (!(await healthy())) return 'Brain stopped - VRAM released.'; await new Promise((r2) => setTimeout(r2, 2000)) }
+      return 'Stop command sent but the brain is still answering - check the host.'
+    }
+    await new Promise((r2) => setTimeout(r2, 3000))
+  }
+  const r = await run(start, 60000)
+  if (r.code && /Connection reset|Connection refused|No route|timed out|kex_exchange/i.test(r.err)) {
+    return `Could not reach the GPU host - it is off, or its WSL/SSH is not running, so the brain cannot be started remotely. (${r.err.split('\n')[0].slice(0, 90)})`
+  }
+  for (let i = 0; i < 45; i++) {
+    if (await healthy()) return `Brain is up${action === 'restart' ? ' (restarted)' : ''} - answering now.`
+    await new Promise((r2) => setTimeout(r2, 2000))
+  }
+  return 'Start issued but the brain is not answering after 90s - it may still be loading the model, or the host needs a look.'
+}
+
 export function wendyWake(): string {
   dormant = false
   saveModeState()

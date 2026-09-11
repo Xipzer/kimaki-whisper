@@ -9,7 +9,7 @@ import {
 import { execFile } from 'node:child_process'
 import { loadConfig } from './config.js'
 import {
-  wendySnapshot, wendySleep, wendyWake, wendySetDnd, wendyUnsilence, wendySilence, wendySetNameOnly, wendyIsDormant,
+  wendySnapshot, wendySleep, wendyWake, wendySetDnd, wendyUnsilence, wendySilence, wendySetNameOnly, brainControl, wendyIsDormant,
 } from './wendy.js'
 import {
   telegramPolicyStatus, telegramSentLog, telegramPrivacyStatus, telegramProfileList,
@@ -144,19 +144,36 @@ export async function handlePanelInteraction(i: ButtonInteraction | StringSelect
     note = wendySleep()
   }
   else if (id === 'wp:sleep-confirm') note = wendySleep()
+  else if (id === 'wp:brain-start') {
+    await i.update(buildPanel()).catch(() => {})
+    await i.followUp({ content: '🧠 starting the brain…', flags: MessageFlags.Ephemeral }).catch(() => {})
+    const res = await brainControl('start')
+    await i.followUp({ content: res.slice(0, 300), flags: MessageFlags.Ephemeral }).catch(() => {})
+    await i.editReply(buildPanel()).catch(() => {})
+    return
+  }
   else if (id === 'wp:cancel') note = 'cancelled - she stays running'
-  else if (id === 'wp:wake') note = wendyWake()
+  else if (id === 'wp:wake') {
+    const woke = wendyWake()
+    await i.update(buildPanel()).catch(() => {})
+    await i.followUp({ content: `${woke}\n🧠 checking the brain…`, flags: MessageFlags.Ephemeral }).catch(() => {})
+    const res = await brainControl('start')
+    await i.followUp({ content: res.slice(0, 300), flags: MessageFlags.Ephemeral }).catch(() => {})
+    await i.editReply(buildPanel()).catch(() => {})
+    return
+  }
   else if (id === 'wp:dnd') note = wendySetDnd(!wendySnapshot().dnd)
   else if (id === 'wp:unsilence') note = wendyUnsilence()
   else if (id === 'wp:silence') note = wendySilence(30)
   else if (id === 'wp:nameonly') note = wendySetNameOnly(!wendySnapshot().nameOnly)
   else if (id === 'wp:brain') {
-    const wake = loadConfig().brainWakeCommand
-    const stop = (wake ?? '').replace(/start\s+\w+/, 'stop')
-    if (wake && stop !== wake) {
-      execFile('bash', ['-c', `${stop} ; sleep 3 ; ${wake}`], { timeout: 180000, killSignal: 'SIGKILL' }, () => {})
-      note = 'brain restarting (~40s)'
-    } else note = 'no brain command configured'
+    // Verified: wait for the result instead of claiming success blindly.
+    await i.update(buildPanel()).catch(() => {})
+    await i.followUp({ content: '🧠 restarting the brain - checking it comes back…', flags: MessageFlags.Ephemeral }).catch(() => {})
+    const res = await brainControl('restart')
+    await i.followUp({ content: res.slice(0, 300), flags: MessageFlags.Ephemeral }).catch(() => {})
+    await i.editReply(buildPanel()).catch(() => {})
+    return
   }
   await i.update(buildPanel()).catch(() => {})
   if (note) await i.followUp({ content: note.slice(0, 300), flags: MessageFlags.Ephemeral }).catch(() => {})
