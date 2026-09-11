@@ -20,6 +20,7 @@ import {
   StreamType,
   type VoiceConnection,
   type AudioPlayer,
+  getVoiceConnection,
 } from '@discordjs/voice'
 import type { Client, VoiceState, VoiceBasedChannel } from 'discord.js'
 import { Client as DClient, GatewayIntentBits } from 'discord.js'
@@ -2348,9 +2349,19 @@ async function joinAndServe(channel: VoiceBasedChannel, userId: string): Promise
   // Discord's voice handshake stalls transiently (seen live: one 15s timeout,
   // silent surrender, owner heard nothing). Retry with a fresh connection,
   // and if it still fails, TELL him - in text, since voice is what broke.
+  // A previous process that was hard-killed (deploy, crash) leaves Discord
+  // believing the bot is STILL in the channel. The new handshake then hangs in
+  // 'signalling' forever and the retry loop makes her flicker in and out of the
+  // VC. Explicitly tear down any ghost session first.
+  const clearGhost = async (): Promise<void> => {
+    try { getVoiceConnection(channel.guild.id)?.destroy() } catch { /* already gone */ }
+    try { channel.guild.shard.send({ op: 4, d: { guild_id: channel.guild.id, channel_id: null, self_mute: false, self_deaf: false } }) } catch {}
+    await new Promise((r) => setTimeout(r, 1200))
+  }
+  await clearGhost()
   let ok: unknown = null
   for (let attempt = 1; attempt <= 3 && !ok; attempt++) {
-    if (attempt > 1) { log(`wendy: voice connect retry ${attempt}`); diag('voice_connect_retry', { attempt }); leave(); await new Promise((r) => setTimeout(r, 1500)) }
+    if (attempt > 1) { log(`wendy: voice connect retry ${attempt}`); diag('voice_connect_retry', { attempt }); leave(); await clearGhost(); await new Promise((r) => setTimeout(r, 1500)) }
     connection = joinVoiceChannel({
       channelId: channel.id,
       guildId: channel.guild.id,
