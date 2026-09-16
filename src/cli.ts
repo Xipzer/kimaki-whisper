@@ -1,6 +1,7 @@
 #!/usr/bin/env node
 // kimaki-whisper - local voice-note transcription sidecar for Kimaki.
 //   kimaki-whisper                     run the sidecar (gateway + endpoint)
+//   kimaki-whisper serve               transcription endpoint ONLY (no Discord)
 //   kimaki-whisper setup [--model auto|fast|balanced|accurate|best]
 //                        [--backend-url <url>] [--token <bot token>]
 //   kimaki-whisper status
@@ -50,6 +51,22 @@ async function main(): Promise<void> {
       log(`recommended for this machine: ${rec.tier.label} (${rec.tier.approxSize}) - ${rec.reason}`)
       log(`run: kimaki-whisper setup --model auto`)
     }
+    return
+  }
+
+  // Transcription only: HTTP endpoint, no Discord gateway. For a second machine
+  // that shares the bot token - two gateway connections on one token would mean
+  // two Wendys answering every command.
+  if (cmd === 'serve') {
+    const cfg = loadConfig()
+    if (!cfg.model && !cfg.backendUrl) {
+      log('transcription not configured - run: kimaki-whisper setup --model best')
+      process.exit(1)
+    }
+    startServer()
+    const port = cfg.port ?? DEFAULT_PORT
+    log(`transcription-only sidecar on http://127.0.0.1:${port}/v1  (no Discord)`)
+    log(`  export OPENAI_API_KEY=local OPENAI_BASE_URL=http://127.0.0.1:${port}/v1`)
     return
   }
 

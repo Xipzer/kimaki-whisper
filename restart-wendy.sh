@@ -24,7 +24,7 @@ for i in $(seq 1 12); do
 done
 pkill -9 -f 'kimaki-whisper/dist/cli.js' 2>/dev/null
 for i in 1 2 3 4 5; do
-  P=$(ss -ltnp 2>/dev/null | grep ':7071' | grep -oE 'pid=[0-9]+' | cut -d= -f2 | head -1)
+  P=$(ss -ltnp 2>/dev/null | grep ':7070' | grep -oE 'pid=[0-9]+' | cut -d= -f2 | head -1)
   [ -z "$P" ] && break
   kill -9 "$P" 2>/dev/null
   sleep 1
