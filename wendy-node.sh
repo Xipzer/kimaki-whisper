@@ -5,6 +5,7 @@
 #   wendy-node sync   <from>       pull Wendy's state from another node (safe, read-only there)
 #   wendy-node promote [from]      become the active Wendy: sync, stop the other node, start here
 #   wendy-node demote  <to>        stop here and push state to the node that is taking over
+#   wendy-node handover <from> <to> hub-driven move, for nodes that cannot ssh each other
 #
 # ONE bot token = ONE live Wendy. promote/demote enforce that.
 # Node names are ssh aliases (mac, projector, printer) - LAN or tailnet, whatever ssh resolves.
@@ -100,6 +101,26 @@ case "$cmd" in
     fi
     stop_here
     start_here
+    ;;
+  handover)
+    # Hub-driven: from a node that can reach BOTH, move Wendy <from> -> <to>.
+    # Needed when the two nodes cannot ssh each other directly (WSL/NAT).
+    from="${2:-}"; to="${3:-}"
+    [ -n "$from" ] && [ -n "$to" ] || { echo "usage: wendy-node handover <from> <to>"; exit 2; }
+    log "handover $from -> $to (driven from $(here))"
+    if [ "$from" = "$(here)" ]; then
+      stop_here; tar czf /tmp/wendy-state.tgz -C "$STATE_DIR" "${SYNC_PATHS[@]}"
+    else
+      ssh -o BatchMode=yes "$from" 'pkill -TERM -f "restart-wend[y].sh"; pkill -TERM -f "kimaki-whisper/dist/cli.j[s]"; sleep 8; pkill -9 -f "kimaki-whisper/dist/cli.j[s]"; cd ~/.kimaki-whisper && tar czf /tmp/wendy-state.tgz '"${SYNC_PATHS[*]}"'' 2>/dev/null
+      scp -q "$from:/tmp/wendy-state.tgz" /tmp/wendy-state.tgz
+    fi
+    if [ "$to" = "$(here)" ]; then
+      tar czf "$STATE_DIR/state-before-sync-$(date +%s).tgz" -C "$STATE_DIR" "${SYNC_PATHS[@]}" 2>/dev/null || true
+      tar xzf /tmp/wendy-state.tgz -C "$STATE_DIR"; start_here
+    else
+      scp -q /tmp/wendy-state.tgz "$to:/tmp/wendy-state.tgz"
+      ssh -o BatchMode=yes "$to" 'cd ~/.kimaki-whisper && tar czf state-before-sync-$(date +%s).tgz '"${SYNC_PATHS[*]}"' 2>/dev/null; tar xzf /tmp/wendy-state.tgz -C ~/.kimaki-whisper && cd ~/WebstormProjects/kimaki-whisper && ./wendy-node.sh promote 2>&1' | tail -4
+    fi
     ;;
   demote)
     [ -n "${2:-}" ] || { echo "usage: wendy-node demote <to-node>"; exit 2; }
