@@ -31,6 +31,7 @@ import { loadConfig, log } from './config.js'
 import { diag, pruneDiagnostics } from './diag.js'
 import { AttentionQueue } from './attention/queue.js'
 import { DispatchLedger } from './state/ledgers.js'
+import { nodeBlock, logNode, nodeIdentity } from './node/identity.js'
 import { ModelPins, currentModel } from './senses/modelPins.js'
 import { SYSTEM_PROMPT } from './prompt.js'
 import { TOOLS } from './tools/specs.js'
@@ -644,7 +645,8 @@ export async function think(userText: string, onSentence?: (s: string) => void):
   } catch {}
   const eps = searchJournal(userText, 2)
   if (eps.length) capsule += `\n\nPOSSIBLY RELEVANT PAST MOMENTS:\n${eps.map((e) => `- [${new Date(e.ts).toISOString().slice(0, 10)}] ${e.s}`).join('\n')}`
-  const messages: Msg[] = [{ role: 'system', content: SYSTEM_PROMPT + routesBlock + capsule }, ...history]
+  const guilds = clientRef ? [...clientRef.guilds.cache.values()].map((g) => g.name) : []
+  const messages: Msg[] = [{ role: 'system', content: SYSTEM_PROMPT + routesBlock + capsule + nodeBlock(indexProjectCount, guilds) }, ...history]
   // Newer llama.cpp builds hard-reject consecutive assistant messages (400:
   // "Cannot have 2 or more assistant messages at the end of the list").
   // History can legitimately contain them (superseded turns, error acks) -

@@ -85,6 +85,13 @@ case "$cmd" in
     do_sync "$2"
     ;;
   promote)
+    # Prefer the continuously-pushed snapshot: it needs no live peer.
+    if [ -f "$STATE_DIR/incoming/.synced" ]; then
+      age=$(( $(date +%s) - $(cat "$STATE_DIR/incoming/.synced") ))
+      log "using pushed state from the active node ($((age/60)) min old)"
+      tar czf "$STATE_DIR/state-before-sync-$(date +%s).tgz" -C "$STATE_DIR" "${SYNC_PATHS[@]}" 2>/dev/null || true
+      cp -r "$STATE_DIR/incoming/workspace" "$STATE_DIR/incoming/telegram" "$STATE_DIR/incoming/config.json" "$STATE_DIR/" 2>/dev/null
+    fi
     from="${2:-}"
     if [ -z "$from" ]; then
       for n in mac projector printer; do [ "$n" = "$(here)" ] && continue; running_on "$n" 2>/dev/null && { from="$n"; break; }; done
@@ -110,6 +117,8 @@ case "$cmd" in
     log "handover $from -> $to (driven from $(here))"
     if [ "$from" = "$(here)" ]; then
       stop_here; tar czf /tmp/wendy-state.tgz -C "$STATE_DIR" "${SYNC_PATHS[@]}"
+      # local Kimaki still needs transcription: leave a serve-only sidecar
+      (cd "$REPO" && setsid nohup node dist/cli.js serve > "$STATE_DIR/serve.log" 2>&1 < /dev/null &) ; log "left transcription sidecar on $(here)"
     else
       ssh -o BatchMode=yes "$from" 'pkill -TERM -f "restart-wend[y].sh"; pkill -TERM -f "kimaki-whisper/dist/cli.j[s]"; sleep 8; pkill -9 -f "kimaki-whisper/dist/cli.j[s]"; cd ~/.kimaki-whisper && tar czf /tmp/wendy-state.tgz '"${SYNC_PATHS[*]}"'' 2>/dev/null
       scp -q "$from:/tmp/wendy-state.tgz" /tmp/wendy-state.tgz
