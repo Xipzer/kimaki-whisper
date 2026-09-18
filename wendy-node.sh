@@ -20,22 +20,22 @@ SYNC_PATHS=(workspace telegram config.json)
 log() { printf '[wendy-node] %s\n' "$*"; }
 here() { hostname -s 2>/dev/null || hostname; }
 
-running_here() { pgrep -f "kimaki-whisper/dist/cli.js" >/dev/null 2>&1 && ! pgrep -f "dist/cli.js serve" >/dev/null 2>&1; }
-running_on()   { ssh -o ConnectTimeout=6 -o BatchMode=yes "$1" 'pgrep -f "kimaki-whisper/dist/cli.js" >/dev/null 2>&1 && ! pgrep -f "dist/cli.js serve" >/dev/null 2>&1' 2>/dev/null; }
+running_here() { pgrep -f "node dist/cli.j[s]" >/dev/null 2>&1 && ! pgrep -f "dist/cli.js serve" >/dev/null 2>&1; }
+running_on()   { ssh -o ConnectTimeout=6 -o BatchMode=yes "$1" 'pgrep -f "node dist/cli.j[s]" >/dev/null 2>&1 && ! pgrep -f "dist/cli.js serve" >/dev/null 2>&1' 2>/dev/null; }
 
 stop_here() {
   if running_here; then
     log "stopping Wendy on $(here)"
     pkill -TERM -f "restart-wend[y].sh" 2>/dev/null || true
-    pkill -TERM -f "kimaki-whisper/dist/cli.j[s]" 2>/dev/null || true
+    pkill -TERM -f "node dist/cli.j[s]" 2>/dev/null || true
     for _ in $(seq 1 12); do running_here || break; sleep 1; done
-    pkill -9 -f "kimaki-whisper/dist/cli.j[s]" 2>/dev/null || true
+    pkill -9 -f "node dist/cli.j[s]" 2>/dev/null || true
   fi
 }
 stop_on() {
   if running_on "$1"; then
     log "stopping Wendy on $1"
-    ssh -o BatchMode=yes "$1" 'pkill -TERM -f "restart-wend[y].sh"; pkill -TERM -f "kimaki-whisper/dist/cli.j[s]"; sleep 8; pkill -9 -f "kimaki-whisper/dist/cli.j[s]"' 2>/dev/null || true
+    ssh -o BatchMode=yes "$1" 'pkill -TERM -f "restart-wend[y].sh"; pkill -TERM -f "node dist/cli.j[s]"; sleep 8; pkill -9 -f "node dist/cli.j[s]"' 2>/dev/null || true
   fi
 }
 start_here() {
@@ -74,10 +74,14 @@ do_sync() {
 cmd="${1:-status}"
 case "$cmd" in
   status)
-    for n in "$(here)" mac projector printer; do
-      [ "$n" = "$(here)" ] && { running_here && s="ACTIVE" || s="standby"; echo "  $n (this node): $s"; continue; }
+    me=$(python3 -c "import json;print(json.load(open('$STATE_DIR/node.json')).get('name','$(here)'))" 2>/dev/null || here)
+    for n in "$me" mac projector printer; do
+      [ "$n" = "$me" ] && { running_here && s="ACTIVE" || s="standby"; echo "  $n (this node): $s"; continue; }
+      [ "$n" = printer ] && [ "$me" != printer ] && [ "$(here | tr A-Z a-z)" = printer ] && continue
       ssh -o ConnectTimeout=5 -o BatchMode=yes "$n" true 2>/dev/null || { echo "  $n: unreachable"; continue; }
-      running_on "$n" && echo "  $n: ACTIVE" || echo "  $n: standby"
+      synced=$(ssh -o ConnectTimeout=5 -o BatchMode=yes "$n" 'cat ~/.kimaki-whisper/incoming/.synced 2>/dev/null' 2>/dev/null)
+      age=""; [ -n "$synced" ] && age=", memory snapshot $(( ( $(date +%s) - synced ) / 60 ))m old"
+      running_on "$n" && echo "  $n: ACTIVE$age" || echo "  $n: standby$age"
     done
     ;;
   sync)
@@ -120,7 +124,7 @@ case "$cmd" in
       # local Kimaki still needs transcription: leave a serve-only sidecar
       (cd "$REPO" && setsid nohup node dist/cli.js serve > "$STATE_DIR/serve.log" 2>&1 < /dev/null &) ; log "left transcription sidecar on $(here)"
     else
-      ssh -o BatchMode=yes "$from" 'pkill -TERM -f "restart-wend[y].sh"; pkill -TERM -f "kimaki-whisper/dist/cli.j[s]"; sleep 8; pkill -9 -f "kimaki-whisper/dist/cli.j[s]"; cd ~/.kimaki-whisper && tar czf /tmp/wendy-state.tgz '"${SYNC_PATHS[*]}"'' 2>/dev/null
+      ssh -o BatchMode=yes "$from" 'pkill -TERM -f "restart-wend[y].sh"; pkill -TERM -f "node dist/cli.j[s]"; sleep 8; pkill -9 -f "node dist/cli.j[s]"; cd ~/.kimaki-whisper && tar czf /tmp/wendy-state.tgz '"${SYNC_PATHS[*]}"'' 2>/dev/null
       scp -q "$from:/tmp/wendy-state.tgz" /tmp/wendy-state.tgz
     fi
     if [ "$to" = "$(here)" ]; then

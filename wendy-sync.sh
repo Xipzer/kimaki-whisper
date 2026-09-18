@@ -6,7 +6,7 @@
 set -uo pipefail
 STATE="$HOME/.kimaki-whisper"
 PEERS=$(python3 -c "import json;print(' '.join(json.load(open('$STATE/node.json')).get('peers',[])))" 2>/dev/null)
-ACTIVE=$(pgrep -f "kimaki-whisper/dist/cli.js" >/dev/null 2>&1 && ! pgrep -f "dist/cli.js serve" >/dev/null 2>&1 && echo yes || echo no)
+ACTIVE=$(pgrep -f "node dist/cli.j[s]" >/dev/null 2>&1 && ! pgrep -f "dist/cli.js serv[e]" >/dev/null 2>&1 && echo yes || echo no)
 [ "$ACTIVE" = yes ] || exit 0            # only the running Wendy is the source of truth
 [ -n "$PEERS" ] || exit 0
 cd "$STATE" && tar czf /tmp/wendy-state.tgz workspace telegram config.json 2>/dev/null || exit 1
