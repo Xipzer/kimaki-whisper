@@ -210,6 +210,19 @@ async function handleRetranscribe(message: Message): Promise<void> {
   await message.react('📝').catch(() => {})
 }
 
+/** Gateway that ONLY answers "retranscribe" - for standby nodes running the
+ *  serve-only sidecar under a different bot identity than Wendy's. No slash
+ *  commands, no panel, no voice. */
+export async function startRetranscribeOnly(token: string): Promise<void> {
+  const client = new Client({
+    intents: [GatewayIntentBits.Guilds, GatewayIntentBits.GuildMessages, GatewayIntentBits.MessageContent],
+    partials: [Partials.Message, Partials.Channel],
+  })
+  client.on('messageCreate', (m) => void handleRetranscribe(m))
+  await client.login(token)
+  log(`retranscribe-only gateway connected as ${client.user?.tag}`)
+}
+
 export async function startDiscord(token: string): Promise<void> {
   const client = new Client({
     intents: [GatewayIntentBits.Guilds, GatewayIntentBits.GuildMessages, GatewayIntentBits.MessageContent, GatewayIntentBits.GuildVoiceStates],

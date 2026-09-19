@@ -65,8 +65,15 @@ async function main(): Promise<void> {
     }
     startServer()
     const port = cfg.port ?? DEFAULT_PORT
-    log(`transcription-only sidecar on http://127.0.0.1:${port}/v1  (no Discord)`)
+    log(`transcription-only sidecar on http://127.0.0.1:${port}/v1`)
     log(`  export OPENAI_API_KEY=local OPENAI_BASE_URL=http://127.0.0.1:${port}/v1`)
+    // Optional: a gateway for "retranscribe" replies, using THIS node's own
+    // Kimaki bot token (serveBotToken) - never Wendy's, so no second Wendy.
+    const serveTok = (cfg as { serveBotToken?: string }).serveBotToken
+    if (serveTok) {
+      const { startRetranscribeOnly } = await import('./discord.js')
+      await startRetranscribeOnly(serveTok)
+    } else log('  (no serveBotToken - "retranscribe" replies disabled on this node)')
     return
   }
 
