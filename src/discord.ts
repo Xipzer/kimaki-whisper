@@ -200,7 +200,14 @@ async function handleRetranscribe(message: Message): Promise<void> {
     return
   }
 
-  // Feed the transcription into the Kimaki session via its public CLI seam.
+  if (retranscribeMode === 'post') {
+    // Standby node: this bot IS the local Kimaki's bot, so a `kimaki send`
+    // would loop the agent on itself. Post the text plainly; the owner reads
+    // it, and forwards it to the agent only if he wants to.
+    await message.reply(`📝 **Re-transcribed:**\n> ${text.replace(/\n/g, '\n> ')}`).catch(() => {})
+    return
+  }
+  // Primary: feed the transcription into the Kimaki session via its CLI seam.
   const prompt = `Voice message transcription from Discord user:\n${text}`
   const child = spawn('kimaki', ['send', '--thread', message.channelId, '--prompt', prompt], {
     shell: false, stdio: 'ignore', detached: true,
@@ -213,7 +220,9 @@ async function handleRetranscribe(message: Message): Promise<void> {
 /** Gateway that ONLY answers "retranscribe" - for standby nodes running the
  *  serve-only sidecar under a different bot identity than Wendy's. No slash
  *  commands, no panel, no voice. */
+let retranscribeMode: 'feed' | 'post' = 'feed'
 export async function startRetranscribeOnly(token: string): Promise<void> {
+  retranscribeMode = 'post'
   const client = new Client({
     intents: [GatewayIntentBits.Guilds, GatewayIntentBits.GuildMessages, GatewayIntentBits.MessageContent],
     partials: [Partials.Message, Partials.Channel],
