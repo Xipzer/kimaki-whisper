@@ -29,7 +29,8 @@ here() { python3 -c "import json;print(json.load(open('$NODE_JSON')).get('name',
 remote() { ssh -o ConnectTimeout=6 -o BatchMode=yes "$1" "cd ~/WebstormProjects/kimaki-whisper && ./wendy-node.sh ${*:2}"; }
 
 pid_here() { pgrep -f "dist/cli.j[s]" 2>/dev/null | head -1 || true; }
-role_here() { python3 -c "import json;print(json.load(open('$NODE_JSON')).get('role','primary'))" 2>/dev/null || echo primary; }
+# same default as src/node/identity.ts: node.json present -> standby, absent -> primary
+role_here() { [ -f "$NODE_JSON" ] && python3 -c "import json;print(json.load(open('$NODE_JSON')).get('role','standby'))" 2>/dev/null || echo primary; }
 set_role() {
   python3 - "$NODE_JSON" "$1" <<'EOF'
 import json, sys
