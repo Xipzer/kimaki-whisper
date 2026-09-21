@@ -28,7 +28,7 @@ log() { printf '[wendy-node] %s\n' "$*"; }
 here() { python3 -c "import json;print(json.load(open('$NODE_JSON')).get('name',''))" 2>/dev/null || hostname -s; }
 remote() { ssh -o ConnectTimeout=6 -o BatchMode=yes "$1" "cd ~/WebstormProjects/kimaki-whisper && ./wendy-node.sh ${*:2}"; }
 
-pid_here() { pgrep -f "kimaki-whisper/dist/cli.j[s]" 2>/dev/null | head -1 || true; }
+pid_here() { pgrep -f "dist/cli.j[s]" 2>/dev/null | head -1 || true; }
 role_here() { python3 -c "import json;print(json.load(open('$NODE_JSON')).get('role','primary'))" 2>/dev/null || echo primary; }
 set_role() {
   python3 - "$NODE_JSON" "$1" <<'EOF'
@@ -106,7 +106,7 @@ case "$cmd" in
         [ -n "$(pid_here)" ] && s="running" || s="DOWN"
         echo "  $n (this node): $(role_here) / $s"; continue
       fi
-      r=$(ssh -o ConnectTimeout=5 -o BatchMode=yes "$n" 'cd ~/WebstormProjects/kimaki-whisper 2>/dev/null && ./wendy-node.sh role 2>/dev/null; pgrep -f "kimaki-whisper/dist/cli.j[s]" >/dev/null 2>&1 && echo running || echo DOWN' 2>/dev/null) || { echo "  $n: unreachable"; continue; }
+      r=$(ssh -o ConnectTimeout=5 -o BatchMode=yes "$n" 'cd ~/WebstormProjects/kimaki-whisper 2>/dev/null && ./wendy-node.sh role 2>/dev/null; pgrep -f "dist/cli.j[s]" >/dev/null 2>&1 && echo running || echo DOWN' 2>/dev/null) || { echo "  $n: unreachable"; continue; }
       echo "  $n: $(echo "$r" | tr '\n' ' ')"
     done
     ;;
