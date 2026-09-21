@@ -178,7 +178,8 @@ function isVoiceAttachment(a: { contentType: string | null; name: string }): boo
   return /\.(ogg|oga|opus|mp3|m4a|wav)$/i.test(a.name)
 }
 
-async function handleRetranscribe(message: Message): Promise<void> {
+type RetranscribeMode = 'feed' | 'post'
+async function handleRetranscribe(message: Message, mode: RetranscribeMode): Promise<void> {
   if (message.author.bot) return
   if (!message.reference?.messageId || !RETRANSCRIBE.test(message.content)) return
 
@@ -200,8 +201,8 @@ async function handleRetranscribe(message: Message): Promise<void> {
     return
   }
 
-  if (retranscribeMode === 'post') {
-    // Standby node: this bot IS the local Kimaki's bot, so a `kimaki send`
+  if (mode === 'post') {
+    // Own-domain gateway: this bot IS the local Kimaki's bot, so a `kimaki send`
     // would loop the agent on itself. Post the text plainly; the owner reads
     // it, and forwards it to the agent only if he wants to.
     await message.reply(`📝 **Re-transcribed:**\n> ${text.replace(/\n/g, '\n> ')}`).catch(() => {})
@@ -217,19 +218,52 @@ async function handleRetranscribe(message: Message): Promise<void> {
   await message.react('📝').catch(() => {})
 }
 
-/** Gateway that ONLY answers "retranscribe" - for standby nodes running the
- *  serve-only sidecar under a different bot identity than Wendy's. No slash
- *  commands, no panel, no voice. */
-let retranscribeMode: 'feed' | 'post' = 'feed'
-export async function startRetranscribeOnly(token: string): Promise<void> {
-  retranscribeMode = 'post'
+const SIDECAR_COMMANDS = 4 // buildCommands(): first four are the <prefix>-* sidecar set
+
+function handleSidecarCommand(i: ChatInputCommandInteraction): boolean {
+  const p = prefix()
+  if (i.commandName === `${p}-setup`) { void handleSetup(i); return true }
+  if (i.commandName === `${p}-start`) { void handleLifecycle(i, 'start'); return true }
+  if (i.commandName === `${p}-stop`) { void handleLifecycle(i, 'stop'); return true }
+  if (i.commandName === `${p}-status`) { void handleLifecycle(i, 'status'); return true }
+  return false
+}
+
+async function registerCommands(rest: REST, client: Client, appId: string, commands: ReturnType<typeof buildCommands>): Promise<number> {
+  // CRITICAL: never bulk-PUT - that would REPLACE the guild's whole command set
+  // and wipe Kimaki's commands. POST upserts one command at a time, additively.
+  const guilds = await client.guilds.fetch()
+  for (const [guildId] of guilds) {
+    for (const cmd of commands) {
+      await rest.post(Routes.applicationGuildCommands(appId, guildId), { body: cmd }).catch((e) => {
+        log(`register ${cmd.name} in ${guildId} failed:`, (e as Error).message)
+      })
+    }
+  }
+  return guilds.size
+}
+
+/** Own-domain gateway: THIS device's Kimaki bot. Sidecar commands
+ *  (/<prefix>-*) and "retranscribe" for the local Kimaki's threads. No Wendy:
+ *  no panel, no voice, no wendy-* commands. Runs on every node, always. */
+export async function startNodeGateway(token: string): Promise<void> {
   const client = new Client({
     intents: [GatewayIntentBits.Guilds, GatewayIntentBits.GuildMessages, GatewayIntentBits.MessageContent],
     partials: [Partials.Message, Partials.Channel],
   })
-  client.on('messageCreate', (m) => void handleRetranscribe(m))
+  client.on('interactionCreate', (i) => { if (i.isChatInputCommand()) handleSidecarCommand(i) })
+  client.on('messageCreate', (m) => void handleRetranscribe(m, 'post'))
   await client.login(token)
-  log(`retranscribe-only gateway connected as ${client.user?.tag}`)
+  const appId = client.application?.id ?? (await client.application?.fetch())?.id
+  if (!appId) throw new Error('could not resolve application id')
+  const rest = new REST().setToken(token)
+  const register = async () => {
+    const n = await registerCommands(rest, client, appId, buildCommands().slice(0, SIDECAR_COMMANDS))
+    log(`/${prefix()}-* registered in ${n} guild(s) (node gateway)`)
+  }
+  await register()
+  setInterval(() => void register(), 6 * 60 * 60 * 1000).unref()
+  log(`node gateway connected as ${client.user?.tag}`)
 }
 
 export async function startDiscord(token: string): Promise<void> {
@@ -240,12 +274,7 @@ export async function startDiscord(token: string): Promise<void> {
 
   client.on('interactionCreate', (i) => {
     if ((i.isButton() || i.isStringSelectMenu()) && i.customId.startsWith('wp:')) return void handlePanelInteraction(i)
-    if (!i.isChatInputCommand()) return
-    const p = prefix()
-    if (i.commandName === `${p}-setup`) return void handleSetup(i)
-    if (i.commandName === `${p}-start`) return void handleLifecycle(i, 'start')
-    if (i.commandName === `${p}-stop`) return void handleLifecycle(i, 'stop')
-    if (i.commandName === `${p}-status`) return void handleLifecycle(i, 'status')
+    if (!i.isChatInputCommand() || handleSidecarCommand(i)) return
     if (i.commandName === 'wendy') return void sendPanel(i)
     if (i.commandName.startsWith('wendy-')) return void handleWendyCommand(i)
   })
@@ -261,7 +290,7 @@ export async function startDiscord(token: string): Promise<void> {
       })()
       return
     }
-    void handleRetranscribe(m)
+    void handleRetranscribe(m, 'feed')
   })
   initWendy(client)
 
@@ -269,20 +298,10 @@ export async function startDiscord(token: string): Promise<void> {
   const appId = client.application?.id ?? (await client.application?.fetch())?.id
   if (!appId) throw new Error('could not resolve application id')
 
-  // CRITICAL: never bulk-PUT - that would REPLACE the guild's whole command set
-  // and wipe Kimaki's commands. POST upserts one command at a time, additively.
   const rest = new REST().setToken(token)
   const registerAll = async () => {
-    const commands = buildCommands()
-    const guilds = await client.guilds.fetch()
-    for (const [guildId] of guilds) {
-      for (const cmd of commands) {
-        await rest.post(Routes.applicationGuildCommands(appId, guildId), { body: cmd }).catch((e) => {
-          log(`register ${cmd.name} in ${guildId} failed:`, (e as Error).message)
-        })
-      }
-    }
-    log(`/${prefix()}-* registered in ${guilds.size} guild(s)`)
+    const n = await registerCommands(rest, client, appId, buildCommands())
+    log(`/${prefix()}-* + /wendy* registered in ${n} guild(s)`)
   }
   await registerAll()
   reRegisterCommands = registerAll

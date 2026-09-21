@@ -5,8 +5,11 @@ import os from 'node:os'
 import fs from 'node:fs'
 
 export interface SidecarConfig {
-  /** Discord bot token (same bot as Kimaki). Stored after first resolution. */
+  /** Wendy's home bot token - opened only on the primary node. (legacy name; alias wendyToken) */
   botToken?: string
+  wendyToken?: string
+  /** This device's own Kimaki bot token - always opened, serves the local domain. Defaults to the local Kimaki DB. */
+  nodeToken?: string
   /** Built-in local model tier id (fast/balanced/accurate/best). Unset = not configured. */
   model?: string
   /** Advanced: proxy transcription to an external OpenAI-compatible backend instead of the built-in model. */

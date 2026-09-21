@@ -1,13 +1,15 @@
-// Bot-token resolution ladder (the sidecar uses the SAME bot as Kimaki):
-//   1. KIMAKI_BOT_TOKEN env
-//   2. our own config.json (persisted from a previous resolution)
-//   3. Kimaki's sqlite DB (~/.kimaki/discord-sessions.db, bot_tokens table)
-//      via node:sqlite when available (Node >=22.5)
-//   4. fail with instructions (`kimaki-whisper setup --token <token>`)
+// Two tokens, two roles:
+//   nodeToken  - THIS device's Kimaki bot. Always the local Kimaki DB
+//                (~/.kimaki/discord-sessions.db) unless node.json overrides.
+//                Never cached in config.json: config travels between nodes.
+//   wendyToken - the home bot that IS Wendy. Explicit only (env WENDY_BOT_TOKEN
+//                / KIMAKI_BOT_TOKEN, or config wendyToken / legacy botToken).
+//                Opened only on the node whose role is primary.
 import path from 'node:path'
 import os from 'node:os'
 import fs from 'node:fs'
-import { loadConfig, saveConfig, log } from './config.js'
+import { loadConfig, log } from './config.js'
+import { nodeIdentity } from './node/identity.js'
 
 async function readTokenFromKimakiDb(): Promise<string | null> {
   const dbPath = path.join(os.homedir(), '.kimaki', 'discord-sessions.db')
@@ -34,18 +36,14 @@ async function readTokenFromKimakiDb(): Promise<string | null> {
   }
 }
 
-export async function resolveBotToken(): Promise<string | null> {
-  const fromEnv = process.env.KIMAKI_BOT_TOKEN
-  if (fromEnv) return fromEnv
+export async function resolveNodeToken(): Promise<string | null> {
+  const n = nodeIdentity() as { nodeToken?: string }
+  if (n.nodeToken) return n.nodeToken
+  const cfg = loadConfig() as { nodeToken?: string; serveBotToken?: string }
+  return cfg.nodeToken ?? cfg.serveBotToken ?? (await readTokenFromKimakiDb())
+}
 
-  const cfg = loadConfig()
-  if (cfg.botToken) return cfg.botToken
-
-  const fromDb = await readTokenFromKimakiDb()
-  if (fromDb) {
-    saveConfig({ botToken: fromDb })
-    log('bot token read from Kimaki DB and cached in sidecar config')
-    return fromDb
-  }
-  return null
+export function resolveWendyToken(): string | null {
+  const cfg = loadConfig() as { wendyToken?: string; botToken?: string }
+  return process.env.WENDY_BOT_TOKEN ?? process.env.KIMAKI_BOT_TOKEN ?? cfg.wendyToken ?? cfg.botToken ?? null
 }

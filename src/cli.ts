@@ -1,15 +1,18 @@
 #!/usr/bin/env node
-// kimaki-whisper - local voice-note transcription sidecar for Kimaki.
-//   kimaki-whisper                     run the sidecar (gateway + endpoint)
-//   kimaki-whisper serve               transcription endpoint ONLY (no Discord)
+// kimaki-whisper - Wendy node. One process, role-driven (node.json `role`):
+//   every node    :7070 endpoint + own-domain gateway on THIS device's Kimaki bot
+//   primary only  + Wendy herself on the home bot token (voice, panel, Telegram)
+//   kimaki-whisper                     run (role from node.json; no node.json = primary)
+//   kimaki-whisper serve               force standby: endpoint + own-domain gateway only
 //   kimaki-whisper setup [--model auto|fast|balanced|accurate|best]
 //                        [--backend-url <url>] [--token <bot token>]
 //   kimaki-whisper status
 import { loadConfig, saveConfig, DEFAULT_PORT, log } from './config.js'
-import { resolveBotToken } from './token.js'
+import { resolveNodeToken, resolveWendyToken } from './token.js'
+import { nodeIdentity } from './node/identity.js'
 import { recommendTier, tierById, installRuntime, getPipeline } from './transcribe/local-onnx.js'
 import { startServer } from './server.js'
-import { startDiscord } from './discord.js'
+import { startDiscord, startNodeGateway } from './discord.js'
 
 function arg(name: string): string | undefined {
   const i = process.argv.indexOf(`--${name}`)
@@ -54,56 +57,40 @@ async function main(): Promise<void> {
     return
   }
 
-  // Transcription only: HTTP endpoint, no Discord gateway. For a second machine
-  // that shares the bot token - two gateway connections on one token would mean
-  // two Wendys answering every command.
-  if (cmd === 'serve') {
-    const cfg = loadConfig()
-    if (!cfg.model && !cfg.backendUrl) {
-      log('transcription not configured - run: kimaki-whisper setup --model best')
-      process.exit(1)
-    }
-    startServer()
-    const port = cfg.port ?? DEFAULT_PORT
-    log(`transcription-only sidecar on http://127.0.0.1:${port}/v1`)
-    log(`  export OPENAI_API_KEY=local OPENAI_BASE_URL=http://127.0.0.1:${port}/v1`)
-    // Optional: a gateway for "retranscribe" replies, using THIS node's own
-    // Kimaki bot token (serveBotToken) - never Wendy's, so no second Wendy.
-    const serveTok = (cfg as { serveBotToken?: string }).serveBotToken
-    if (serveTok) {
-      const { startRetranscribeOnly } = await import('./discord.js')
-      await startRetranscribeOnly(serveTok)
-    } else log('  (no serveBotToken - "retranscribe" replies disabled on this node)')
-    return
-  }
-
   if (cmd === 'status') {
     const cfg = loadConfig()
     log(JSON.stringify({
       model: cfg.model ?? null,
       backendUrl: cfg.backendUrl ?? null,
       port: cfg.port ?? DEFAULT_PORT,
-      tokenConfigured: Boolean(cfg.botToken || process.env.KIMAKI_BOT_TOKEN),
+      role: nodeIdentity().role,
+      wendyToken: Boolean(resolveWendyToken()),
+      nodeToken: Boolean(await resolveNodeToken()),
     }, null, 2))
     return
   }
 
-  // default: run the sidecar
+  // run / serve
   log('wendy-build: hardened-v2')
-  const token = await resolveBotToken()
-  if (!token) {
-    log('no bot token found. Provide it once:')
-    log('  kimaki-whisper setup --token <your kimaki bot token>')
-    log('(or set KIMAKI_BOT_TOKEN)')
-    process.exit(1)
-  }
   const cfg = loadConfig()
+  const port = cfg.port ?? DEFAULT_PORT
+  const primary = cmd !== 'serve' && nodeIdentity().role === 'primary'
   if (cfg.model || cfg.backendUrl) startServer()
   else log('transcription not configured yet - run /whisper-setup in Discord once connected')
-  await startDiscord(token)
-  const port = cfg.port ?? DEFAULT_PORT
-  log('sidecar running. One-time Kimaki wiring (shell profile):')
-  log(`  export OPENAI_API_KEY=local OPENAI_BASE_URL=http://127.0.0.1:${port}/v1`)
+  log(`endpoint on http://127.0.0.1:${port}/v1  (export OPENAI_API_KEY=local OPENAI_BASE_URL=http://127.0.0.1:${port}/v1)`)
+
+  const nodeTok = await resolveNodeToken()
+  const wendyTok = primary ? resolveWendyToken() : null
+  if (primary && !wendyTok) {
+    log('role is primary but no Wendy token (WENDY_BOT_TOKEN / config wendyToken). Set it, or set role: standby in node.json')
+    process.exit(1)
+  }
+  // ONE Wendy per token. The own-domain gateway is skipped when it would be
+  // the same bot as Wendy (the printer: home bot == its Kimaki bot).
+  if (wendyTok) await startDiscord(wendyTok)
+  if (nodeTok && nodeTok !== wendyTok) await startNodeGateway(nodeTok)
+  else if (!nodeTok) log('no node token (no local Kimaki DB, no nodeToken) - own-domain gateway disabled')
+  log(`role: ${primary ? 'PRIMARY (Wendy live here)' : 'standby (own domain only)'}`)
 }
 
 process.on('unhandledRejection', (e) => log('UNHANDLED REJECTION:', String(e)))

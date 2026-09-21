@@ -19,6 +19,7 @@ export type NodeIdentity = {
   brainStartCommand?: string
   brainStopCommand?: string
   peers?: string[]        // ssh aliases of the other nodes (for sync)
+  nodeToken?: string      // override for this device's own Kimaki bot token
 }
 
 let cached: NodeIdentity | null = null

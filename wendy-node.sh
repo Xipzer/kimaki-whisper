@@ -1,148 +1,167 @@
 #!/usr/bin/env bash
-# wendy-node - run Wendy on any node, hand over between nodes without losing state.
+# wendy-node - every node runs the same process; node.json `role` decides
+# whether Wendy herself (home bot token) is live there. The own-domain gateway
+# (this device's Kimaki bot) never stops. Handover = flip roles + reload.
 #
-#   wendy-node status              what is running where
-#   wendy-node sync   <from>       pull Wendy's state from another node (safe, read-only there)
-#   wendy-node promote [from]      become the active Wendy: sync, stop the other node, start here
-#   wendy-node demote  <to>        stop here and push state to the node that is taking over
-#   wendy-node handover <from> <to> hub-driven move, for nodes that cannot ssh each other
+#   wendy-node status                  roles and liveness across nodes
+#   wendy-node role [primary|standby]  show, or set + reload THIS node
+#   wendy-node sync   <from>           pull Wendy's state from another node
+#   wendy-node promote [from]          become primary: sync, demote <from>, flip here
+#   wendy-node demote  <to>            flip here to standby, push state to <to>
+#   wendy-node handover <from> <to>    hub-driven move for nodes that cannot ssh each other
+#   wendy-node reload                  restart the local process (supervisor/launchd respawns)
 #
-# ONE bot token = ONE live Wendy. promote/demote enforce that.
-# Node names are ssh aliases (mac, projector, printer) - LAN or tailnet, whatever ssh resolves.
+# ONE bot token = ONE live Wendy. Roles are flipped on the node that owns the
+# process; this script never kills a process on another machine.
+# Node names are ssh aliases (mac, projector, printer).
 set -euo pipefail
 
 STATE_DIR="$HOME/.kimaki-whisper"
 REPO="$HOME/WebstormProjects/kimaki-whisper"
+NODE_JSON="$STATE_DIR/node.json"
 # what travels: memory, telegram offset/profiles, ledgers, pins, triggers, config.
-# what does NOT: runtime/ (750MB ONNX, per-node), diagnostics/ (per-node audit), logs.
+# what does NOT: node.json (per-node endpoints, role, own token), runtime/, diagnostics/, logs.
 SYNC_PATHS=(workspace telegram config.json)
+NODES=(printer projector mac)
 
 log() { printf '[wendy-node] %s\n' "$*"; }
-here() { hostname -s 2>/dev/null || hostname; }
+here() { python3 -c "import json;print(json.load(open('$NODE_JSON')).get('name',''))" 2>/dev/null || hostname -s; }
+remote() { ssh -o ConnectTimeout=6 -o BatchMode=yes "$1" "cd ~/WebstormProjects/kimaki-whisper && ./wendy-node.sh ${*:2}"; }
 
-running_here() { pgrep -f "node dist/cli.j[s]" >/dev/null 2>&1 && ! pgrep -f "dist/cli.js serve" >/dev/null 2>&1; }
-running_on()   { ssh -o ConnectTimeout=6 -o BatchMode=yes "$1" 'pgrep -f "node dist/cli.j[s]" >/dev/null 2>&1 && ! pgrep -f "dist/cli.js serve" >/dev/null 2>&1' 2>/dev/null; }
-
-stop_here() {
-  if running_here; then
-    log "stopping Wendy on $(here)"
-    pkill -TERM -f "restart-wend[y].sh" 2>/dev/null || true
-    pkill -TERM -f "node dist/cli.j[s]" 2>/dev/null || true
-    for _ in $(seq 1 12); do running_here || break; sleep 1; done
-    pkill -9 -f "node dist/cli.j[s]" 2>/dev/null || true
-  fi
-}
-stop_on() {
-  if running_on "$1"; then
-    log "stopping Wendy on $1"
-    ssh -o BatchMode=yes "$1" 'pkill -TERM -f "restart-wend[y].sh"; pkill -TERM -f "node dist/cli.j[s]"; sleep 8; pkill -9 -f "node dist/cli.j[s]"' 2>/dev/null || true
-  fi
-}
-start_here() {
-  log "starting Wendy on $(here)"
-  cd "$REPO"
-  # Node config: each node keeps its OWN service endpoints in node.json and they
-  # override whatever came across in config.json (brainUrl/speachesUrl/port).
-  if [ -f "$STATE_DIR/node.json" ]; then
-    python3 - "$STATE_DIR/config.json" "$STATE_DIR/node.json" <<'EOF'
+pid_here() { pgrep -f "kimaki-whisper/dist/cli.j[s]" 2>/dev/null | head -1 || true; }
+role_here() { python3 -c "import json;print(json.load(open('$NODE_JSON')).get('role','primary'))" 2>/dev/null || echo primary; }
+set_role() {
+  python3 - "$NODE_JSON" "$1" <<'EOF'
 import json, sys
-cfg = json.load(open(sys.argv[1])); node = json.load(open(sys.argv[2]))
-cfg.update({k: v for k, v in node.items() if v is not None})
-json.dump(cfg, open(sys.argv[1], 'w'), indent=2)
-print('[wendy-node] applied node overrides:', ', '.join(f'{k}={v}' for k, v in node.items()))
+p, role = sys.argv[1], sys.argv[2]
+try: n = json.load(open(p))
+except FileNotFoundError: n = {}
+n['role'] = role
+json.dump(n, open(p, 'w'), indent=2)
 EOF
+  log "role on $(here): $1"
+}
+
+node_get() { python3 -c "import json;print(json.load(open('$NODE_JSON')).get('$1',''))" 2>/dev/null || true; }
+
+# Reload = TERM the local process and let whatever supervises it respawn
+# (restart-wendy.sh loop, or launchd KeepAlive). If nothing is running, start
+# via node.json startCommand (default: the supervisor script).
+reload_here() {
+  local pid; pid=$(pid_here)
+  if [ -n "$pid" ]; then
+    log "reloading (pid $pid)"
+    local n0; n0=$(wc -l < "$STATE_DIR/wendy.log" 2>/dev/null || echo 0)
+    kill -TERM "$pid" 2>/dev/null || true
+    for _ in $(seq 1 15); do sleep 1; [ -z "$(pid_here)" ] && break; done
+    [ -n "$(pid_here)" ] && { log "WARNING: pid $pid survived TERM"; kill -9 "$pid" 2>/dev/null || true; }
+    sleep 4
+    [ -n "$(pid_here)" ] && { wait_ready "$n0"; return; }
+    log "no supervisor respawned it - starting"
   fi
-  setsid ./restart-wendy.sh </dev/null >/dev/null 2>&1 &
-  for i in $(seq 1 25); do sleep 3; running_here && grep -aq "armed - will follow" "$STATE_DIR/wendy.log" 2>/dev/null && { log "Wendy up on $(here)"; return 0; }; done
-  log "WARNING: Wendy did not report armed within 75s - check $STATE_DIR/wendy.log"
-  return 1
+  local start; start=$(node_get startCommand)
+  cd "$REPO"
+  if [ -n "$start" ]; then bash -c "$start"; else setsid ./restart-wendy.sh </dev/null >/dev/null 2>&1 & fi
+  wait_ready 0
+}
+wait_ready() {
+  local want="node gateway connected\|role: standby"
+  [ "$(role_here)" = primary ] && want="armed - will follow"
+  for _ in $(seq 1 25); do
+    sleep 3
+    tail -n +"$(( $1 + 1 ))" "$STATE_DIR/wendy.log" 2>/dev/null | grep -aq "$want" && { log "up on $(here) as $(role_here)"; return 0; }
+  done
+  log "WARNING: not ready within 75s - check $STATE_DIR/wendy.log"; return 1
 }
 
 do_sync() {
   local from="$1"
   log "syncing state from $from -> $(here)"
   mkdir -p "$STATE_DIR"
-  # snapshot the other side's state first (no partial reads of live files)
-  ssh -o BatchMode=yes "$from" "cd ~/.kimaki-whisper && tar czf /tmp/wendy-state.tgz ${SYNC_PATHS[*]} 2>/dev/null" 
+  ssh -o BatchMode=yes "$from" "cd ~/.kimaki-whisper && tar czf /tmp/wendy-state.tgz ${SYNC_PATHS[*]} 2>/dev/null"
   scp -q "$from:/tmp/wendy-state.tgz" /tmp/wendy-state.tgz
-  # keep a rollback of what was here
   [ -d "$STATE_DIR/workspace" ] && tar czf "$STATE_DIR/state-before-sync-$(date +%s).tgz" -C "$STATE_DIR" "${SYNC_PATHS[@]}" 2>/dev/null || true
   tar xzf /tmp/wendy-state.tgz -C "$STATE_DIR"
   log "state synced ($(du -sh "$STATE_DIR/workspace" | cut -f1) workspace, $(du -sh "$STATE_DIR/telegram" | cut -f1) telegram)"
+}
+apply_incoming() {
+  [ -f "$STATE_DIR/incoming/.synced" ] || return 0
+  local age=$(( $(date +%s) - $(cat "$STATE_DIR/incoming/.synced") ))
+  log "using pushed state from the active node ($((age/60)) min old)"
+  tar czf "$STATE_DIR/state-before-sync-$(date +%s).tgz" -C "$STATE_DIR" "${SYNC_PATHS[@]}" 2>/dev/null || true
+  cp -r "$STATE_DIR/incoming/workspace" "$STATE_DIR/incoming/telegram" "$STATE_DIR/incoming/config.json" "$STATE_DIR/" 2>/dev/null || true
+}
+push_state() {
+  tar czf /tmp/wendy-state.tgz -C "$STATE_DIR" "${SYNC_PATHS[@]}"
+  scp -q /tmp/wendy-state.tgz "$1:/tmp/wendy-state.tgz"
+  ssh -o BatchMode=yes "$1" 'mkdir -p ~/.kimaki-whisper && cd ~/.kimaki-whisper && tar czf state-before-sync-$(date +%s).tgz workspace telegram config.json 2>/dev/null; tar xzf /tmp/wendy-state.tgz -C ~/.kimaki-whisper'
 }
 
 cmd="${1:-status}"
 case "$cmd" in
   status)
-    me=$(python3 -c "import json;print(json.load(open('$STATE_DIR/node.json')).get('name','$(here)'))" 2>/dev/null || here)
-    for n in "$me" mac projector printer; do
-      [ "$n" = "$me" ] && { running_here && s="ACTIVE" || s="standby"; echo "  $n (this node): $s"; continue; }
-      [ "$n" = printer ] && [ "$me" != printer ] && [ "$(here | tr A-Z a-z)" = printer ] && continue
-      ssh -o ConnectTimeout=5 -o BatchMode=yes "$n" true 2>/dev/null || { echo "  $n: unreachable"; continue; }
-      synced=$(ssh -o ConnectTimeout=5 -o BatchMode=yes "$n" 'cat ~/.kimaki-whisper/incoming/.synced 2>/dev/null' 2>/dev/null)
-      age=""; [ -n "$synced" ] && age=", memory snapshot $(( ( $(date +%s) - synced ) / 60 ))m old"
-      running_on "$n" && echo "  $n: ACTIVE$age" || echo "  $n: standby$age"
+    me=$(here)
+    for n in "${NODES[@]}"; do
+      if [ "$n" = "$me" ]; then
+        [ -n "$(pid_here)" ] && s="running" || s="DOWN"
+        echo "  $n (this node): $(role_here) / $s"; continue
+      fi
+      r=$(ssh -o ConnectTimeout=5 -o BatchMode=yes "$n" 'cd ~/WebstormProjects/kimaki-whisper 2>/dev/null && ./wendy-node.sh role 2>/dev/null; pgrep -f "kimaki-whisper/dist/cli.j[s]" >/dev/null 2>&1 && echo running || echo DOWN' 2>/dev/null) || { echo "  $n: unreachable"; continue; }
+      echo "  $n: $(echo "$r" | tr '\n' ' ')"
     done
     ;;
+  role)
+    if [ -n "${2:-}" ]; then
+      case "$2" in primary|standby) ;; *) echo "role must be primary|standby"; exit 2;; esac
+      set_role "$2"; reload_here
+    else role_here; fi
+    ;;
+  reload) reload_here ;;
   sync)
     [ -n "${2:-}" ] || { echo "usage: wendy-node sync <from-node>"; exit 2; }
     do_sync "$2"
     ;;
   promote)
-    # Prefer the continuously-pushed snapshot: it needs no live peer.
-    if [ -f "$STATE_DIR/incoming/.synced" ]; then
-      age=$(( $(date +%s) - $(cat "$STATE_DIR/incoming/.synced") ))
-      log "using pushed state from the active node ($((age/60)) min old)"
-      tar czf "$STATE_DIR/state-before-sync-$(date +%s).tgz" -C "$STATE_DIR" "${SYNC_PATHS[@]}" 2>/dev/null || true
-      cp -r "$STATE_DIR/incoming/workspace" "$STATE_DIR/incoming/telegram" "$STATE_DIR/incoming/config.json" "$STATE_DIR/" 2>/dev/null
-    fi
+    apply_incoming
     from="${2:-}"
     if [ -z "$from" ]; then
-      for n in mac projector printer; do [ "$n" = "$(here)" ] && continue; running_on "$n" 2>/dev/null && { from="$n"; break; }; done
+      for n in "${NODES[@]}"; do
+        [ "$n" = "$(here)" ] && continue
+        [ "$(ssh -o ConnectTimeout=5 -o BatchMode=yes "$n" 'cd ~/WebstormProjects/kimaki-whisper && ./wendy-node.sh role' 2>/dev/null)" = primary ] && { from="$n"; break; }
+      done
     fi
     if [ -n "$from" ]; then
       if ssh -o ConnectTimeout=6 -o BatchMode=yes "$from" true 2>/dev/null; then
         do_sync "$from"
-        stop_on "$from"
+        remote "$from" role standby
       else
-        log "WARNING: $from unreachable - promoting with LOCAL state (last sync). Run 'wendy-node sync $from' when it is back."
+        log "WARNING: $from unreachable - it may still hold the Wendy token. Promoting with LOCAL state; run 'wendy-node role standby' there as soon as it is back."
       fi
     else
-      log "no other active node found - promoting with local state"
+      log "no other primary found - promoting with local state"
     fi
-    stop_here
-    start_here
-    ;;
-  handover)
-    # Hub-driven: from a node that can reach BOTH, move Wendy <from> -> <to>.
-    # Needed when the two nodes cannot ssh each other directly (WSL/NAT).
-    from="${2:-}"; to="${3:-}"
-    [ -n "$from" ] && [ -n "$to" ] || { echo "usage: wendy-node handover <from> <to>"; exit 2; }
-    log "handover $from -> $to (driven from $(here))"
-    if [ "$from" = "$(here)" ]; then
-      stop_here; tar czf /tmp/wendy-state.tgz -C "$STATE_DIR" "${SYNC_PATHS[@]}"
-      # local Kimaki still needs transcription: leave a serve-only sidecar
-      (cd "$REPO" && setsid nohup node dist/cli.js serve > "$STATE_DIR/serve.log" 2>&1 < /dev/null &) ; log "left transcription sidecar on $(here)"
-    else
-      ssh -o BatchMode=yes "$from" 'pkill -TERM -f "restart-wend[y].sh"; pkill -TERM -f "node dist/cli.j[s]"; sleep 8; pkill -9 -f "node dist/cli.j[s]"; cd ~/.kimaki-whisper && tar czf /tmp/wendy-state.tgz '"${SYNC_PATHS[*]}"'' 2>/dev/null
-      scp -q "$from:/tmp/wendy-state.tgz" /tmp/wendy-state.tgz
-    fi
-    if [ "$to" = "$(here)" ]; then
-      tar czf "$STATE_DIR/state-before-sync-$(date +%s).tgz" -C "$STATE_DIR" "${SYNC_PATHS[@]}" 2>/dev/null || true
-      tar xzf /tmp/wendy-state.tgz -C "$STATE_DIR"; start_here
-    else
-      scp -q /tmp/wendy-state.tgz "$to:/tmp/wendy-state.tgz"
-      ssh -o BatchMode=yes "$to" 'cd ~/.kimaki-whisper && tar czf state-before-sync-$(date +%s).tgz '"${SYNC_PATHS[*]}"' 2>/dev/null; tar xzf /tmp/wendy-state.tgz -C ~/.kimaki-whisper && cd ~/WebstormProjects/kimaki-whisper && ./wendy-node.sh promote 2>&1' | tail -4
-    fi
+    set_role primary; reload_here
     ;;
   demote)
     [ -n "${2:-}" ] || { echo "usage: wendy-node demote <to-node>"; exit 2; }
-    stop_here
-    log "pushing state $(here) -> $2"
-    tar czf /tmp/wendy-state.tgz -C "$STATE_DIR" "${SYNC_PATHS[@]}"
-    scp -q /tmp/wendy-state.tgz "$2:/tmp/wendy-state.tgz"
-    ssh -o BatchMode=yes "$2" 'mkdir -p ~/.kimaki-whisper && cd ~/.kimaki-whisper && tar czf state-before-sync-$(date +%s).tgz workspace telegram config.json 2>/dev/null; tar xzf /tmp/wendy-state.tgz -C ~/.kimaki-whisper'
-    log "state pushed. Now on $2 run: wendy-node promote"
+    set_role standby; reload_here
+    log "pushing state $(here) -> $2"; push_state "$2"
+    log "state pushed. Now: wendy-node promote  (on $2)   or:   ssh $2 'cd ~/WebstormProjects/kimaki-whisper && ./wendy-node.sh promote'"
     ;;
-  *) sed -n 2,9p "$0"; exit 2 ;;
+  handover)
+    from="${2:-}"; to="${3:-}"
+    [ -n "$from" ] && [ -n "$to" ] || { echo "usage: wendy-node handover <from> <to>"; exit 2; }
+    log "handover $from -> $to (driven from $(here))"
+    if [ "$from" = "$(here)" ]; then set_role standby; reload_here; tar czf /tmp/wendy-state.tgz -C "$STATE_DIR" "${SYNC_PATHS[@]}"
+    else remote "$from" role standby; ssh -o BatchMode=yes "$from" "cd ~/.kimaki-whisper && tar czf /tmp/wendy-state.tgz ${SYNC_PATHS[*]}"; scp -q "$from:/tmp/wendy-state.tgz" /tmp/wendy-state.tgz; fi
+    if [ "$to" = "$(here)" ]; then
+      tar czf "$STATE_DIR/state-before-sync-$(date +%s).tgz" -C "$STATE_DIR" "${SYNC_PATHS[@]}" 2>/dev/null || true
+      tar xzf /tmp/wendy-state.tgz -C "$STATE_DIR"; set_role primary; reload_here
+    else
+      scp -q /tmp/wendy-state.tgz "$to:/tmp/wendy-state.tgz"
+      ssh -o BatchMode=yes "$to" 'cd ~/.kimaki-whisper && tar czf state-before-sync-$(date +%s).tgz '"${SYNC_PATHS[*]}"' 2>/dev/null; tar xzf /tmp/wendy-state.tgz -C ~/.kimaki-whisper'
+      remote "$to" role primary
+    fi
+    ;;
+  *) sed -n 5,13p "$0"; exit 2 ;;
 esac
