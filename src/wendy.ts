@@ -601,12 +601,12 @@ export async function think(userText: string, onSentence?: (s: string) => void):
   if (eps.length) turnLocal.push(`POSSIBLY RELEVANT PAST MOMENTS:\n${eps.map((e) => `- [${new Date(e.ts).toISOString().slice(0, 10)}] ${e.s}`).join('\n')}`)
   const guilds = clientRef ? [...clientRef.guilds.cache.values()].map((g) => g.name) : []
   turnLocal.push(nodeBlock(indexProjectCount, guilds).trim())
-  const last = history[history.length - 1]
-  const messages: Msg[] = [
-    { role: 'system', content: SYSTEM_PROMPT + memoryBlock },
-    ...history.slice(0, -1),
-    { ...last, content: `${userText}\n\n[context for this turn - not spoken by the owner]\n${turnLocal.join('\n\n')}` },
-  ]
+  // Stored AS SENT: this model is hybrid-attention, so llama.cpp can only reuse
+  // the cache up to a checkpoint inside the previous prompt. Any later edit to a
+  // message it already saw (like dropping this context next turn) rolls the cache
+  // back to an early checkpoint - measured: 13,799 of ~21k cached every turn.
+  history[history.length - 1] = { role: 'user', content: `${userText}\n\n[context for this turn - not spoken by the owner]\n${turnLocal.join('\n\n')}` }
+  const messages: Msg[] = [{ role: 'system', content: SYSTEM_PROMPT + memoryBlock }, ...history]
   // Newer llama.cpp builds hard-reject consecutive assistant messages (400:
   // "Cannot have 2 or more assistant messages at the end of the list").
   // History can legitimately contain them (superseded turns, error acks) -
@@ -774,7 +774,6 @@ export async function think(userText: string, onSentence?: (s: string) => void):
       diag('turn_skipped', { bg: isBg, text: text.slice(0, 60) })
       return ''
     }
-    if (isBg && history[history.length - 1]?.role === 'user') history[history.length - 1].content = '[background update delivered]'
     // Hallucinated dispatch guard: "Sent it" with zero send tools called this
     // turn means NOTHING left (seen live: owner waited on a dispatch that never
     // existed). Deterministic check - the ledger cannot be sweet-talked.
@@ -790,7 +789,7 @@ export async function think(userText: string, onSentence?: (s: string) => void):
     }
     let isPromise = false
     if (!nudged && hop < MAX_HOPS - 2 && soundsLikePromise(text)) {
-      const v = await brainRequest('background', {
+      const v = await brainRequest('aux', {
         model: 'local-fast', cache_prompt: true, max_tokens: 5,
         messages: [
           { role: 'system', content: 'Answer with exactly YES or NO.' },

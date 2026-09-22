@@ -4,7 +4,8 @@
 // No other module may fetch /v1/chat/completions directly.
 import { loadConfig, log } from '../config.js'
 
-export type Lane = 'conversation' | 'background'
+// aux = small checks INSIDE a live turn: slot 1, never gated (gating them deadlocked the turn 30 s)
+export type Lane = 'conversation' | 'background' | 'aux'
 export type BrainOut = {
   content: string
   reasoning?: string
@@ -21,7 +22,7 @@ const strip = (u: string): string => u.replace(/\/$/, '')
 export function brainUrl(): string | undefined { return loadConfig().brainUrl }
 export function laneUrl(lane: Lane): string | undefined {
   const c = loadConfig() as BrainConfig
-  const u = process.env.WENDY_BRAIN_URL || (lane === 'background' ? (c.auxBrainUrl || c.brainUrl) : c.brainUrl)
+  const u = process.env.WENDY_BRAIN_URL || (lane !== 'conversation' ? (c.auxBrainUrl || c.brainUrl) : c.brainUrl)
   return u ? strip(u) : undefined
 }
 export function laneModel(lane: Lane): string {
