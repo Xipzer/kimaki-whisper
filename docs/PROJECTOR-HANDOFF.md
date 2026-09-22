@@ -1,5 +1,13 @@
 # Wendy on the projector - builder handoff
 
+> **Status (2026-09-22):** partly historical. The voice pipeline is now V2
+> (Kyutai streaming STT/TTS, see `docs/ARCHITECTURE-V2.md`); the node model is
+> one role-driven process per machine (`wendy-node.sh role|promote|demote`);
+> there is no `serve` mode, no sync cron, and no `README.md` (read `README.md`
+> and `docs/OPERATIONS.md`). Machine facts below were measured when written and
+> may have drifted — verify before acting.
+
+
 You are the Wendy builder for THIS machine (the projector, RTX 5090). The primary
 builder lives on the printer (4070S box) in the Local-LLM channel of the
 "Portable PC Playground" Discord and cannot help when that box is down. That is
@@ -16,7 +24,7 @@ or in parallel with it.
 
 Repo: `~/WebstormProjects/kimaki-whisper` (git remote `wendy` =
 github.com/Xipzer/Wendy). State: `~/.kimaki-whisper/`. Architecture doc:
-`WENDY.md`. Read `src/wendy.ts`, `src/node/identity.ts`, `wendy-node.sh`,
+`README.md`. Read `src/wendy.ts`, `src/node/identity.ts`, `wendy-node.sh`,
 `wendy-sync.sh` before changing behaviour.
 
 ## The multi-node design (why this machine has a copy)

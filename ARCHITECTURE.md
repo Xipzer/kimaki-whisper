@@ -30,12 +30,12 @@ her own background workforce.
      │                     CONVERSATION LAYER                          │
      │  local speech-to-text ──► turn engine ──► local text-to-speech  │
      │                                                                 │
-     │  · human turn-taking: she waits for your gap, yields when       │
-     │    interrupted, resumes when the interruption was a phantom     │
-     │  · interruption reasoning: answers you first, then decides      │
-     │    whether her unfinished thought still deserves finishing      │
-     │  · multi-layer phantom defense: energy, confidence, artifact    │
-     │    and context filters - self-calibrating to the owner's voice  │
+     │  · streaming ears: words arrive as you say them; a semantic     │
+     │    end-of-turn model decides when you are done, not a timer     │
+     │  · streaming mouth: sentences are voiced as the brain writes    │
+     │    them, with lookahead so prosody stays coherent               │
+     │  · interruption: two real words cancel her mid-word; she then   │
+     │    answers you first and decides if her lost thought mattered   │
      │  · wake word, timed silence, do-not-disturb - all owner-only    │
      └───────────────────────────────┬────────────────────────────────┘
                                      │
@@ -126,7 +126,7 @@ anyone.
 
 Supervised process lifecycle, persistent state across restarts (moods, modes,
 memory, schedules, ledgers), watchdogs on every pipeline stage, automatic brain
-wake-up, self-calibrating audio gates, and a full structured diagnostics stream
+wake-up, deterministic turn-taking, and a full structured diagnostics stream
 that makes every conversation replayable for tuning.
 
 ## What this document doesn't tell you

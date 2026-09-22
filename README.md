@@ -7,25 +7,31 @@ reliable operator second. She follows the owner into any VC, converses fluidly, 
 47-project / 1,200-thread Kimaki agent organisation by voice.
 
 ```
-you (Discord VC) ── opus ──> prism decode ──> speaches STT (faster-whisper large-v3, 4070S)
+you (Discord VC) ── opus ──► 24 kHz pcm ──► Kyutai STT 1B (streaming words + semantic end-of-turn, 4070S)
                                                     │ text
-                                             think() loop ── llama.cpp brain
-                                                    │        (Qwen3.8-27B+MTP, 5090, 196K ctx)
-                              15 tools ─────────────┤
-                              (kimaki CLI, bash,    │ reply
-                               notes, schedules)    ▼
-                    your threads <──> Kokoro TTS (af_heart) ──> VC playback
+                                             think() loop ── llama.cpp brain (streaming, tools)
+                                                    │        Qwen3.8-27B + DFlash, 5090, 2 KV slots
+                              ~20 tools ────────────┤
+                              (kimaki CLI, notes,   │ sentences as generated
+                               schedules, telegram) ▼
+                    your threads <──► Kyutai TTS 1.6B (text-streaming, lookahead prosody) ──► VC
 ```
+
+First word ≈ 3 s after you stop talking (warm). Barge-in cancels her mid-word.
+**Operate her without an agent:** [docs/OPERATIONS.md](./docs/OPERATIONS.md).
+Design rationale: [docs/ARCHITECTURE-V2.md](./docs/ARCHITECTURE-V2.md).
 
 ## Stack
 
 | Piece | What | Where |
 |---|---|---|
-| Sidecar | this repo - Discord gateway, VC capture/playback, `/whisper-*`, :7071 | `src/` |
+| Wendy process | this repo - Discord gateways, voice loop, `/whisper-*`, `:7070` transcription for Kimaki | `src/` |
 | Wendy core | prompt, tools, turn loop, watchers, feeds, schedules, diagnostics | `src/wendy.ts` |
-| STT | speaches, faster-whisper large-v3 | `http://localhost:8000` |
-| Brain | llama.cpp `local-fast` (Profile A) | `http://the GPU host` (wake: `~/bin/llm-remote start A` via `ssh projector`) |
-| TTS | Kokoro-82M ONNX, voice `af_heart` (hot-swappable via config) | speaches |
+| Voice loop | STT/TTS websocket clients, Discord audio bridges, turn FSM | `src/voice/` |
+| Ears + mouth | Kyutai STT `stt-1b-en_fr` + TTS `tts-1.6b-en_fr`, one PyTorch server | `deploy/kyutai/` → `ws://127.0.0.1:8010` |
+| Brain | llama.cpp `local-fast`, profile A (DFlash), `-np 2 --cache-reuse 256` | `http://192.168.1.140:8080` (wake: `touch /mnt/c/llama-cpp/wake-A.flag` on the projector) |
+| Kimaki voice notes | speaches / faster-whisper large-v3 behind `:7070` | `http://localhost:8000` |
+| Nodes | one process per machine, `node.json` role decides if Wendy is live there | `wendy-node.sh` |
 | Agent org | published Kimaki CLI - projects/threads she reads, asks, dispatches | `kimaki` on PATH |
 
 ## Architecture highlights
@@ -36,15 +42,16 @@ you (Discord VC) ── opus ──> prism decode ──> speaches STT (faster-w
 - **Serial voice, parallel work** - dispatches return in seconds; results arrive as
   `[BACKGROUND UPDATE]` events delivered only at conversation pauses (>10s idle, nobody
   talking) via synthetic turns through her own brain, into shared history.
-- **Barge-in** - 0.7s of sustained speech cuts her playback; queued speech discarded by epoch;
-  superseded replies stay silent; backchannels ("yeah/ok") absorbed unless answering her question.
+- **Turn-taking** - semantic end-of-turn from the STT's VAD (no silence timers); barge-in on two
+  real words cancels her TTS stream and playback; fragments never supersede a reply; backchannels
+  ("yeah/ok") absorbed unless answering her question.
 - **Watchers** - dispatched threads auto-watched: content-fingerprint deltas (baselined at
   registration), start + finish announcements, dedup memory shared with the change feed so
   nothing is announced twice in different words.
 - **Global awareness** - 10-min index walk of every project/thread (updated-diff change feed),
   git HEAD probe per repo, all delivered by notification tier (interrupt/digest/onjoin, per-route).
 - **Silence mode** - owner-only (`go_silent`), hard mute on both mouth and brain; a bare
-  "Wendy" wakes her (0.25s capture gate + mishear-tolerant name regex while muted).
+  "Wendy" wakes her (mishear-tolerant name regex, checked before every other gate).
 - **Scheduled checks** - persistent timers (`schedule_check`): re-read a thread at T+N minutes
   or plain reminders; she self-schedules safety nets after long dispatches.
 - **Episodic memory** - evicted conversation auto-compresses into a journal; a consolidation
@@ -65,20 +72,20 @@ you (Discord VC) ── opus ──> prism decode ──> speaches STT (faster-w
 ## Runtime & ops
 
 ```bash
-./restart-jarvis.sh            # historical name; current: restart-wendy.sh
-./restart-wendy.sh             # atomic supervised restart (exit 2 = duplicate stands down)
+~/bin/kimaki-prereqs           # start what is missing (speaches, kyutai, wendy), health-gated
+./wendy-node.sh status|reload|role|promote|demote|handover
 ~/.kimaki-whisper/wendy.log    # runtime log (5MB rotate)
+~/.kimaki-whisper/kyutai.log   # ears + mouth server
 ~/.kimaki-whisper/diagnostics/YYYY-MM-DD.jsonl   # full event stream, 14-day retention:
-                               # owner_said / speak / tool (args+result+ms) / brain (per hop)
-                               # dropped / barge_in / announce / watch_delta / schedule_fire …
-~/.kimaki-whisper/config.json  # botToken, brainUrl, brainWakeCommand, speachesUrl, ttsVoice, ownerId
-~/.kimaki-whisper/routes.json  # curated alias → thread routes (+ notify tier)
-~/.kimaki-whisper/workspace/   # her memory: notes/, memory.md, history.json (24 msgs),
-                               # thread-index.json, nicknames.json, schedules.json, git-heads.json
+                               # utterance / first_audio / brain (per hop, cached_tokens) / barge_in
+                               # dropped / speak / reply_spoken / announce / watch_delta / schedule_fire
+~/.kimaki-whisper/config.json  # travels with her: tokens, brainUrl, kyutaiUrl, ttsVoice, ownerId...
+~/.kimaki-whisper/node.json    # stays on the machine: name, role, per-node endpoints
+~/.kimaki-whisper/workspace/   # her memory: memory.md, journal.jsonl, history.json, ledgers, schedules
 ```
 
-Testing: `test/sim-messy.mjs` - live-fire chaos sim against the real brain/tools
-(`WENDY_TEST=1` isolates her real history). Build: `./node_modules/.bin/tsc`.
+Bench the whole voice path offline: `node scripts/bench-voice.mjs owner.wav` (prints a timeline).
+Tests: `npm test`. Build: `npm run build`. Full runbook: [docs/OPERATIONS.md](./docs/OPERATIONS.md).
 
 ## Origin
 
@@ -91,7 +98,8 @@ read-vs-ask doctrine) filed by her, through the very switchboard she runs.
 Wendy grew out of (and still contains) the kimaki-whisper sidecar - these remain part of her stack:
 
 - `/whisper-*` Discord slash commands (registered additively on the same bot token; Kimaki ignores unknown commands)
-- OpenAI-compatible transcription endpoint on `127.0.0.1:7071` (Kimaki routes voice notes here via `OPENAI_BASE_URL`)
-- Reply "retranscribe" to any voice note to re-transcribe and inject via `kimaki send`
+- OpenAI-compatible transcription endpoint on `127.0.0.1:7070` (Kimaki routes voice notes here via `OPENAI_BASE_URL`)
+- Reply "retranscribe" to any voice note to re-transcribe it (primary: injected via `kimaki send`; standby nodes: posted as text)
+- Every node runs these for its own Kimaki, whether or not Wendy herself is live there
 
 Audio never leaves the machine. No API keys, no cloud.

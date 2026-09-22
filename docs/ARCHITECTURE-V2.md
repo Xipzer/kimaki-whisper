@@ -1,5 +1,7 @@
 # Wendy V2 — voice architecture, designed from zero (2026-09-22)
 
+> **Built and measured the same day.** See §6 for results and deviations. Operate it via `docs/OPERATIONS.md`.
+
 No backwards compatibility. No bias toward what exists. The goal is the best
 self-hosted, tool-using, real-time voice assistant buildable today on this
 estate (printer 4070S 12 GB, projector 5090 32 GB, M4 Max standby).
@@ -142,3 +144,31 @@ deploy/
   on that GPU once speaches is gone.
 - STT delay is 0.5 s by design; the 2.6B EN model has better WER but 2.5 s
   delay — wrong trade for conversation.
+
+## 6. Built — measured results (2026-09-22)
+
+| Step | Proof |
+|---|---|
+| 1 brain cache | warm turn: `prompt_n=16`, `cached=11341`, **0.6 s total** (was 10 s). Slots 0/1 confirmed via `/slots`. |
+| 2 kyutai | `deploy/kyutai/server.py` — STT words + VAD every 80 ms, TTS first audio **~750 ms** warm, RTF 0.31. 6.0 GiB VRAM. |
+| 3 loop bench | `scripts/bench-voice.mjs`, 16.8 s owner clip, real 5090: end-of-turn +0.98 s, brain first sentence +1.0 s, **first audio 2.9 s** after the owner stopped (warm); 6.8 s cold cache. |
+| 4 live | wired: `src/voice/loop.ts` replaces capture/gates/chunking in `wendy.ts`; Wendy reloaded on V2. |
+| 5 :7070 | **kept on speaches** by decision — Whisper large-v3 stays the accuracy reference for Kimaki voice notes; Kyutai serves the live loop only. |
+
+Deviations from the plan, and why:
+- **PyTorch server instead of `moshi-server` (Rust).** The Rust build needs a
+  CUDA/cuDNN toolchain under WSL2 that was not worth the night; the Python
+  server implements the same wire contract. Cost: ~0.5 s extra TTS first audio
+  (0.75 s vs ~0.25 s). Swapping to the Rust server later changes nothing above it.
+- **speaches stays** for the Kimaki `:7070` endpoint (see step 5).
+- **Voice:** `ex04-ex02_happy` (female). Expresso `ex03` is male — the first
+  sample shipped with it by mistake.
+
+Remaining latency, where it is, and the next cut for each:
+```
+ end-of-turn   0.98 s   VAD crossing + 650 ms guard + 0.5 s model delay   → tune guard to ~400 ms once false-cuts are measured
+ brain         1.0 s    reasoning_effort low still spends ~40 tokens       → /no_think for conversational turns
+ tts           0.9 s    python step loop                                   → moshi-server (Rust) ≈ 0.25 s
+ ─────────────────────
+               2.9 s    target after the three cuts ≈ 1.6 s
+```

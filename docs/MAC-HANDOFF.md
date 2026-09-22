@@ -1,5 +1,13 @@
 # Handoff — MacBook Pro M4 Max local LLM setup
 
+> **Status (2026-09-22):** partly historical. The voice pipeline is now V2
+> (Kyutai streaming STT/TTS, see `docs/ARCHITECTURE-V2.md`); the node model is
+> one role-driven process per machine (`wendy-node.sh role|promote|demote`);
+> there is no `serve` mode, no sync cron, and no `README.md` (read `README.md`
+> and `docs/OPERATIONS.md`). Machine facts below were measured when written and
+> may have drifted — verify before acting.
+
+
 > **For a fresh agent.** You are setting up local LLM inference on a MacBook Pro
 > M4 Max, 36 GB unified memory. This document carries everything learned on the
 > owner's RTX 5090 box so you don't repeat six weeks of mistakes.
@@ -290,7 +298,7 @@ Telegram. He uses her to run and supervise work while away from a keyboard or in
 parallel with it. She is **not** a chatbot; most of her value is the tool loop.
 
 Repo: `Xipzer/Wendy` → checkout at `~/WebstormProjects/kimaki-whisper` (already
-cloned and built on this Mac). Read in this order: `WENDY.md`, `src/wendy.ts`
+cloned and built on this Mac). Read in this order: `README.md`, `src/wendy.ts`
 (the loop), `src/brain/guards.ts` (the deterministic policy layer),
 `src/node/identity.ts`, `docs/PROJECTOR-HANDOFF.md` (a sibling of this doc).
 
