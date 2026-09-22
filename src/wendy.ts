@@ -1863,8 +1863,19 @@ setInterval(() => {
 }, 5000).unref()
 function playerActive(): boolean { return loop?.speaking ?? false }
 
+// The owner kept talking after an end-of-turn fired: the prepared reply answered
+// half a sentence. It is dropped unspoken and his earlier words are prepended to
+// what he says next, so the brain sees the whole thought.
+let carryOver: { text: string; at: number } | null = null
 async function runTurn(text: string): Promise<void> {
   if (draining) return
+  const ownerTurn = !text.startsWith('[')
+  const turnEntry = Date.now()
+  if (ownerTurn && !busy && carryOver && Date.now() - carryOver.at < 90000) {
+    text = `${carryOver.text} ${text}`
+    diag('carry_over_merged', { chars: text.length })
+    carryOver = null
+  }
   // Only OWNER speech supersedes an in-flight reply. Background turns that
   // arrive mid-turn queue behind it and must never outrank him (live: a
   // 27s search found his answer, a queued thread ping bumped the sequence,
@@ -1936,16 +1947,28 @@ async function runTurn(text: string): Promise<void> {
     let streamedCount = 0
     // Every owner turn streams: sentences go into ONE tts session as the brain
     // produces them; Kyutai renders them with lookahead so prosody is coherent.
-    const streamer = text.startsWith('[') ? undefined : (sent: string): void => {
-      if (seq !== inputSeq || isSilenced() || !loop) return
+    const rawOwnerText = ownerTurn ? text.replace(/^\[[^\]]*\]\n/, '') : ''
+    const continued = (): boolean => ownerTurn && !!loop?.continuedSince(turnEntry)
+    const streamer = !ownerTurn ? undefined : (sent: string): void => {
+      if (seq !== inputSeq || isSilenced() || !loop || continued()) return
       streamedCount++
       loop.say(sent)
     }
 
     const reply = await think(text, streamer)
     diag('turn_done', { ms: Date.now() - turnT0, reply: reply.slice(0, 800), superseded: seq !== inputSeq, streamed: streamedCount })
-    if (!text.startsWith('[')) scheduleHeldActionRecovery(inputSeq)
+    if (ownerTurn) scheduleHeldActionRecovery(inputSeq)
     if (!reply.trim()) return
+    if (continued()) {
+      loop?.cancelSpeech('owner_continued')
+      // drop the half-answer from history; his words come back merged with what he says next
+      while (history.length && history[history.length - 1].role !== 'user') history.pop()
+      if (history.length) history.pop()
+      persistHistory()
+      carryOver = { text: rawOwnerText, at: Date.now() }
+      diag('reply_dropped_owner_continued', { reply: reply.slice(0, 120) })
+      return
+    }
     if (seq !== inputSeq) {
       loop?.cancelSpeech('superseded')
       // Do not bin finished work: hand it to the next turn so she can fold it in
@@ -2188,5 +2211,5 @@ export function initWendy(client: Client): void {
   log(`wendy: armed - will follow owner ${owner} into voice channels`)
   setTimeout(() => void warmBrain('boot'), 3000)
   onBrainUp(() => { if (!busy) void warmBrain('brain_up') })
-  setInterval(() => { if (!busy) void warmBrain('periodic') }, 20 * 60 * 1000).unref()
+  setInterval(() => { if (!busy && Date.now() - lastConvoActivity > 10 * 60 * 1000) void warmBrain('periodic') }, 20 * 60 * 1000).unref()
 }

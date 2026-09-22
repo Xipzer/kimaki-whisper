@@ -23,6 +23,7 @@ export class VoiceLoop {
   private stt: SttStream | null = null
   private unsub: (() => void) | null = null
   private utter: string[] = []
+  private utterAt: number[] = []
   private lastWordAt = 0
   private vadEma = 0
   private eotTimer: NodeJS.Timeout | null = null
@@ -67,10 +68,11 @@ export class VoiceLoop {
     const word = w.trim()
     if (!word) return
     this.utter.push(word)
+    this.utterAt.push(Date.now())
     this.lastWordAt = Date.now()
     diag('word', { w: word, t, n: this.utter.length })
     if (this.speaking) this.maybeBargeIn()
-    this.armEot(this.vadArmed ? 650 : 1400, this.vadArmed ? 'vad' : 'timeout')
+    this.armEot(this.vadArmed ? 800 : 1600, this.vadArmed ? 'vad' : 'timeout')
   }
   // The VAD predicts end-of-turn at the AUDIO position; the text stream trails
   // it by the model delay (0.5 s), so the last word is still in flight when the
@@ -79,7 +81,7 @@ export class VoiceLoop {
   private onVad(p: number): void {
     this.vadEma = this.vadEma * 0.6 + p * 0.4
     if (!this.utter.length) { this.vadArmed = false; return }
-    if (this.vadEma > 0.6 && !this.vadArmed) { this.vadArmed = true; this.armEot(650, 'vad') }
+    if (this.vadEma > 0.7 && !this.vadArmed) { this.vadArmed = true; this.armEot(800, 'vad') }
     if (this.vadEma < 0.3) this.vadArmed = false
   }
   private eotWhy: 'vad' | 'timeout' = 'timeout'
@@ -94,6 +96,7 @@ export class VoiceLoop {
     const text = this.utter.join(' ').replace(/\s+([.,!?])/g, '$1').trim()
     const words = this.utter.length
     this.utter = []
+    this.utterAt = []
     this.vadEma = 0
     this.vadArmed = false
     if (!text) return
@@ -110,6 +113,12 @@ export class VoiceLoop {
   }
 
   partialUtterance(): string { return this.utter.join(' ') }
+  /** He has kept talking since ts: >= 2 words, or one word that is not a backchannel.
+   *  A reply prepared for what he said before that point is answering half a sentence. */
+  continuedSince(ts: number): boolean {
+    const ws = this.utter.filter((_, i) => this.utterAt[i] > ts)
+    return ws.length >= 2 || (ws.length === 1 && !BACKCHANNEL.test(ws[0]))
+  }
   ownerTalking(): boolean { return this.utter.length > 0 && Date.now() - this.lastWordAt < 1200 }
 
   // ── barge-in ──────────────────────────────────────────────────
