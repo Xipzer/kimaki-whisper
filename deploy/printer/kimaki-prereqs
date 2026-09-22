@@ -1,0 +1,33 @@
+#!/usr/bin/env bash
+# Ensure Wendy's organs are answering before Kimaki starts. Install: cp to ~/bin/kimaki-prereqs
+# Idempotent (never double-starts a healthy service), health-gated (waits for real 200s).
+# Exits non-zero and says why if it cannot. Use as:
+#   ~/bin/kimaki-prereqs && exec env OPENAI_API_KEY=local OPENAI_BASE_URL=http://127.0.0.1:7070/v1 npx -y kimaki@latest
+set -u
+REPO="$HOME/WebstormProjects/kimaki-whisper"
+up() { curl -s -m 2 -o /dev/null -w '%{http_code}' "$1" 2>/dev/null | grep -q '^200$'; }
+wait_up() { for _ in $(seq 1 "$2"); do up "$1" && return 0; sleep 1; done; return 1; }
+
+# 1. speaches on :8000 - Whisper for Kimaki voice notes (:7070 forwards here)
+if ! up http://localhost:8000/health; then
+  echo "[prereqs] speaches down - starting"
+  (cd "$HOME/speaches-server" && setsid nohup ./run-speaches.sh >> "$HOME/.kimaki-whisper/speaches.log" 2>&1 < /dev/null &)
+  wait_up http://localhost:8000/health 90 || { echo "[prereqs] speaches failed - see ~/.kimaki-whisper/speaches.log"; exit 1; }
+fi
+echo "[prereqs] speaches OK"
+
+# 2. kyutai on :8010 - Wendy's live ears + mouth (systemd user unit, else direct)
+if ! up http://127.0.0.1:8010/health; then
+  echo "[prereqs] kyutai down - starting"
+  systemctl --user start wendy-kyutai 2>/dev/null || (cd "$REPO/deploy/kyutai" && setsid nohup ./run.sh >> "$HOME/.kimaki-whisper/kyutai.log" 2>&1 < /dev/null &)
+  wait_up http://127.0.0.1:8010/health 180 || { echo "[prereqs] kyutai failed - see ~/.kimaki-whisper/kyutai.log"; exit 1; }
+fi
+echo "[prereqs] kyutai OK"
+
+# 3. the Wendy process on :7070 (role from ~/.kimaki-whisper/node.json)
+if ! up http://127.0.0.1:7070/v1/models; then
+  echo "[prereqs] wendy down - starting (supervised)"
+  (cd "$REPO" && setsid ./restart-wendy.sh < /dev/null > /dev/null 2>&1 &)
+  wait_up http://127.0.0.1:7070/v1/models 90 || { echo "[prereqs] :7070 failed - see ~/.kimaki-whisper/wendy.log"; exit 1; }
+fi
+echo "[prereqs] wendy OK ($(cd "$REPO" && ./wendy-node.sh role))"

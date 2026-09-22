@@ -12,20 +12,15 @@
 import {
   joinVoiceChannel,
   createAudioPlayer,
-  createAudioResource,
-  EndBehaviorType,
   VoiceConnectionStatus,
-  AudioPlayerStatus,
   entersState,
-  StreamType,
   type VoiceConnection,
   type AudioPlayer,
   getVoiceConnection,
 } from '@discordjs/voice'
 import type { Client, VoiceState, VoiceBasedChannel } from 'discord.js'
 import { Client as DClient, GatewayIntentBits } from 'discord.js'
-import prism from 'prism-media'
-import { Readable } from 'node:stream'
+import { VoiceLoop } from './voice/loop.js'
 import { execFile, spawn } from 'node:child_process'
 import { loadConfig, log } from './config.js'
 import { diag, pruneDiagnostics } from './diag.js'
@@ -43,12 +38,6 @@ import { startTelegram, setTelegramFlaggedHandler, telegramAutoDrain, telegramLo
 // ── config accessors ─────────────────────────────────────────────
 function ownerId(): string | undefined {
   return loadConfig().ownerId
-}
-function speachesUrl(): string {
-  return loadConfig().speachesUrl ?? 'http://localhost:8000'
-}
-function ttsVoice(): string {
-  return loadConfig().ttsVoice ?? 'af_heart'
 }
 
 import fs from 'node:fs'
@@ -541,70 +530,6 @@ async function executeToolInner(name: string, args: Record<string, unknown>): Pr
     return `route "${key}" set to ${args.tier}`
   }
   return `ERROR: unknown tool ${name}`
-}
-
-// ── audio helpers ────────────────────────────────────────────────
-function pcm48kMonoToWav(pcm: Buffer): Buffer {
-  const header = Buffer.alloc(44)
-  header.write('RIFF', 0); header.writeUInt32LE(36 + pcm.length, 4); header.write('WAVE', 8)
-  header.write('fmt ', 12); header.writeUInt32LE(16, 16); header.writeUInt16LE(1, 20)
-  header.writeUInt16LE(1, 22); header.writeUInt32LE(48000, 24)
-  header.writeUInt32LE(48000 * 2, 28); header.writeUInt16LE(2, 32); header.writeUInt16LE(16, 34)
-  header.write('data', 36); header.writeUInt32LE(pcm.length, 40)
-  return Buffer.concat([header, pcm])
-}
-
-type SttResult = { text: string; noSpeech: number; logprob: number; failed?: boolean }
-async function stt(wav: Buffer): Promise<SttResult> {
-  // 16-bit mono 48k: 96,000 bytes per second of audio
-  const seconds = Math.max(1, Math.round((wav.length - 44) / 96000))
-  // Timeout scales with clip length (large-v3 on a GPU shared with TTS): a
-  // fixed 30s silently ate a 60s+ monologue. One retry on failure. A final
-  // failure is LOUD - logged, diag'd, audio saved - never an empty string.
-  const timeoutMs = Math.min(150000, 20000 + seconds * 1500)
-  let lastErr = ''
-  for (let attempt = 1; attempt <= 2; attempt++) {
-    const form = new FormData()
-    form.append('file', new Blob([new Uint8Array(wav)], { type: 'audio/wav' }), 'utterance.wav')
-    form.append('model', 'Systran/faster-whisper-large-v3')
-    form.append('language', 'en')
-    form.append('response_format', 'verbose_json')
-    const t0 = Date.now()
-    const res = await fetch(`${speachesUrl()}/v1/audio/transcriptions`, { method: 'POST', body: form, signal: AbortSignal.timeout(timeoutMs) })
-      .catch((e) => new Error(String(e)))
-    if (res instanceof Error) { lastErr = res.message.slice(0, 120); diag('stt_error', { attempt, seconds, ms: Date.now() - t0, err: lastErr }); continue }
-    if (!res.ok) { lastErr = `HTTP ${res.status}`; diag('stt_error', { attempt, seconds, ms: Date.now() - t0, err: lastErr }); continue }
-    const d = (await res.json().catch(() => ({}))) as { text?: string; segments?: Array<{ no_speech_prob?: number; avg_logprob?: number }> }
-    const segs = d.segments ?? []
-    const noSpeech = segs.length ? Math.min(...segs.map((x) => x.no_speech_prob ?? 0)) : 0
-    const logprob = segs.length ? segs.reduce((a, x) => a + (x.avg_logprob ?? 0), 0) / segs.length : 0
-    if (seconds >= 8) diag('stt_ok', { seconds, ms: Date.now() - t0, chars: (d.text ?? '').length })
-    return { text: (d.text ?? '').trim(), noSpeech, logprob }
-  }
-  // Both attempts failed: preserve the audio and surface the loss.
-  try {
-    const dir = path.join(configDir(), 'lost-audio'); fs.mkdirSync(dir, { recursive: true })
-    fs.writeFileSync(path.join(dir, `${new Date().toISOString().replace(/[:.]/g, '-')}-${seconds}s.wav`), wav)
-  } catch {}
-  log(`wendy: STT FAILED on a ${seconds}s clip (${lastErr}) - audio saved to lost-audio/`)
-  diag('stt_failed', { seconds, err: lastErr })
-  return { text: '', noSpeech: 1, logprob: -10, failed: true }
-}
-
-async function tts(text: string): Promise<Buffer | null> {
-  const res = await fetch(`${speachesUrl()}/v1/audio/speech`, {
-    method: 'POST',
-    headers: { 'content-type': 'application/json' },
-    body: JSON.stringify({
-      model: 'speaches-ai/Kokoro-82M-v1.0-ONNX',
-      input: text,
-      voice: ttsVoice(),
-      response_format: 'wav',
-    }),
-    signal: AbortSignal.timeout(30000),
-  }).catch((e) => new Error(String(e)))
-  if (res instanceof Error || !res.ok) return null
-  return Buffer.from(await res.arrayBuffer())
 }
 
 // ── the brain loop (with tool calling) ───────────────────────────
@@ -1786,13 +1711,13 @@ async function summarizeForVoice(label: string, content: string): Promise<string
 }
 let connection: VoiceConnection | null = null
 let player: AudioPlayer | null = null
+let loop: VoiceLoop | null = null
 let busy = false
 
 export const spokenTranscript: string[] = []
 let lastSpokenText = ''
 let lastSpeechEnd = 0
 let fragmentHold: { text: string; timer: NodeJS.Timeout } | null = null
-let monologueBuf = ''
 // Actions held mid-turn because he seemed to be still speaking. If no
 // follow-up turn arrives, the hold was wrong - the original action stands.
 let heldActions: { name: string; args: Record<string, unknown>; at: number }[] = []
@@ -1807,15 +1732,8 @@ function scheduleHeldActionRecovery(seqAtEnd: number): void {
   }, 12000)
 }
 // Whisper's silence hallucinations: short stock phrases that need strong confidence to be believed.
-const STOCK_GHOST = /^(thank you|thanks|okay|ok|you|bye|yeah)[.!\s]*$/i
 let speechEpoch = 0
 const speechQueueTexts: string[] = []
-function interruptSpeech(): string[] {
-  const snapshot = [...speechQueueTexts]
-  speechEpoch++
-  try { player?.stop(true) } catch {}
-  return snapshot
-}
 let speakChain: Promise<void> = Promise.resolve()
 async function speak(text: string): Promise<void> {
   diag('speak', { text })
@@ -1824,62 +1742,23 @@ async function speak(text: string): Promise<void> {
   if (spokenTranscript.length > 50) spokenTranscript.splice(0, 20)
   const run = async (): Promise<void> => {
     const dequeue = (): void => { const i = speechQueueTexts.indexOf(text); if (i !== -1) speechQueueTexts.splice(i, 1) }
-    try { await runInner() } finally { dequeue() }
-  }
-  const runInner = async (): Promise<void> => {
-    if (!connection || !player) return
-    if (isSilenced() && Date.now() > silenceGrace) { log('wendy: speak suppressed (silenced)'); diag('speak_suppressed', { text: text.slice(0, 200), why: 'silenced' }); return }
-    // Turn-taking: never START speaking while the owner is mid-utterance.
-    const waitStart = Date.now()
-    while (capturing && Date.now() - waitStart < 8000) await new Promise((r) => setTimeout(r, 150))
-    const ep = speechEpoch
-    const speakable = text
-      .replace(/```[\s\S]*?```/g, ' ')
-      .replace(/[*_`#]+/g, '')
-      .replace(/^\s*[-•]\s+/gm, '')
-      .replace(/\s*\n+\s*/g, '. ')
-      .replace(/\.{2,}/g, '.')
-      .trim()
-      .replace(/[,;:\-]\s*$/, '')
-      .replace(/([^.!?])$/, '$1.')
-    const wav = await tts(speakable)
-    if (!wav) { log('wendy: TTS failed'); return }
-    if (ep !== speechEpoch) { log('wendy: queued speech discarded (barge-in)'); return }
-    lastSpokenText = text
-    player.play(createAudioResource(Readable.from(wav), { inputType: StreamType.Arbitrary, silencePaddingFrames: 15 }))
-    await entersState(player, AudioPlayerStatus.Idle, 180000).catch(() => {})
-    lastSpeechEnd = Date.now()
+    try {
+      if (!connection || !loop) return
+      if (isSilenced() && Date.now() > silenceGrace) { log('wendy: speak suppressed (silenced)'); diag('speak_suppressed', { text: text.slice(0, 200), why: 'silenced' }); return }
+      const ep = speechEpoch
+      if (ep !== speechEpoch) { log('wendy: queued speech discarded (barge-in)'); return }
+      lastSpokenText = text
+      await loop.speak(text)
+      lastSpeechEnd = Date.now()
+    } finally { dequeue() }
   }
   const p = speakChain.then(run, run)
   speakChain = p.catch(() => {})
   await p
 }
 
-// - self-calibrating audio gates: learn the owner's real speech levels -
-const audioStatsPath = () => path.join(workspaceDir(), 'audio-stats.json')
-let rmsSamples: number[] = []
-try { rmsSamples = (JSON.parse(fs.readFileSync(audioStatsPath(), 'utf-8')) as { samples?: number[] }).samples ?? [] } catch {}
-let calRmsGate = 220
-let calBargeGate = 400
-function recalibrateGates(): void {
-  if (rmsSamples.length < 30) return
-  const sorted = [...rmsSamples].sort((a, b) => a - b)
-  const q = (p: number): number => sorted[Math.floor(p * (sorted.length - 1))]
-  calRmsGate = Math.min(Math.max(Math.round(0.4 * q(0.1)), 120), 350)
-  calBargeGate = Math.min(Math.max(Math.round(0.5 * q(0.5)), 300), 900)
-  diag('gates_calibrated', { samples: rmsSamples.length, rmsGate: calRmsGate, bargeGate: calBargeGate, p10: q(0.1), p50: q(0.5) })
-}
-recalibrateGates()
-function recordAcceptedRms(rms: number): void {
-  rmsSamples.push(Math.round(rms))
-  if (rmsSamples.length > 200) rmsSamples.splice(0, rmsSamples.length - 200)
-  if (rmsSamples.length % 10 === 0) {
-    try { fs.writeFileSync(audioStatsPath(), JSON.stringify({ samples: rmsSamples })) } catch {}
-    recalibrateGates()
-  }
-}
+
 let capturing = false
-let liveCapture: Buffer[] | null = null
 let draining = false
 let pendingUtterance: string | null = null
 const autoQueue: string[] = []   // telegram turns waiting their turn (owner speech never queues here)
@@ -1891,7 +1770,7 @@ async function drainAndExit(): Promise<void> {
   log('wendy: SIGTERM - draining before shutdown')
   // give an in-flight utterance a moment to end naturally
   const start = Date.now()
-  while (capturing && Date.now() - start < 6000) await new Promise((r) => setTimeout(r, 200))
+  while (loop?.ownerTalking() && Date.now() - start < 6000) await new Promise((r) => setTimeout(r, 200))
   // A reply in flight must land before we die - restarts were killing
   // answers mid-turn and the owner heard nothing. Up to 45s.
   if (busy) {
@@ -1907,20 +1786,14 @@ async function drainAndExit(): Promise<void> {
       while (playerActive() && Date.now() - p0 < 15000) await new Promise((r) => setTimeout(r, 250))
     }
   }
-  // still talking? salvage the buffer as-is (the continuous-speech case)
-  const chunks = liveCapture
-  if (chunks?.length) {
-    const pcm = Buffer.concat(chunks)
-    if (pcm.length > 24000) {
-      const { text } = await stt(pcm48kMonoToWav(pcm)).catch(() => ({ text: '' }))
-      if (text && text.length > 2) {
-        history.push({ role: 'user', content: text })
-        history.push({ role: 'assistant', content: '(I was restarted mid-conversation right after this - I never heard anything further and could not reply. Address it first thing when we reconnect.)' })
-        persistHistory()
-        diag('drain_salvaged', { chars: text.length })
-        log(`wendy: drain salvaged "${text.slice(0, 60)}"`)
-      }
-    }
+  // still talking? salvage the words heard so far (the continuous-speech case)
+  const partial = loop?.partialUtterance() ?? ''
+  if (partial.length > 2) {
+    history.push({ role: 'user', content: partial })
+    history.push({ role: 'assistant', content: '(I was restarted mid-conversation right after this - I never heard anything further and could not reply. Address it first thing when we reconnect.)' })
+    persistHistory()
+    diag('drain_salvaged', { chars: partial.length })
+    log(`wendy: drain salvaged "${partial.slice(0, 60)}"`)
   }
   persistHistory()
   saveModeState()
@@ -1928,7 +1801,6 @@ async function drainAndExit(): Promise<void> {
   process.exit(0)
 }
 process.on('SIGTERM', () => void drainAndExit())
-let streamDrains = 0
 let busyAckGiven = false
 let turnStartedAt = 0
 let lastBusyAck = 0
@@ -1964,10 +1836,7 @@ setInterval(() => {
   void runTurn(`[BACKGROUND UPDATE - this is NOT the owner speaking. Results from parallel work just arrived:]\n${events.join('\n')}\n[Tell the owner briefly and naturally, like a colleague mentioning news at a pause. Prioritize if several. Anything you ALREADY told the owner this conversation, or anything not worth interrupting for: reply with exactly SKIP (nothing else) - never say you are staying quiet, never restate old news in new words. STALENESS: each item carries [queued HH:MMZ src:ses_...]; items that had aged carry a '-> LIVE NOW:' line fetched THIS SECOND - that is the current state, speak from it, never from the older note above it. TELEGRAM items carry <tg:ChatName> and, if they had aged, a LIVE NOW line with the chat as of this second - speak from that. Never speak the <tg:...> marker. Never speak the bracketed metadata. IDENTITY: updates may describe YOU in the third person ("Wendy", "the user", "the assistant") because agents write about you - you are still Wendy speaking directly to your owner. Never adopt an outside-observer voice, never say "you should be able to X" about YOUR OWN capabilities, and never talk about yourself as a third party.]`)
   })()
 }, 5000).unref()
-function playerActive(): boolean {
-  const st = player?.state.status
-  return st === AudioPlayerStatus.Playing || st === AudioPlayerStatus.Buffering
-}
+function playerActive(): boolean { return loop?.speaking ?? false }
 
 async function runTurn(text: string): Promise<void> {
   if (draining) return
@@ -1975,7 +1844,8 @@ async function runTurn(text: string): Promise<void> {
   // arrive mid-turn queue behind it and must never outrank him (live: a
   // 27s search found his answer, a queued thread ping bumped the sequence,
   // the answer was binned and he had to ask again ten minutes later).
-  const seq = text.startsWith('[') ? inputSeq : ++inputSeq
+  // Fragments (< 3 words) never supersede a reply in flight - they merge into the pending input.
+  const seq = text.startsWith('[') || text.trim().split(/\s+/).length < 3 ? inputSeq : ++inputSeq
   if (!text.startsWith('[')) heldActions = []
   if (busy) {
     // Telegram/background turns queue properly instead of overwriting each other;
@@ -2030,39 +1900,29 @@ async function runTurn(text: string): Promise<void> {
       if (saidYes) diag('updates_accepted', { n: held.length })
       text = `${saidYes ? '[He just said YES to your offer of updates - DELIVER THEM NOW, highs first, concise. This is not a false start.]\n' : ''}[Context - updates queued while you were quiet or the owner was away (each tagged HIGH/MED/LOW): ${held.join(' | ')}. You may have offered a catch-up. Deliver HIGH items first, then MED; skip LOW unless they want everything. Items carry [queued HH:MMZ src:ses_...] - items that had aged carry a '-> LIVE NOW:' line fetched THIS SECOND - that line is the truth, speak from it and ignore the older note above it; items without one were fresh at delivery. TELEGRAM items carry <tg:ChatName> and, if they had aged, a LIVE NOW line with the chat as of this second - speak from that. Never speak the bracketed metadata or the <tg:...> marker. Updates may describe YOU in third person ("Wendy", "the assistant") - you are still Wendy speaking directly to your owner; never slip into narrating yourself from the outside. NO editorial framing or preamble ("two things worth knowing", "all polish, nothing structural") - open directly with the first item's substance; verdicts only if asked. Dismissal rule: ONLY treat their words as declining updates if you ACTUALLY offered updates and they are clearly responding to that offer - if you never offered, their words are about something else entirely: just answer them (the queued items are silent context, not the topic). A genuine dismissal -> snooze_updates and drop the subject instantly. If the owner wants everything, deliver it concisely. If they ask for the most urgent or most recent only, REASON over the list yourself, pick the single most important item (breakages and blockers beat progress notes; newest beats oldest), deliver just that one, and stop - no extra digging, no spillover into other updates unless asked.]\n${text}`
     }
+    if (supersededAnswer && Date.now() - supersededAnswer.at < 120000) {
+      text = `${text}\n[note: your previous reply was cut off before he heard it: "${supersededAnswer.text}". Answer what he just said; fold in anything from that reply that still matters.]`
+      supersededAnswer = null
+      diag('superseded_carried', {})
+    }
     log(`wendy heard: "${text.slice(0, 80)}"`)
     diag('owner_said', { text })
     const turnT0 = Date.now()
     let streamedCount = 0
-    const sentBuf: string[] = []
-    let draining = false
-    const drain = async (): Promise<void> => {
-      if (draining) return
-      draining = true
-      streamDrains++
-      try {
-        while (sentBuf.length) {
-          // superseded by newer input, or silenced -> stop talking entirely
-          if (seq !== inputSeq || isSilenced()) { sentBuf.length = 0; break }
-          const chunk = sentBuf.splice(0, 3).join(' ') // cap: bounded synth time per chunk
-          await speak(chunk) // awaits playback - later sentences coalesce into one prosody unit
-        }
-      } finally { draining = false; streamDrains-- }
-    }
-    // Sentence-pipelined speech OFF by default: owner prefers ~1.5s more wait for
-    // a single natural prosody arc over faster-but-choppier delivery. Flip with
-    // "streamSpeech": true in config.json (hot - no restart needed).
-    const streamer = !(loadConfig() as { streamSpeech?: boolean }).streamSpeech || text.startsWith('[') ? undefined : (sent: string): void => {
-      if (seq !== inputSeq || isSilenced()) return
+    // Every owner turn streams: sentences go into ONE tts session as the brain
+    // produces them; Kyutai renders them with lookahead so prosody is coherent.
+    const streamer = text.startsWith('[') ? undefined : (sent: string): void => {
+      if (seq !== inputSeq || isSilenced() || !loop) return
       streamedCount++
-      sentBuf.push(sent)
-      void drain()
+      loop.say(sent)
     }
+
     const reply = await think(text, streamer)
     diag('turn_done', { ms: Date.now() - turnT0, reply: reply.slice(0, 800), superseded: seq !== inputSeq, streamed: streamedCount })
     if (!text.startsWith('[')) scheduleHeldActionRecovery(inputSeq)
     if (!reply.trim()) return
     if (seq !== inputSeq) {
+      loop?.cancelSpeech('superseded')
       // Do not bin finished work: hand it to the next turn so she can fold it in
       // ("that file is at X, by the way") instead of going silent on him.
       supersededAnswer = { text: reply.slice(0, 700), at: Date.now() }
@@ -2071,7 +1931,8 @@ async function runTurn(text: string): Promise<void> {
       return
     }
     log(`wendy says: "${reply.slice(0, 80)}"`)
-    if (!streamedCount) void speak(reply)
+    if (streamedCount && loop) { await loop.endReply(); lastSpokenText = reply; lastSpeechEnd = Date.now() }
+    else void speak(reply)
   } catch (e) {
     log('wendy: turn crashed:', (e as Error).message)
     diag('turn_crash', { err: String((e as Error).message).slice(0, 200) })
@@ -2094,253 +1955,33 @@ async function runTurn(text: string): Promise<void> {
 }
 
 function listenTo(channel: VoiceBasedChannel, userId: string): void {
-  if (!connection) return
-  const receiver = connection.receiver
-  receiver.speaking.on('start', (speakingUserId) => {
-    if (speakingUserId !== userId) return
-    if (capturing) { diag('capture_open_ignored_busy', {}); return }
-    diag('capture_open', {})
-    capturing = true
-    let rotations = 0
-    const captureGuard = setInterval(() => {
-      if (!capturing) { clearInterval(captureGuard); return }
-      if (!chunks.length && rotations === 0) {
-        // Opened but never received audio (Discord fires 'speaking' without a
-        // stream sometimes). Left alone, capturing stays true forever and every
-        // later utterance is ignored - she goes DEAF. Release it.
-        log('wendy: capture guard - empty stuck capture released')
-        diag('capture_stuck_released', { empty: true })
-        clearInterval(captureGuard)
-        try { opus.destroy() } catch {}
-        capturing = false
-        liveCapture = null
+  if (!connection || !player) return
+  loop?.stop()
+  loop = new VoiceLoop(connection, player, userId, {
+    gate: () => ({ silenced: isSilenced(), nameOnly, expectingAnswer: /\?\s*$/.test(lastSpokenText.trim()) && Date.now() - lastSpeechEnd < 45000 }),
+    onUtterance: (text0, meta) => {
+      let text = text0
+      lastConvoActivity = Date.now()
+      if (isSilenced() && /\bw[ei]+nd[iy]e?\b/i.test(text)) { diag('wake_word', { text: text.slice(0, 60) }); void runTurn(text); return }
+      // A thinking pause ("Yeah, I mean,") is not the end of a sentence: hold
+      // the fragment briefly and merge it with what follows.
+      if (fragmentHold) { clearTimeout(fragmentHold.timer); text = `${fragmentHold.text} ${text}`; fragmentHold = null }
+      const expectingAnswer = /\?\s*$/.test(lastSpokenText.trim()) && Date.now() - lastSpeechEnd < 45000
+      if (!expectingAnswer && !meta.bargedIn && text.split(/\s+/).length < 3 && !/[.!?]$/.test(text)) {
+        const held = text
+        diag('fragment_held', { text: held })
+        fragmentHold = { text: held, timer: setTimeout(() => { if (fragmentHold?.text === held) { fragmentHold = null; void runTurn(held) } }, 2500) }
         return
       }
-      // Stream never hit 900ms of silence (noise floor / open mic / long
-      // monologue). Rotate: transcribe what we have, keep recording - the
-      // owner is never cut off and never unheard.
-      if (!chunks.length) return // open but momentarily silent after a rotation - nothing to transcribe yet
-      // He is STILL TALKING. Transcribe the segment into a buffer; the turn
-      // fires when he actually stops (natural close) with everything merged.
-      // Acting on a mid-monologue segment made her talk over him and then
-      // read his continuing speech as an interruption ("you cut in").
-      rotations++
-      log(`wendy: long capture - rotating segment ${rotations} into the monologue buffer`)
-      diag('capture_rotated', { bytes: chunks.reduce((a, c) => a + c.length, 0), segment: rotations })
-      void finishSegment(chunks.splice(0), rotations >= 8 ? 'force' : 'buffer')
-      interrupted = false
-    }, 30000)
-    const opus = receiver.subscribe(speakingUserId, {
-      end: { behavior: EndBehaviorType.AfterSilence, duration: 900 },
-    })
-    const decoder = new prism.opus.Decoder({ rate: 48000, channels: 1, frameSize: 960 })
-    const chunks: Buffer[] = []
-    liveCapture = chunks
-    let bytes = 0
-    let sumSqLive = 0
-    let interrupted = false
-    let cutSpeech: string[] = []
-    opus.pipe(decoder)
-    decoder.on('data', (c: Buffer) => {
-      chunks.push(c)
-      bytes += c.length
-      for (let i = 0; i < c.length; i += 8) { const v = c.readInt16LE(i - (i % 2)); sumSqLive += v * v }
-      // barge-in: ~0.7s of sustained AND genuinely loud speech while she's talking.
-      // Duration alone false-triggered on fan hum / speaker bleed (seen live at RMS 48).
-      const joinGrace = Date.now() - joinedAt < 90000
-      if (!nameOnly && !interrupted && bytes > (joinGrace ? 24000 : 67200) && playerActive()) {
-        const rmsLive = Math.sqrt(sumSqLive / (bytes / 8))
-        if (rmsLive >= calBargeGate * (joinGrace ? 0.55 : 1)) {
-          interrupted = true
-          cutSpeech = interruptSpeech()
-          log('wendy: barge-in - owner spoke over me, playback cut')
-          diag('barge_in', { rms: Math.round(rmsLive) })
-        }
+      let turnText = text
+      if (meta.bargedIn && meta.cutSpeech.length) {
+        turnText = `${text}\n[note: you were mid-reply when the owner cut in - these sentences of yours were never heard: "${meta.cutSpeech.join(' ').slice(0, 500)}". Answer the owner first. Then decide naturally whether that unfinished part still matters: if it does, weave it in or finish it in your own words; if their interruption made it moot, just drop it.]`
+        diag('interrupted_context', {})
       }
-    })
-    // ANY exit that is not decoder 'end' used to drop the captured audio on
-    // the floor with no trace. Every exit now flushes what was captured.
-    let flushed = false
-    const flushOnExit = (why: string) => (): void => {
-      clearInterval(captureGuard)
-      capturing = false
-      if (flushed) return
-      flushed = true
-      const bytes = chunks.reduce((a, c) => a + c.length, 0)
-      diag('capture_exit', { why, bytes, buffered: monologueBuf.length })
-      if (bytes > 24000 || monologueBuf) { liveCapture = null; void finishSegment(chunks.splice(0)) }
-    }
-    opus.on('close', flushOnExit('opus_close'))
-    opus.on('error', flushOnExit('opus_error'))
-    decoder.on('close', flushOnExit('decoder_close'))
-    const finishSegment = async (segChunks: Buffer[], mode: 'final' | 'buffer' | 'force' = 'final'): Promise<void> => {
-      {
-        const resumeIfPhantom = (): void => {
-          // a streamed reply that's still draining will continue on its own -
-          // replaying the cut chunk now would land AFTER the next chunk (scrambled)
-          if (streamDrains > 0) { cutSpeech = []; return }
-          if (interrupted && cutSpeech.length) {
-            // cutSpeech[0] is the sentence that was PLAYING when cut - the owner
-            // already heard most of it. Replaying it repeats her from the start
-            // (seen live on a one-sentence greeting). Resume only sentences that
-            // never began playing; if there are none, just stay quiet.
-            const unplayed = cutSpeech.slice(1)
-            if (unplayed.length) {
-              log('wendy: barge-in was a phantom - resuming the unspoken part')
-              diag('barge_in_resumed', { sentences: unplayed.length, droppedInFlight: true })
-              for (const t of unplayed) void speak(t)
-            } else {
-              log('wendy: phantom barge-in but the cut sentence was already mostly heard - not repeating it')
-              diag('barge_in_no_resume', {})
-            }
-            cutSpeech = []
-          }
-        }
-        const pcm = Buffer.concat(segChunks)
-        // She just asked a question -> a short "yes/sure/okay" is the EXPECTED shape
-        // of the answer; the anti-phantom gates must not eat it.
-        const expectingAnswer = /\?\s*$/.test(lastSpokenText.trim()) && Date.now() - lastSpeechEnd < 45000
-        const minBytes = 24000 // 0.25s floor - fast ADHD speech; confidence gates do the real filtering // 0.25s when a wake-word or short answer is expected
-        if (pcm.length < minBytes) { diag('dropped', { why: 'too_short', bytes: pcm.length }); resumeIfPhantom(); return }
-        // energy gate: breath/hum/keyboard is near-silent; real speech is not
-        let sumSq = 0
-        const samples = pcm.length / 2
-        for (let i = 0; i < pcm.length; i += 2) { const v = pcm.readInt16LE(i); sumSq += v * v }
-        const rms = Math.sqrt(sumSq / samples)
-        // Quiet-but-real speech: let borderline audio through to Whisper, which
-        // has confidence scores to judge it far better than raw loudness can.
-        if (rms < calRmsGate * 0.35) { diag('dropped', { why: 'low_energy', rms: Math.round(rms), gate: calRmsGate }); resumeIfPhantom(); return }
-        const borderline = rms < calRmsGate
-        const stt0 = await stt(pcm48kMonoToWav(pcm))
-        let text = stt0.text
-        const { noSpeech, logprob } = stt0
-        if (stt0.failed) {
-          // His words are on disk, not in her head. Say so NOW - silence here
-          // is the one failure he cannot detect from his side.
-          if (monologueBuf) { text = monologueBuf; monologueBuf = ''; diag('monologue_partial_after_stt_failure', {}) }
-          else { void speak('Sorry - my ears choked on that, it was a long one. Say it again?'); return }
-        } else if (!text || text.length < 2) {
-          if (pcm.length > 2 * 96000) diag('stt_empty_on_substantial_audio', { seconds: Math.round(pcm.length / 96000), noSpeech: +noSpeech.toFixed(2) })
-          resumeIfPhantom(); return
-        }
-        // Silence wake-word: DETERMINISTIC - checked before every other gate so
-        // nothing (confidence, artifact, noise filters) can eat a wake attempt.
-        if (isSilenced() && /\bw[ei]+nd[iy]e?\b/i.test(text)) {
-          diag('wake_word', { text: text.slice(0, 60) })
-          void runTurn(text)
-          return
-        }
-        if (nameOnly) {
-          const addressed = /\bw[ei]+nd[iy]e?\b/i.test(text)
-          if (!addressed && !monologueBuf) {
-            diag('dropped', { why: 'name_only', seconds: Math.round(pcm.length / 96000) }) // never persist room-chat text
-            resumeIfPhantom()
-            return
-          }
-          // Addressed by name while she is talking: that IS the interruption.
-          // Loudness-based barge-in is off in this mode (a friend in the call
-          // must not cut her), so the cut happens here, on the transcript.
-          if (addressed && playerActive() && !interrupted) {
-            interrupted = true
-            cutSpeech = interruptSpeech()
-            diag('barge_in_by_name', {})
-          }
-        }
-        if (isSilenced()) diag('dropped', { text: text.slice(0, 60), why: 'silenced', noSpeech: +noSpeech.toFixed(2), logprob: +logprob.toFixed(2) })
-        // Whisper's own confidence: silence-hallucinations carry high no_speech_prob
-        // and low avg_logprob. Real speech is typically logprob > -0.5, noSpeech < 0.3.
-        // Leniency when a reply is EXPECTED: shortly after joining, or shortly
-        // after she finished speaking (his answer to her is the most likely
-        // audio there is). Live loss: "are you aware of" dropped 21s after
-        // join, 11s after her greeting, because the window was join-keyed.
-        const replyExpected = Date.now() - joinedAt < 60000 || Date.now() - lastSpeechEnd < 15000
-        // Whisper's no_speech_prob is unreliable on short clips; a multi-word
-        // sentence with no artifact shape needs BOTH signals bad to be binned.
-        const words = text.trim().split(/\s+/).filter(Boolean).length
-        const substantive = words >= 3 && !STOCK_GHOST.test(text.trim())
-        const badNoSpeech = noSpeech > (borderline ? 0.4 : 0.55)
-        const badLogprob = logprob < (borderline ? -0.7 : -0.9)
-        const drop = substantive ? (noSpeech > 0.9 && logprob < -1.0) : (badNoSpeech || badLogprob)
-        if (!replyExpected && drop) {
-          diag('dropped', { text: text.slice(0, 60), why: 'low_confidence', noSpeech: +noSpeech.toFixed(2), logprob: +logprob.toFixed(2) })
-          resumeIfPhantom()
-          return
-        }
-        // Stock ghost phrases need GOOD confidence to be believed at all
-        if (!expectingAnswer && STOCK_GHOST.test(text.trim()) && (logprob < -0.4 || noSpeech > 0.25)) {
-          diag('dropped', { text: text.trim(), why: 'stock_low_conf', noSpeech: +noSpeech.toFixed(2), logprob: +logprob.toFixed(2) })
-          resumeIfPhantom()
-          return
-        }
-        // Whisper hallucination artifacts: subtitle credits, thanks-for-watching, url spam.
-        // These are training-data ghosts - drop at ANY clip length.
-        const ARTIFACT = /(thank you for watching|thanks for watching|takk for|teksting av|undertekster|subtitles? by|untertitel|sous-titr|like and subscribe|share this video|www\.|\.com\b)/i
-        if (ARTIFACT.test(text)) {
-          log(`wendy: dropped whisper artifact "${text.trim().slice(0, 50)}"`)
-          diag('dropped', { text: text.trim().slice(0, 80), why: 'artifact' })
-          resumeIfPhantom()
-          return
-        }
-        // Stock phrases on noise/breath; drop for short clips.
-        const NOISE = /^(thanks?( you| for watching)?|you|bye|\.|uh|um)[.!\s]*$/i
-        if (!isSilenced() && pcm.length < 2 * 96000 && NOISE.test(text.trim())) {
-          log(`wendy: dropped noise artifact "${text.trim()}"`)
-          diag('dropped', { text: text.trim(), why: 'noise' })
-          resumeIfPhantom()
-          return
-        }
-        const BACKCHANNEL = /^(yeah|yep|yes|ok(ay)?|mhm+|uh-?huh|right|true|sure|lol|haha+|nice|cool|got it|go on|i see|wow)[.!,\s]*$/i
-        if (!isSilenced() && pcm.length < 3 * 96000 && BACKCHANNEL.test(text.trim())) {
-          const sheAsked = /\?\s*$/.test(lastSpokenText.trim())
-          const overlapping = playerActive()
-          const longIdle = Date.now() - lastSpeechEnd > 30000
-          if (!sheAsked && (overlapping || longIdle)) {
-            log(`wendy: backchannel - not a turn: "${text.trim()}"`)
-            diag('dropped', { text: text.trim(), why: 'backchannel' })
-            resumeIfPhantom()
-            return
-          }
-        }
-        recordAcceptedRms(rms)
-        // A thinking pause ("Yeah, I mean,") is not the end of a sentence: hold
-        // the fragment briefly and merge it with what follows. Live loss: the
-        // owner's "yes" to an updates offer became a false-start fragment.
-        if (fragmentHold) { clearTimeout(fragmentHold.timer); text = `${fragmentHold.text} ${text}`; fragmentHold = null }
-        if (isTrailingFragment(text) && !interrupted) {
-          diag('fragment_held', { text: text.slice(0, 60) })
-          const held = text
-          fragmentHold = { text: held, timer: setTimeout(() => { if (fragmentHold?.text === held) { fragmentHold = null; void runTurn(held) } }, 2500) }
-          return
-        }
-        if (mode === 'buffer') {
-          if (nameOnly && !monologueBuf && !/\bw[ei]+nd[iy]e?\b/i.test(text)) { diag('dropped', { why: 'name_only' }); return }
-          monologueBuf = monologueBuf ? `${monologueBuf} ${text}` : text
-          diag('monologue_buffered', { chars: monologueBuf.length })
-          return
-        }
-        if (monologueBuf) { text = `${monologueBuf} ${text}`; monologueBuf = ''; diag('monologue_merged', { chars: text.length, forced: mode === 'force' }) }
-        let turnText = text
-        if (interrupted && cutSpeech.length) {
-          // Real interruption: hand her the unfinished thought so she can reason
-          // about it - answer the owner first, then finish/drop the thread herself.
-          turnText = `${text}\n[note: you were mid-reply when the owner cut in - these sentences of yours were never heard: "${cutSpeech.join(' ').slice(0, 500)}". Answer the owner first. Then decide naturally whether that unfinished part still matters: if it does, weave it in or finish it in your own words (a casual bridge in whatever phrasing fits); if their interruption made it moot, just drop it.]`
-          cutSpeech = []
-          diag('interrupted_context', {})
-        }
-        void runTurn(turnText)
-      }
-    }
-    decoder.on('end', () => {
-      clearInterval(captureGuard)
-      capturing = false
-      liveCapture = null
-      if (flushed) return
-      flushed = true
-      diag('capture_exit', { why: 'end', bytes: chunks.reduce((a, c) => a + c.length, 0), buffered: monologueBuf.length })
-      void finishSegment(chunks)
-    })
-    decoder.on('error', flushOnExit('decoder_error'))
+      void runTurn(turnText)
+    },
   })
+  void loop.start().catch((e) => { log('wendy: voice loop failed to start:', (e as Error).message); textPingOwner('My ears are down (kyutai stt not reachable) - I am in the channel but cannot hear you.') })
 }
 
 let currentChannelId = ''
@@ -2420,15 +2061,13 @@ async function joinAndServe(channel: VoiceBasedChannel, userId: string): Promise
 }
 
 function leave(): void {
+  loop?.stop(); loop = null
   connection?.destroy()
   connection = null
   player = null
   // Never carry capture state across a voice session - a stuck flag here
   // would make her deaf on the next join.
-  capturing = false
-  liveCapture = null
   if (fragmentHold) { clearTimeout(fragmentHold.timer); fragmentHold = null }
-  monologueBuf = ''
 }
 
 export function initWendy(client: Client): void {

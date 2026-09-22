@@ -21,7 +21,7 @@ const strip = (u: string): string => u.replace(/\/$/, '')
 export function brainUrl(): string | undefined { return loadConfig().brainUrl }
 export function laneUrl(lane: Lane): string | undefined {
   const c = loadConfig() as BrainConfig
-  const u = lane === 'background' ? (c.auxBrainUrl || c.brainUrl) : c.brainUrl
+  const u = process.env.WENDY_BRAIN_URL || (lane === 'background' ? (c.auxBrainUrl || c.brainUrl) : c.brainUrl)
   return u ? strip(u) : undefined
 }
 export function laneModel(lane: Lane): string {

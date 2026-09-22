@@ -1,0 +1,18 @@
+# systemd --user unit: ~/.config/systemd/user/wendy-kyutai.service
+#   systemctl --user daemon-reload && systemctl --user enable --now wendy-kyutai
+[Unit]
+Description=Wendy ears+mouth (Kyutai STT 1B + TTS 1.6B, :8010)
+After=network.target
+
+[Service]
+Type=simple
+WorkingDirectory=%h/WebstormProjects/kimaki-whisper/deploy/kyutai
+Environment=PORT=8010
+ExecStart=%h/kyutai-server/.venv/bin/python server.py
+Restart=always
+RestartSec=5
+StandardOutput=append:%h/.kimaki-whisper/kyutai.log
+StandardError=append:%h/.kimaki-whisper/kyutai.log
+
+[Install]
+WantedBy=default.target
