@@ -65,7 +65,8 @@ export async function brainFetch(lane: Lane, body: Record<string, unknown>, opts
     headers: { 'content-type': 'application/json', connection: 'close' },
     // One KV slot per lane (server runs -np 2): background summaries can never
     // evict the conversation's cached prefix.
-    body: JSON.stringify({ model: laneModel(lane), cache_prompt: true, id_slot: lane === 'conversation' ? 0 : 1, ...body }),
+    // toWellFormed: slicing text mid-emoji leaves a lone surrogate, which llama.cpp rejects with a 500.
+    body: JSON.stringify({ model: laneModel(lane), cache_prompt: true, id_slot: lane === 'conversation' ? 0 : 1, ...body }).toWellFormed(),
     signal: opts.signal ? AbortSignal.any([opts.signal, timeout]) : timeout,
   }).catch(() => null)
 }
@@ -88,7 +89,7 @@ export async function brainRequest(lane: Lane, body: Record<string, unknown>, on
     res = await fetch(`${url}/v1/chat/completions`, {
       method: 'POST',
       headers: { 'content-type': 'application/json', connection: 'close' },
-      body: JSON.stringify({ ...body, ...(stream ? { stream: true } : {}) }),
+      body: JSON.stringify({ model: laneModel(lane), cache_prompt: true, id_slot: lane === 'conversation' ? 0 : 1, ...body, ...(stream ? { stream: true } : {}) }).toWellFormed(),
       signal: AbortSignal.timeout(120000),
     })
   } catch (e) {
