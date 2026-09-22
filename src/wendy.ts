@@ -33,7 +33,7 @@ import { TOOLS } from './tools/specs.js'
 import { executeTelegramTool } from './tools/telegram.js'
 import { isDispatchTool, isThreadDispatchTool, dispatchSucceeded, claimsSend, sendClaimAck, isTrailingFragment, isAffirmative, isSelfDirective, soundsLikePromise, dispatchKey, collapsePriorityTags, isUrgentUpdate, queueDedupeMarkers, repairHistory, SESSION_ID, isSessionId, stripReminderPrefix } from './brain/guards.js'
 import { summaryIsCompliance, mechanicalSummary } from './brain/guards.js'
-import { onBrainUp, brainUrl, brainRequest, brainFetch, brainText, brainHealth, probeBrain, type BrainOut } from './brain/client.js'
+import { onBrainUp, setConversationActive, preemptBackground, brainUrl, brainRequest, brainFetch, brainText, brainHealth, probeBrain, type BrainOut } from './brain/client.js'
 import { startTelegram, setTelegramFlaggedHandler, telegramAutoDrain, telegramLowBudgets, setTelegramAutonomousHandler, telegramPendingSummaries, telegramDrainChatStats, telegramPendingPeopleSummaries, telegramDrainPerson, telegramProfile, telegramProfilesDue, telegramProfileWrite, telegramPrivacyFor, telegramEffectiveTone, telegramRoomContext, telegramPersonThread, setReplyTarget, telegramChatDigest } from './telegram.js'
 
 // ── config accessors ─────────────────────────────────────────────
@@ -1923,6 +1923,7 @@ async function runTurn(text: string): Promise<void> {
   busyAckGiven = false
   turnAbort = new AbortController()
   turnEntryAt = turnEntry
+  if (ownerTurn) preemptBackground()
   sliceAbort?.abort()
   turnStartedAt = Date.now()
   lastConvoActivity = Date.now()
@@ -2233,6 +2234,7 @@ export function initWendy(client: Client): void {
     })()
   })
   log(`wendy: armed - will follow owner ${owner} into voice channels`)
+  setConversationActive(() => busy || ownerTalking() || (!!connection && Date.now() - lastConvoActivity < 20000))
   setTimeout(() => void warmBrain('boot'), 3000)
   onBrainUp(() => { if (!busy) void warmBrain('brain_up') })
   setInterval(() => { if (!busy && Date.now() - lastConvoActivity > 10 * 60 * 1000) void warmBrain('periodic') }, 20 * 60 * 1000).unref()

@@ -60,7 +60,39 @@ void probeBrain()
 
 /** Low-level: identical semantics to fetch(...).catch(() => null), lane-routed.
  *  Callers keep their own response parsing. */
+// ── conversation priority ──────────────────────────────────────
+// llama.cpp batches both slots together: a background prefill on slot 1 cuts
+// her live decode on slot 0 from ~90 to ~20 tok/s (measured). While she is in a
+// conversation, background requests WAIT, and any already in flight are
+// cancelled and retried once she is idle.
+let conversationActive: () => boolean = () => false
+export function setConversationActive(fn: () => boolean): void { conversationActive = fn }
+const inflightBg = new Set<AbortController>()
+export function preemptBackground(): void {
+  for (const c of inflightBg) c.abort(new Error('preempted'))
+  inflightBg.clear()
+}
+async function waitForIdle(maxMs = 180000): Promise<void> {
+  const t0 = Date.now()
+  while (conversationActive() && Date.now() - t0 < maxMs) await new Promise((r) => setTimeout(r, 1000))
+}
+
 export async function brainFetch(lane: Lane, body: Record<string, unknown>, opts: { timeoutMs?: number; signal?: AbortSignal } = {}): Promise<Response | null> {
+  if (lane === 'background') {
+    for (let attempt = 0; attempt < 4; attempt++) {
+      await waitForIdle()
+      const ctl = new AbortController()
+      inflightBg.add(ctl)
+      const res = await rawFetch(lane, body, { ...opts, signal: opts.signal ? AbortSignal.any([opts.signal, ctl.signal]) : ctl.signal })
+      inflightBg.delete(ctl)
+      if (!ctl.signal.aborted || opts.signal?.aborted) return res
+    }
+    return null
+  }
+  return rawFetch(lane, body, opts)
+}
+
+async function rawFetch(lane: Lane, body: Record<string, unknown>, opts: { timeoutMs?: number; signal?: AbortSignal }): Promise<Response | null> {
   const url = laneUrl(lane)
   if (!url) return null
   const timeout = AbortSignal.timeout(opts.timeoutMs ?? 60000)
@@ -87,6 +119,7 @@ export async function brainText(lane: Lane, body: Record<string, unknown>, timeo
 export async function brainRequest(lane: Lane, body: Record<string, unknown>, onSentence?: (s: string) => void, signal?: AbortSignal): Promise<BrainOut> {
   const url = laneUrl(lane)
   if (!url) return { content: '', toolCalls: [], error: 'unconfigured' }
+  if (lane === 'background') await waitForIdle(30000)
   const stream = !!onSentence
   let res: Response
   try {
