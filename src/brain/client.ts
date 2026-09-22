@@ -84,7 +84,7 @@ export async function brainText(lane: Lane, body: Record<string, unknown>, timeo
 }
 
 /** Full-featured: streaming sentence callback, tool-call assembly, timings. */
-export async function brainRequest(lane: Lane, body: Record<string, unknown>, onSentence?: (s: string) => void): Promise<BrainOut> {
+export async function brainRequest(lane: Lane, body: Record<string, unknown>, onSentence?: (s: string) => void, signal?: AbortSignal): Promise<BrainOut> {
   const url = laneUrl(lane)
   if (!url) return { content: '', toolCalls: [], error: 'unconfigured' }
   const stream = !!onSentence
@@ -94,7 +94,7 @@ export async function brainRequest(lane: Lane, body: Record<string, unknown>, on
       method: 'POST',
       headers: { 'content-type': 'application/json', connection: 'close' },
       body: JSON.stringify({ model: laneModel(lane), cache_prompt: true, id_slot: lane === 'conversation' ? 0 : 1, ...body, ...(stream ? { stream: true } : {}) }).toWellFormed(),
-      signal: AbortSignal.timeout(120000),
+      signal: signal ? AbortSignal.any([signal, AbortSignal.timeout(120000)]) : AbortSignal.timeout(120000),
     })
   } catch (e) {
     return { content: '', toolCalls: [], error: String((e as Error)?.cause ?? e) }

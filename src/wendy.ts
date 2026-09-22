@@ -462,7 +462,7 @@ async function executeToolInner(name: string, args: Record<string, unknown>): Pr
     const url = brainUrl()
     if (!url) return 'ERROR: no brain configured'
     const t0 = Date.now()
-    const res = await brainFetch('conversation', { max_tokens: 80, messages: [{ role: 'user', content: 'Count from one to twenty, words, comma separated.' }] }, { timeoutMs: 60000 })
+    const res = await brainFetch('background', { max_tokens: 80, messages: [{ role: 'user', content: 'Count from one to twenty, words, comma separated.' }] }, { timeoutMs: 60000 })
     if (!res?.ok) return `ERROR: brain unreachable or errored (HTTP ${res?.status ?? 'network'})`
     const d = await res.json().catch(() => null) as { usage?: { completion_tokens?: number }; timings?: { predicted_per_second?: number; prompt_per_second?: number } } | null
     const wall = Date.now() - t0
@@ -545,9 +545,11 @@ const history: Msg[] = (() => {
   if (process.env.WENDY_TEST) return []
   try { return JSON.parse(fs.readFileSync(path.join(workspaceDir(), 'history.json'), 'utf-8')) as Msg[] } catch { return [] }
 })()
+const HISTORY_MAX = 48
+const HISTORY_KEEP = 24
 function persistHistory(): void {
   if (process.env.WENDY_TEST) return
-  try { fs.writeFileSync(path.join(workspaceDir(), 'history.json'), JSON.stringify(history.slice(-40))) } catch {}
+  try { fs.writeFileSync(path.join(workspaceDir(), 'history.json'), JSON.stringify(history.slice(-HISTORY_MAX))) } catch {}
 }
 
 /** Prefill the stable prefix so the first real turn hits the KV cache. Cheap (1 token out). */
@@ -558,7 +560,10 @@ export async function warmBrain(why: string): Promise<void> {
   const messages: Msg[] = [{ role: 'system', content: SYSTEM_PROMPT + memoryBlock }, ...history]
   repairHistory(messages)
   const t0 = Date.now()
-  const out = await brainRequest('conversation', { messages, tools: TOOLS, max_tokens: 1 })
+  if (busy) return
+  warmAbort = new AbortController()
+  const out = await brainRequest('conversation', { messages, tools: TOOLS, max_tokens: 1 }, undefined, warmAbort.signal)
+  warmAbort = null
   diag('brain_warm', { why, ms: Date.now() - t0, cached: out.usage?.prompt_tokens_details?.cached_tokens ?? null, prompt: out.usage?.prompt_tokens ?? null, error: out.error })
 }
 
@@ -567,8 +572,10 @@ export async function think(userText: string, onSentence?: (s: string) => void):
   if (!url) return "My reasoning engine isn't configured yet."
 
   history.push({ role: 'user', content: userText })
-  if (history.length > 40) {
-    const evicted = history.splice(0, history.length - 40)
+  // Evict in blocks, not one message per turn: a sliding window changes the
+  // prefix every turn and the KV cache only survives up to the system prompt.
+  if (history.length > HISTORY_MAX) {
+    const evicted = history.splice(0, history.length - HISTORY_KEEP)
     evictionBuffer.push(...evicted.filter((m) => {
       const c = String(m.content ?? '')
       return c && c !== '[background update delivered]' && !c.startsWith('[BACKGROUND UPDATE')
@@ -622,9 +629,10 @@ export async function think(userText: string, onSentence?: (s: string) => void):
   const hopT0Turn = Date.now()
   let progressSpoken = false
   for (let hop = 0; hop < MAX_HOPS; hop++) {
+    if (turnAbort?.signal.aborted) return ''
     const hopT0 = Date.now()
     const elapsed = Date.now() - hopT0Turn
-    if (elapsed > 45000 && !progressSpoken && !userText.startsWith('[')) {
+    if (elapsed > 45000 && !progressSpoken && !userText.startsWith('[') && !ownerTalking()) {
       progressSpoken = true
       void speak('Still on it - digging through a few things, give me a moment.')
       diag('turn_progress_ack', { ms: elapsed })
@@ -637,7 +645,8 @@ export async function think(userText: string, onSentence?: (s: string) => void):
     // closed server-side and the first reuse fails instantly with a reset.
     let out: BrainOut = { content: '', toolCalls: [], error: 'unreachable' }
     for (let attempt = 0; attempt < 2; attempt++) {
-      out = await brainRequest('conversation', { model: 'local-fast', cache_prompt: true, messages, ...(lastLap ? {} : { tools: TOOLS }), max_tokens: 16384 }, onSentence)
+      out = await brainRequest('conversation', { model: 'local-fast', cache_prompt: true, messages, ...(lastLap ? {} : { tools: TOOLS }), max_tokens: 16384 }, onSentence, turnAbort?.signal)
+      if (turnAbort?.signal.aborted) return ''
       if (!out.error) break
       log(`wendy brain attempt ${attempt + 1} failed: ${out.error}`)
       await new Promise((r) => setTimeout(r, 1500))
@@ -723,7 +732,7 @@ export async function think(userText: string, onSentence?: (s: string) => void):
                   return 'HELD: the owner told you to do this YOURSELF ("independently" / "on your own" / "yourself"). Do not delegate it to a thread - use read_session (deep, with chars), bash, notes and your own reasoning, then answer him directly.'
                 }
                 const goAhead = !!pendingUtterance && isAffirmative(pendingUtterance) && pendingUtterance.trim().split(/\s+/).length <= 6
-                const stillTalkingToHer = nameOnly ? turnSeq !== inputSeq : (turnSeq !== inputSeq || capturing || pendingUtterance)
+                const stillTalkingToHer = nameOnly ? turnSeq !== inputSeq : (turnSeq !== inputSeq || ownerTalking() || !!loop?.continuedSince(turnEntryAt) || pendingUtterance)
                 if (isSend && !userText.startsWith('[') && !goAhead && stillTalkingToHer) {
                   diag('action_held_owner_talking', { tool: tc.function.name })
                   heldActions.push({ name: tc.function.name, args, at: Date.now() })
@@ -778,7 +787,7 @@ export async function think(userText: string, onSentence?: (s: string) => void):
     }
     let isPromise = false
     if (!nudged && hop < MAX_HOPS - 2 && soundsLikePromise(text)) {
-      const v = await brainRequest('conversation', {
+      const v = await brainRequest('background', {
         model: 'local-fast', cache_prompt: true, max_tokens: 5,
         messages: [
           { role: 'system', content: 'Answer with exactly YES or NO.' },
@@ -1053,7 +1062,7 @@ const WORKER_PROMPT = `You are Wendy's background worker, autonomously executing
 let sliceRunning = false
 let sliceAbort: AbortController | null = null
 async function runTaskSlice(): Promise<void> {
-  if (sliceRunning || busy || capturing || isSilenced()) return
+  if (sliceRunning || busy || ownerTalking() || isSilenced()) return
   // least-recently-worked active task first - find() let a stuck task starve
   // every other active task forever
   const t = selfTasks.filter((x) => x.status === 'active').sort((a, b) => (a.updated ?? 0) - (b.updated ?? 0))[0]
@@ -1078,7 +1087,7 @@ async function runTaskSlice(): Promise<void> {
   sliceAbort = new AbortController()
   try {
     for (let hop = 0; hop < 6; hop++) {
-      if (busy || capturing) break // foreground appeared - yield
+      if (busy || ownerTalking()) break // foreground appeared - yield
       const res = await brainFetch('background', { messages: t.msgs, tools: TOOLS, max_tokens: 4000 }, { signal: sliceAbort.signal, timeoutMs: 120000 })
       if (!res?.ok) {
         diag('slice_http_error', { id: t.id, status: res?.status ?? 'network', body: res ? String(await res.text().catch(() => '')).slice(0, 150) : '' })
@@ -1336,7 +1345,7 @@ function highCount(): number {
 }
 // DND pressure valve: the ONLY thing that speaks under do-not-disturb
 setInterval(() => {
-  if (!dnd || !connection || busy || capturing || isSilenced() || playerActive()) return
+  if (!dnd || !connection || busy || ownerTalking() || isSilenced() || playerActive()) return
   if (highCount() < 3 || Date.now() - lastHighNudge < 30 * 60 * 1000) return
   lastHighNudge = Date.now()
   const lines = [
@@ -1783,7 +1792,8 @@ async function speak(text: string): Promise<void> {
 }
 
 
-let capturing = false
+/** He is talking right now (words in the last 1.2 s). Replaces the V1 capture flag. */
+function ownerTalking(): boolean { return !!loop?.ownerTalking() }
 let draining = false
 let pendingUtterance: string | null = null
 const autoQueue: string[] = []   // telegram turns waiting their turn (owner speech never queues here)
@@ -1839,7 +1849,7 @@ let lastBgDelivery = 0
 // Deliver background results only when the conversation has space:
 // nobody talking, nothing playing, no turn running, >10s since last exchange.
 setInterval(() => {
-  if (!attention.has('live') || !connection || busy || capturing || isSilenced() || playerActive() || resumeOnContact) return
+  if (!attention.has('live') || !connection || busy || ownerTalking() || isSilenced() || playerActive() || resumeOnContact) return
   if (dnd || Date.now() < askSnoozedUntil) {
     attention.trim('live', 15)
     return
@@ -1867,10 +1877,20 @@ function playerActive(): boolean { return loop?.speaking ?? false }
 // half a sentence. It is dropped unspoken and his earlier words are prepended to
 // what he says next, so the brain sees the whole thought.
 let carryOver: { text: string; at: number } | null = null
+let turnAbort: AbortController | null = null
+let turnEntryAt = 0
+let warmAbort: AbortController | null = null
+/** Stop the in-flight brain request NOW (GPU drops immediately). */
+function abortTurn(why: string): void {
+  if (!turnAbort || turnAbort.signal.aborted) return
+  turnAbort.abort()
+  diag('turn_aborted', { why })
+}
 async function runTurn(text: string): Promise<void> {
   if (draining) return
   const ownerTurn = !text.startsWith('[')
   const turnEntry = Date.now()
+  warmAbort?.abort()
   if (ownerTurn && !busy && carryOver && Date.now() - carryOver.at < 90000) {
     text = `${carryOver.text} ${text}`
     diag('carry_over_merged', { chars: text.length })
@@ -1893,12 +1913,16 @@ async function runTurn(text: string): Promise<void> {
       return
     }
     pendingUtterance = pendingUtterance ? `${pendingUtterance} - ${text}`.slice(-1500) : text
+    // A real new utterance supersedes: stop generating the old answer right now.
+    if (seq === inputSeq) { abortTurn('superseded'); loop?.cancelSpeech('superseded') }
     log(`wendy: busy - queued "${text.slice(0, 50)}"`)
     diag('queued_while_busy', { text })
     return
   }
   busy = true
   busyAckGiven = false
+  turnAbort = new AbortController()
+  turnEntryAt = turnEntry
   sliceAbort?.abort()
   turnStartedAt = Date.now()
   lastConvoActivity = Date.now()
@@ -2006,6 +2030,7 @@ function listenTo(channel: VoiceBasedChannel, userId: string): void {
   if (!connection || !player) return
   loop?.stop()
   loop = new VoiceLoop(connection, player, userId, {
+    onBargeIn: () => abortTurn('barge_in'),
     gate: () => ({ silenced: isSilenced(), nameOnly, expectingAnswer: /\?\s*$/.test(lastSpokenText.trim()) && Date.now() - lastSpeechEnd < 45000 }),
     onUtterance: (text0, meta) => {
       let text = text0
@@ -2043,7 +2068,6 @@ async function joinAndServe(channel: VoiceBasedChannel, userId: string): Promise
   currentChannelId = channel.id
   joinedAt = Date.now()
   leave()
-  capturing = false
   pendingUtterance = null
   log(`wendy: joining #${channel.name}`)
   // Discord's voice handshake stalls transiently (seen live: one 15s timeout,

@@ -37,7 +37,7 @@ const loop = new VoiceLoop(null, player, 'owner', {
     t.utterance = Date.now()
     console.log(`utterance (+${t.utterance - t.clipEnd}ms after clip end, ${meta.words} words): "${text}"`)
     let first = true
-    const out = await brainRequest('conversation', { messages: [{ role: 'system', content: SYSTEM }, { role: 'user', content: text }], max_tokens: 200 }, (sent) => {
+    const out = await brainRequest('background', { messages: [{ role: 'system', content: SYSTEM }, { role: 'user', content: text }], max_tokens: 200 }, (sent) => {
       if (first) { first = false; t.firstText = Date.now(); console.log(`first sentence from brain +${t.firstText - t.utterance}ms`) }
       loop.say(sent)
     })

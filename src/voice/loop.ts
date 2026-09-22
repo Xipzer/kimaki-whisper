@@ -15,6 +15,7 @@ const BACKCHANNEL = /^(yeah|yep|yes|ok(ay)?|mhm+|uh-?huh|right|true|sure|lol|hah
 const WAKE = /\bw[ei]+nd[iy]e?\b/i
 
 export type LoopHooks = {
+  onBargeIn?: () => void
   onUtterance: (text: string, meta: { words: number; bargedIn: boolean; cutSpeech: string[] }) => void
   gate: () => { silenced: boolean; nameOnly: boolean; expectingAnswer: boolean }
 }
@@ -46,7 +47,7 @@ export class VoiceLoop {
     })
     await this.stt.connect()
     const sink = (pcm: Float32Array): void => { this.stt?.push(pcm) }
-    this.unsub = this.audioSource ? this.audioSource(sink) : ownerAudioIn(this.connection!.receiver, this.ownerId, sink)
+    this.unsub = this.audioSource ? this.audioSource(sink) : ownerAudioIn(this.connection!.receiver, this.ownerId, sink, (rms) => this.onLevel(rms))
     log('wendy: voice loop live (kyutai stt + tts)')
     diag('loop_started', { tts: ttsEngineName() })
   }
@@ -121,6 +122,17 @@ export class VoiceLoop {
   }
   ownerTalking(): boolean { return this.utter.length > 0 && Date.now() - this.lastWordAt < 1200 }
 
+  // Loudness barge-in: 0.45 s of his voice above the barge gate while she is
+  // speaking cuts her immediately - words would take ~1 s more to arrive.
+  private loudMs = 0
+  private quietMs = 0
+  static BARGE_GATE = 900
+  private onLevel(rms: number): void {
+    if (!this.speaking) { this.loudMs = 0; return }
+    if (rms > VoiceLoop.BARGE_GATE) { this.loudMs += 20; this.quietMs = 0 } else { this.quietMs += 20; if (this.quietMs > 120) this.loudMs = 0 }
+    if (this.loudMs >= 450) { this.loudMs = 0; this.bargeIn('loudness') }
+  }
+
   // ── barge-in ──────────────────────────────────────────────────
   private bargedThisUtterance = false
   private cutSpeech: string[] = []
@@ -129,12 +141,17 @@ export class VoiceLoop {
     const first = this.utter[0]
     const real = n >= 2 || (n === 1 && !BACKCHANNEL.test(first) && first.length > 3)
     if (!real) return
+    this.bargeIn('words')
+  }
+  private bargeIn(via: 'words' | 'loudness'): void {
+    if (!this.speaking) return
     this.bargeCount++
     this.bargedThisUtterance = true
     this.cutSpeech = this.spokenThisReply.splice(0)
     log('wendy: barge-in - owner spoke over me, cancelling speech')
-    diag('barge_in', { heard: this.utter.join(' ') })
+    diag('barge_in', { via, heard: this.utter.join(' ') })
     this.cancelSpeech('barge')
+    this.hooks.onBargeIn?.()
   }
 
   // ── mouth ─────────────────────────────────────────────────────
@@ -170,7 +187,7 @@ export class VoiceLoop {
     if (!this.tts) this.beginReply()
     this.spokenThisReply.push(clean)
     this.lastSpokenText = clean
-    diag('speak', { text: clean })
+    diag('say', { chars: clean.length })
     void this.tts!.write(clean + ' ')
   }
   async endReply(): Promise<void> {

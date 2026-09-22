@@ -22,3 +22,16 @@ test('speakable strips spoken punctuation that Kyutai/Kokoro voice as hesitation
   assert.equal(speakable("You're back — what's on your mind?"), "You're back, what's on your mind?")
   assert.equal(speakable('Three areas: first; second'), 'Three areas, first, second')
 })
+
+test('loudness barge-in cuts her after ~0.45 s of his voice, not on a blip', () => {
+  const fired: string[] = []
+  const player = Object.assign(new EventEmitter(), { state: { status: 'playing' }, play() {}, stop() { (this as { state: { status: string } }).state.status = 'idle' } })
+  const loop = new VoiceLoop(null, player as never, 'o', { gate: () => ({ silenced: false, nameOnly: false, expectingAnswer: false }), onUtterance: () => {}, onBargeIn: () => fired.push('barge') }, () => () => {})
+  const l = loop as unknown as { onLevel: (r: number) => void }
+  for (let i = 0; i < 10; i++) l.onLevel(2000)          // 200 ms loud
+  for (let i = 0; i < 10; i++) l.onLevel(50)            // gap resets
+  assert.deepEqual(fired, [], 'a short blip must not cut her')
+  for (let i = 0; i < 23; i++) l.onLevel(2000)          // 460 ms sustained
+  assert.deepEqual(fired, ['barge'])
+  loop.stop()
+})

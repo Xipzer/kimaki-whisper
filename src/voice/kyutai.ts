@@ -66,12 +66,15 @@ export class SttStream {
     }
     return new Float32Array(FRAME)
   }
+  private queued(): number { return this.pending.length + this.buf.reduce((a, b) => a + b.length, 0) }
   private startTicker(): void {
     this.ticker = setInterval(() => {
       if (!this.ws || this.ws.readyState !== WebSocket.OPEN) return
       // catch up if audio piled up (network burst): send up to 3 frames per tick
+      // setInterval drifts late; send every whole frame that is queued (cap 6) so the
+      // stream never falls behind real time (measured drift before: +0.45 s / 5 min)
       let n = 0
-      do { this.ws.send(Buffer.from(this.nextFrame().buffer)); n++ } while (this.pending.length >= FRAME && n < 3)
+      do { this.ws.send(Buffer.from(this.nextFrame().buffer)); n++ } while (this.queued() >= FRAME && n < 6)
     }, 80)
   }
   private stopTicker(): void { if (this.ticker) clearInterval(this.ticker); this.ticker = null }
