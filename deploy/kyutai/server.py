@@ -10,6 +10,7 @@
 One live session per endpoint (Wendy has one owner). A new session pre-empts the old.
 """
 import asyncio, json, os, queue, threading, time, sys
+from urllib.parse import unquote
 import numpy as np, torch, websockets
 from websockets.asyncio.server import serve
 from moshi.models.loaders import CheckpointInfo
@@ -38,16 +39,17 @@ FRAME = stt_mimi.frame_size          # 1920 @ 24k
 FRAME_RATE = stt_mimi.frame_rate     # 12.5
 log(f"stt loaded ({STT_REPO}) delay={STT_DELAY}s frame={FRAME} in {time.time()-t0:.1f}s")
 
+TTS_ENABLED = os.environ.get("TTS_ENABLED", "1") != "0"
 t0 = time.time()
-tts_info = CheckpointInfo.from_hf_repo(TTS_REPO)
-tts_model = TTSModel.from_checkpoint_info(tts_info, n_q=32, temp=0.6, device=DEVICE)
+tts_info = CheckpointInfo.from_hf_repo(TTS_REPO) if TTS_ENABLED else None
+tts_model = TTSModel.from_checkpoint_info(tts_info, n_q=32, temp=0.6, device=DEVICE) if TTS_ENABLED else None
 voice_cache = {}
 def voice_attrs(name):
     if name not in voice_cache:
         voice_cache[name] = tts_model.make_condition_attributes([tts_model.get_voice_path(name)], cfg_coef=2.0)
     return voice_cache[name]
-tts_attrs = voice_attrs(TTS_VOICE)
-log(f"tts loaded ({TTS_REPO}, voice {TTS_VOICE}) in {time.time()-t0:.1f}s")
+tts_attrs = voice_attrs(TTS_VOICE) if TTS_ENABLED else None
+if TTS_ENABLED: log(f"tts loaded ({TTS_REPO}, voice {TTS_VOICE}) in {time.time()-t0:.1f}s")
 log(f"vram {torch.cuda.memory_allocated()/2**30:.2f} GiB allocated")
 
 class _NoLock:
@@ -182,9 +184,10 @@ async def handler(ws):
             s.stop()
             if sessions["stt"] is s: sessions["stt"] = None
     elif path.split("?")[0] == "/tts":
+        if not TTS_ENABLED: await ws.close(1008, "tts disabled on this node"); return
         if sessions["tts"]: sessions["tts"].stop()
         q = dict(p.split('=', 1) for p in ws.request.path.split('?', 1)[1].split('&')) if '?' in ws.request.path else {}
-        s = sessions["tts"] = TtsSession(ws, loop, q.get('voice', TTS_VOICE))
+        s = sessions["tts"] = TtsSession(ws, loop, unquote(q.get('voice', TTS_VOICE)))
         try:
             async for msg in ws:
                 if isinstance(msg, str): s.inq.put(json.loads(msg))
@@ -196,7 +199,7 @@ async def handler(ws):
 
 async def health(conn, req):
     if req.path == "/health":
-        body = json.dumps({"ok": True, "stt": True, "tts": True, "voice": TTS_VOICE,
+        body = json.dumps({"ok": True, "stt": True, "tts": TTS_ENABLED, "voice": TTS_VOICE,
                            "sessions": {k: bool(v) for k, v in sessions.items()}}).encode()
         return conn.respond(200, body.decode() + "\n")
     return None

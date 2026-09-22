@@ -5,7 +5,8 @@
 //      ▲                                                      │ owner speaks ≥2 words
 //      └───────────────────── barge-in: cancel tts+player ◄───┘
 import { createAudioResource, StreamType, AudioPlayerStatus, entersState, type AudioPlayer, type VoiceConnection } from '@discordjs/voice'
-import { SttStream, TtsStream } from './kyutai.js'
+import { SttStream } from './kyutai.js'
+import { makeTts, ttsEngineName, type TtsEngine } from './tts.js'
 import { ownerAudioIn, AudioOut } from './audio.js'
 import { log } from '../config.js'
 import { diag } from '../diag.js'
@@ -26,7 +27,7 @@ export class VoiceLoop {
   private vadEma = 0
   private eotTimer: NodeJS.Timeout | null = null
   // mouth
-  private tts: TtsStream | null = null
+  private tts: TtsEngine | null = null
   private out: AudioOut | null = null
   private spokenThisReply: string[] = []
   private replyStartedAt = 0
@@ -46,7 +47,7 @@ export class VoiceLoop {
     const sink = (pcm: Float32Array): void => { this.stt?.push(pcm) }
     this.unsub = this.audioSource ? this.audioSource(sink) : ownerAudioIn(this.connection!.receiver, this.ownerId, sink)
     log('wendy: voice loop live (kyutai stt + tts)')
-    diag('loop_started', {})
+    diag('loop_started', { tts: ttsEngineName() })
   }
   private stopped = false
   private async reconnect(): Promise<void> {
@@ -139,14 +140,14 @@ export class VoiceLoop {
     this.spokenThisReply = []
     const out = new AudioOut()
     let started = false, buffered = 0
-    const PREBUFFER = 5 // frames of 80 ms: absorb generation jitter before the player starts pulling in real time
+    const PREBUFFER = ttsEngineName() === 'kyutai' ? 5 : 1 // kyutai streams frames (absorb jitter); kokoro delivers whole sentences
     const start = (): void => {
       if (started) return
       started = true
       diag('first_audio', { ms: Date.now() - this.replyStartedAt, prebufferedMs: buffered * 80 })
       this.player.play(createAudioResource(out, { inputType: StreamType.Raw }))
     }
-    const tts = new TtsStream((pcm) => {
+    const tts = makeTts((pcm) => {
       out.pushPcm(pcm)
       buffered++
       if (buffered >= PREBUFFER) start()
@@ -193,13 +194,23 @@ export class VoiceLoop {
   }
 }
 
+// Kyutai voices every "word" it is given, punctuation included: a bare em dash
+// becomes a hesitant pause and the phrase after it lifts like a question. Feed it
+// only what a speaker would actually say.
 export function speakable(text: string): string {
   return text
     .replace(/```[\s\S]*?```/g, ' ')
     .replace(/[*_`#]+/g, '')
     .replace(/^\s*[-•]\s+/gm, '')
     .replace(/\s*\n+\s*/g, '. ')
-    .replace(/\.{2,}/g, '.')
+    .replace(/[\u2018\u2019]/g, "'")
+    .replace(/[\u201c\u201d]/g, '')
+    .replace(/\s*[\u2014\u2013]\s*|\s+-\s+/g, ', ')   // em/en dash, spaced hyphen -> comma
+    .replace(/[;:]\s*/g, ', ')
+    .replace(/[()\[\]]/g, '')
+    .replace(/\.{2,}|\u2026/g, '.')
+    .replace(/,\s*,/g, ',')
+    .replace(/\s+([.,!?])/g, '$1')
     .replace(/\s+/g, ' ')
     .trim()
 }

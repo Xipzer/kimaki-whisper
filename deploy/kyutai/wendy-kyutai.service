@@ -8,6 +8,8 @@ After=network.target
 Type=simple
 WorkingDirectory=%h/WebstormProjects/kimaki-whisper/deploy/kyutai
 Environment=PORT=8010
+# Wendy's mouth is Kokoro (speaches) by config; keep the Kyutai TTS weights out of VRAM unless ttsEngine=kyutai
+Environment=TTS_ENABLED=0
 ExecStart=%h/kyutai-server/.venv/bin/python server.py
 Restart=always
 RestartSec=5
