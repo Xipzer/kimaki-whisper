@@ -126,7 +126,7 @@ export async function brainRequest(lane: Lane, body: Record<string, unknown>, on
     res = await fetch(`${url}/v1/chat/completions`, {
       method: 'POST',
       headers: { 'content-type': 'application/json', connection: 'close' },
-      body: JSON.stringify({ model: laneModel(lane), cache_prompt: true, id_slot: lane === 'conversation' ? 0 : 1, ...body, ...(stream ? { stream: true } : {}) }).toWellFormed(),
+      body: JSON.stringify({ model: laneModel(lane), cache_prompt: true, id_slot: lane === 'conversation' ? 0 : 1, ...body, ...(stream ? { stream: true, stream_options: { include_usage: true } } : {}) }).toWellFormed(),
       signal: signal ? AbortSignal.any([signal, AbortSignal.timeout(120000)]) : AbortSignal.timeout(120000),
     })
   } catch (e) {

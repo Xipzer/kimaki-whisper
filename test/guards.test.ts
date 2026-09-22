@@ -94,3 +94,14 @@ test('summaryIsCompliance catches a summariser that obeyed the quoted prompt', a
   const md = '### 👤 User\nRead tasks/b20-heartbeat.md and follow it.\n\n### 🤖 Assistant (x)\n```\nservice inactive\n```\nAll green: watching, in step, and COINc/CRCLc are still unissued and unbuyable.\n'
   assert.equal(mechanicalSummary('COINc verify', md), '[LOW] COINc verify: All green: watching, in step, and COINc/CRCLc are still unissued and unbuyable.')
 })
+
+test('repairHistory never mutates the persistent history objects', () => {
+  const a = { role: 'assistant', content: 'one' }, b = { role: 'assistant', content: 'two' }
+  const history = [{ role: 'user', content: 'q' }, a, b]
+  const msgs = repairHistory([...history])
+  assert.equal(msgs.length, 2)
+  assert.equal(msgs[1].content, 'one\ntwo')
+  assert.equal(a.content, 'one', 'history object must be untouched')
+  repairHistory([...history])
+  assert.equal(a.content, 'one', 'second call must not append again')
+})

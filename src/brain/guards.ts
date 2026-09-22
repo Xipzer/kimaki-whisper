@@ -70,7 +70,10 @@ export function repairHistory<T extends ChatMsg>(msgs: T[], resumeNudge?: string
   for (let i = msgs.length - 1; i > 0; i--) {
     const a = msgs[i - 1], b = msgs[i]
     if (a.role === 'assistant' && b.role === 'assistant' && !a.tool_calls && !b.tool_calls) {
-      a.content = `${String(a.content ?? '')}\n${String(b.content ?? '')}`.trim()
+      // Replace, never mutate: msgs holds the SAME objects as the persistent
+      // history. Mutating grew a history message every turn (re-appending b),
+      // which broke the KV-cache prefix mid-history on every request.
+      msgs[i - 1] = { ...a, content: `${String(a.content ?? '')}\n${String(b.content ?? '')}`.trim() }
       msgs.splice(i, 1)
     }
   }

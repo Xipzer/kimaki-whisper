@@ -680,7 +680,10 @@ export async function think(userText: string, onSentence?: (s: string) => void):
       return fail('I hit an error reaching my reasoning engine - mind repeating that?')
     }
 
-    if (out.timings?.predicted_per_second) { lastBrainTps = Math.round(out.timings.predicted_per_second); lastBrainTpsAt = Date.now() }
+    if (out.timings?.predicted_per_second) {
+      lastBrainTps = Math.round(out.timings.predicted_per_second); lastBrainTpsAt = Date.now()
+      if (lastBrainTps < 45) diag('brain_degraded', { tps: lastBrainTps, prompt_per_second: Math.round(out.timings.prompt_per_second ?? 0) })
+    }
     if (out.usage?.prompt_tokens) lastPromptTokens = out.usage.prompt_tokens
     diag('brain', { hop, ms: Date.now() - hopT0, tps: out.timings?.predicted_per_second ? Math.round(out.timings.predicted_per_second) : undefined, tools: out.toolCalls.map((t) => t.function.name), text: out.content.slice(0, 500), reasoning: out.reasoning?.slice(0, 700), usage: out.usage })
     const msg = { content: out.content || null, tool_calls: out.toolCalls.length ? out.toolCalls : undefined }
@@ -852,7 +855,8 @@ async function refreshQueuedItems(items: string[]): Promise<string[]> {
     const src = item.match(/src:(ses_\w{10,})/)?.[1]
     const tg = item.match(/<tg:([^>]+)>/)?.[1]
     if (src) {
-      const live = await liveTailFor(src)
+      // bounded: a slow kimaki read must never hold his turn (measured: 13 s before the brain started)
+      const live = await Promise.race([liveTailFor(src), new Promise<string>((r) => setTimeout(() => r(''), 2500))])
       if (!live) return item
       diag('queued_item_refreshed', { id: src, ageMin: Math.round(ageMs / 60000) })
       return `${item.split(' [queued')[0].replace(/\s+$/, '')}\n   -> LIVE NOW (${Math.round(ageMs / 60000)}m newer than the note above; THIS is the current state): ${live} [src:${src}]`

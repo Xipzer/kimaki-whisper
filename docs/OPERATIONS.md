@@ -137,8 +137,12 @@ ssh projector '~/bin/llm-remote stop'                     # stop
 curl -s http://192.168.1.140:8080/slots | jq '.[].id'     # expect [0,1]
 ```
 
-Profile: `C:\llama-cpp\profile-A-dflash.bat`. Do not drop `-np 2 --cache-reuse
-256`: slot 0 is the conversation, slot 1 is background work; without two slots
+Profile: `C:\llama-cpp\profile-A-dflash.bat` — `-c 98304 -np 2 --cache-reuse 256`
+(49k per slot). **Do not raise `-c`**: at 163840 the server used 30.9 GB, and
+with the desktop's own VRAM (dwm ~2 GB, Chrome, Discord) Windows paged part of
+it to system RAM — prefill fell from ~1,300 to ~100 tok/s and decode from ~90 to
+~20 (measured 2026-09-22). `brain_degraded` in the diagnostics flags it. Do not
+drop `-np 2 --cache-reuse 256` either: slot 0 is the conversation, slot 1 is background work; without two slots
 every Telegram summary evicts her conversation cache and turns go back to 10 s.
 Verify the cache is working from a diag line: `"prompt_tokens_details":
 {"cached_tokens": N}` with N close to `prompt_tokens`.
@@ -152,7 +156,7 @@ If the projector reboots, WSL's ssh portproxy on :2222 breaks — run
 |---|---|---|
 | She joins the VC but never answers | `wendy.log`: `voice loop failed to start` / `stt ws error` | `systemctl --user restart wendy-kyutai`; wait for `kyutai server on :8010` in `kyutai.log` (~90 s) |
 | "My reasoning engine was asleep" | `curl 192.168.1.140:8080/health` | wake flag (§7); if the projector is off, she cannot think — she says so |
-| Slow first word (> 6 s) every turn | diag `brain` line `cached_tokens: 0` | brain running with `-np 1`? A different process on slot 0? Restart brain with the profile |
+| Slow first word (> 6 s) every turn | diag `brain` line `cached_tokens` far below `prompt_tokens`; or `brain_degraded` (tps < 45) | cache miss: a different client on slot 0, or history rewritten mid-way. Degraded: VRAM overcommitted on the projector — close GPU-heavy apps there, restart the brain |
 | Two Wendys answering | `./wendy-node.sh status` shows two `primary` | `./wendy-node.sh role standby` on the wrong one |
 | Kimaki voice notes fail (`ECONNREFUSED 7070` / `Incorrect API key`) | Kimaki was started without the prereq gate or without `OPENAI_BASE_URL` | restart Kimaki through `~/bin/kimaki-prereqs && env OPENAI_API_KEY=local OPENAI_BASE_URL=http://127.0.0.1:7070/v1 npx -y kimaki@latest` |
 | speaches 500s on every request | `speaches.log`: `Conv NOT_IMPLEMENTED` | GPU node: `onnxruntime-gpu` with matching CUDA; CPU node: plain `onnxruntime` |
