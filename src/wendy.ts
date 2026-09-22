@@ -2058,6 +2058,12 @@ function listenTo(channel: VoiceBasedChannel, userId: string): void {
       void runTurn(turnText)
     },
   })
+  loop.onDeaf = (why) => {
+    // stt stream first (cheap); a second strike rejoins the channel
+    if (why === 'stt_no_words') { void loop?.restartStt?.() ; return }
+    textPingOwner('I could not hear you for the last ~20 s - reconnecting to the voice channel now.')
+    leave(); void joinAndServe(channel, userId)
+  }
   void loop.start().catch((e) => { log('wendy: voice loop failed to start:', (e as Error).message); textPingOwner('My ears are down (kyutai stt not reachable) - I am in the channel but cannot hear you.') })
 }
 

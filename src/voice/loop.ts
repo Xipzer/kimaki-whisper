@@ -7,7 +7,7 @@
 import { createAudioResource, StreamType, AudioPlayerStatus, entersState, type AudioPlayer, type VoiceConnection } from '@discordjs/voice'
 import { SttStream } from './kyutai.js'
 import { makeTts, ttsEngineName, type TtsEngine } from './tts.js'
-import { ownerAudioIn, AudioOut } from './audio.js'
+import { ownerAudioIn, AudioOut, type AudioInStats } from './audio.js'
 import { log } from '../config.js'
 import { diag } from '../diag.js'
 
@@ -34,6 +34,10 @@ export class VoiceLoop {
   private spokenThisReply: string[] = []
   private replyStartedAt = 0
   lastSpeechEnd = 0
+  audioIn: AudioInStats = { speakingStarts: 0, packets: 0, lastPacketAt: 0, resubscribes: 0 }
+  private wordsSeen = 0
+  private deafTimer: NodeJS.Timeout | null = null
+  onDeaf?: (why: string) => void
   lastSpokenText = ''
   bargeCount = 0
 
@@ -47,17 +51,33 @@ export class VoiceLoop {
     })
     await this.stt.connect()
     const sink = (pcm: Float32Array): void => { this.stt?.push(pcm) }
-    this.unsub = this.audioSource ? this.audioSource(sink) : ownerAudioIn(this.connection!.receiver, this.ownerId, sink, (rms) => this.onLevel(rms))
+    this.unsub = this.audioSource ? this.audioSource(sink) : ownerAudioIn(this.connection!.receiver, this.ownerId, sink, (rms) => this.onLevel(rms), this.audioIn)
+    // Deafness watchdog: he has been speaking (Discord says so) but nothing is
+    // arriving, or audio arrives and the STT yields no words. Never silent again.
+    if (!this.deafTimer && !this.audioSource) {
+      let lastStarts = 0, lastPackets = 0, lastWords = 0, strikes = 0
+      this.deafTimer = setInterval(() => {
+        const a = this.audioIn
+        const spoke = a.speakingStarts - lastStarts, pk = a.packets - lastPackets, wd = this.wordsSeen - lastWords
+        lastStarts = a.speakingStarts; lastPackets = a.packets; lastWords = this.wordsSeen
+        if (spoke > 0) diag('audio_in', { speakingStarts: spoke, packets: pk, words: wd, resubscribes: a.resubscribes })
+        const deaf = spoke >= 2 && (pk === 0 || (pk > 400 && wd === 0))
+        strikes = deaf ? strikes + 1 : 0
+        if (strikes === 2) { const why = pk === 0 ? 'no_audio_from_discord' : 'stt_no_words'; diag('deaf', { why }); log(`wendy: DEAF (${why}) - recovering`); this.onDeaf?.(why) }
+      }, 10000)
+    }
     log('wendy: voice loop live (kyutai stt + tts)')
     diag('loop_started', { tts: ttsEngineName() })
   }
   private stopped = false
+  async restartStt(): Promise<void> { diag('stt_restart', {}); this.stt?.close() }
   private async reconnect(): Promise<void> {
     if (this.stopped) return
     try { this.unsub?.(); await this.start() } catch (e) { log('wendy: stt reconnect failed:', (e as Error).message); setTimeout(() => void this.reconnect(), 3000) }
   }
   stop(): void {
     this.stopped = true
+    if (this.deafTimer) { clearInterval(this.deafTimer); this.deafTimer = null }
     this.unsub?.(); this.unsub = null
     this.stt?.close(); this.stt = null
     this.cancelSpeech('stop')
@@ -69,6 +89,7 @@ export class VoiceLoop {
     const word = w.trim()
     if (!word) return
     this.utter.push(word)
+    this.wordsSeen++
     this.utterAt.push(Date.now())
     this.lastWordAt = Date.now()
     diag('word', { w: word, t, n: this.utter.length })
