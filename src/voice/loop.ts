@@ -138,15 +138,20 @@ export class VoiceLoop {
     this.replyStartedAt = Date.now()
     this.spokenThisReply = []
     const out = new AudioOut()
-    let started = false
+    let started = false, buffered = 0
+    const PREBUFFER = 5 // frames of 80 ms: absorb generation jitter before the player starts pulling in real time
+    const start = (): void => {
+      if (started) return
+      started = true
+      diag('first_audio', { ms: Date.now() - this.replyStartedAt, prebufferedMs: buffered * 80 })
+      this.player.play(createAudioResource(out, { inputType: StreamType.Raw }))
+    }
     const tts = new TtsStream((pcm) => {
       out.pushPcm(pcm)
-      if (!started) {
-        started = true
-        diag('first_audio', { ms: Date.now() - this.replyStartedAt })
-        this.player.play(createAudioResource(out, { inputType: StreamType.Raw }))
-      }
+      buffered++
+      if (buffered >= PREBUFFER) start()
     })
+    tts.done.then(() => start())
     this.tts = tts; this.out = out
   }
   say(text: string): void {

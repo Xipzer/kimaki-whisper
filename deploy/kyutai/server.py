@@ -50,7 +50,12 @@ tts_attrs = voice_attrs(TTS_VOICE)
 log(f"tts loaded ({TTS_REPO}, voice {TTS_VOICE}) in {time.time()-t0:.1f}s")
 log(f"vram {torch.cuda.memory_allocated()/2**30:.2f} GiB allocated")
 
-gpu_lock = threading.Lock()  # one CUDA stepper at a time keeps both models' streaming state sane
+class _NoLock:
+    def __enter__(self): return self
+    def __exit__(self, *a): return False
+# STT and TTS are distinct models stepped by distinct threads; letting their kernels interleave
+# roughly doubles TTS throughput while the STT keeps listening for barge-in.
+gpu_lock = _NoLock()
 sessions = {"stt": None, "tts": None}
 
 # ── STT session ───────────────────────────────────────────────────────

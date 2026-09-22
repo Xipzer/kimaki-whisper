@@ -32,6 +32,8 @@ export function laneModel(lane: Lane): string {
 // ── health probe: ground truth for the panel, refreshed every 20s ──
 let probeUp = false
 let probeChecked = false
+let onUp: (() => void) | null = null
+export function onBrainUp(fn: () => void): void { onUp = fn }
 let ctxMax = 147456
 export function brainHealth(): { up: boolean; checked: boolean; ctxMax: number } { return { up: probeUp, checked: probeChecked, ctxMax } }
 export async function probeBrain(): Promise<void> {
@@ -42,7 +44,9 @@ export async function probeBrain(): Promise<void> {
     const t = setTimeout(() => ctrl.abort(), 3000)
     const res = await fetch(`${url}/v1/models`, { signal: ctrl.signal })
     clearTimeout(t)
+    const wasUp = probeUp
     probeUp = res.ok
+    if (res.ok && !wasUp && probeChecked) onUp?.()
     if (res.ok) {
       const d = (await res.json().catch(() => null)) as { data?: Array<{ meta?: { n_ctx?: number } }> } | null
       const n = d?.data?.[0]?.meta?.n_ctx

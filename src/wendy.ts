@@ -32,7 +32,7 @@ import { SYSTEM_PROMPT } from './prompt.js'
 import { TOOLS } from './tools/specs.js'
 import { executeTelegramTool } from './tools/telegram.js'
 import { isDispatchTool, isThreadDispatchTool, dispatchSucceeded, claimsSend, sendClaimAck, isTrailingFragment, isAffirmative, isSelfDirective, soundsLikePromise, dispatchKey, collapsePriorityTags, isUrgentUpdate, queueDedupeMarkers, repairHistory, SESSION_ID, isSessionId, stripReminderPrefix } from './brain/guards.js'
-import { brainUrl, brainRequest, brainFetch, brainText, brainHealth, probeBrain, type BrainOut } from './brain/client.js'
+import { onBrainUp, brainUrl, brainRequest, brainFetch, brainText, brainHealth, probeBrain, type BrainOut } from './brain/client.js'
 import { startTelegram, setTelegramFlaggedHandler, telegramAutoDrain, telegramLowBudgets, setTelegramAutonomousHandler, telegramPendingSummaries, telegramDrainChatStats, telegramPendingPeopleSummaries, telegramDrainPerson, telegramProfile, telegramProfilesDue, telegramProfileWrite, telegramPrivacyFor, telegramEffectiveTone, telegramRoomContext, telegramPersonThread, setReplyTarget, telegramChatDigest } from './telegram.js'
 
 // ── config accessors ─────────────────────────────────────────────
@@ -541,6 +541,18 @@ const history: Msg[] = (() => {
 function persistHistory(): void {
   if (process.env.WENDY_TEST) return
   try { fs.writeFileSync(path.join(workspaceDir(), 'history.json'), JSON.stringify(history.slice(-40))) } catch {}
+}
+
+/** Prefill the stable prefix so the first real turn hits the KV cache. Cheap (1 token out). */
+export async function warmBrain(why: string): Promise<void> {
+  if (!brainUrl()) return
+  let memoryBlock = ''
+  try { const md = fs.readFileSync(path.join(workspaceDir(), 'memory.md'), 'utf-8').trim(); if (md) memoryBlock = `\n\nSTANDING MEMORY (auto-consolidated - trust it):\n${md.slice(0, 1800)}` } catch {}
+  const messages: Msg[] = [{ role: 'system', content: SYSTEM_PROMPT + memoryBlock }, ...history]
+  repairHistory(messages)
+  const t0 = Date.now()
+  const out = await brainRequest('conversation', { messages, tools: TOOLS, max_tokens: 1 })
+  diag('brain_warm', { why, ms: Date.now() - t0, cached: out.usage?.prompt_tokens_details?.cached_tokens ?? null, prompt: out.usage?.prompt_tokens ?? null, error: out.error })
 }
 
 export async function think(userText: string, onSentence?: (s: string) => void): Promise<string> {
@@ -2161,4 +2173,7 @@ export function initWendy(client: Client): void {
     })()
   })
   log(`wendy: armed - will follow owner ${owner} into voice channels`)
+  setTimeout(() => void warmBrain('boot'), 3000)
+  onBrainUp(() => { if (!busy) void warmBrain('brain_up') })
+  setInterval(() => { if (!busy) void warmBrain('periodic') }, 20 * 60 * 1000).unref()
 }
