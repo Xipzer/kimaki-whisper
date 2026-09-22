@@ -10,7 +10,7 @@ export type BrainOut = {
   reasoning?: string
   toolCalls: Array<{ id: string; type?: string; function: { name: string; arguments: string } }>
   timings?: { predicted_per_second?: number; prompt_per_second?: number }
-  usage?: { prompt_tokens?: number }
+  usage?: { prompt_tokens?: number; prompt_tokens_details?: { cached_tokens?: number } }
   error?: string
 }
 export type BrainMessage = { role: string; content?: string | null; tool_calls?: unknown; tool_call_id?: string; name?: string }
@@ -63,7 +63,9 @@ export async function brainFetch(lane: Lane, body: Record<string, unknown>, opts
   return fetch(`${url}/v1/chat/completions`, {
     method: 'POST',
     headers: { 'content-type': 'application/json', connection: 'close' },
-    body: JSON.stringify({ model: laneModel(lane), cache_prompt: true, ...body }),
+    // One KV slot per lane (server runs -np 2): background summaries can never
+    // evict the conversation's cached prefix.
+    body: JSON.stringify({ model: laneModel(lane), cache_prompt: true, id_slot: lane === 'conversation' ? 0 : 1, ...body }),
     signal: opts.signal ? AbortSignal.any([opts.signal, timeout]) : timeout,
   }).catch(() => null)
 }

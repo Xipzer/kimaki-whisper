@@ -633,20 +633,29 @@ export async function think(userText: string, onSentence?: (s: string) => void):
     void episodize()
   }
 
-  const routes = loadRoutes()
-  const routesBlock = Object.keys(routes).length
-    ? '\n\nKNOWN ROUTES (check here FIRST before searching):\n' +
-      Object.entries(routes).map(([n, r]) => `- ${n} → ${r.kind} ${r.id} (${r.note})`).join('\n')
-    : ''
-  let capsule = ''
+  // PROMPT CACHE CONTRACT: the system message is a STABLE PREFIX (persona,
+  // tools via template, standing memory). Anything that varies per turn -
+  // journal hits for this utterance, routes, node identity - rides on the
+  // latest user message instead, so llama.cpp reuses the KV for everything
+  // before it. Measured before this: 20.8k prompt tokens, cached 0, 10 s.
+  let memoryBlock = ''
   try {
     const md = fs.readFileSync(path.join(workspaceDir(), 'memory.md'), 'utf-8').trim()
-    if (md) capsule += `\n\nSTANDING MEMORY (auto-consolidated - trust it):\n${md.slice(0, 1800)}`
+    if (md) memoryBlock = `\n\nSTANDING MEMORY (auto-consolidated - trust it):\n${md.slice(0, 1800)}`
   } catch {}
+  const routes = loadRoutes()
+  const turnLocal: string[] = []
+  if (Object.keys(routes).length) turnLocal.push('KNOWN ROUTES (check here FIRST before searching):\n' + Object.entries(routes).map(([n, r]) => `- ${n} → ${r.kind} ${r.id} (${r.note})`).join('\n'))
   const eps = searchJournal(userText, 2)
-  if (eps.length) capsule += `\n\nPOSSIBLY RELEVANT PAST MOMENTS:\n${eps.map((e) => `- [${new Date(e.ts).toISOString().slice(0, 10)}] ${e.s}`).join('\n')}`
+  if (eps.length) turnLocal.push(`POSSIBLY RELEVANT PAST MOMENTS:\n${eps.map((e) => `- [${new Date(e.ts).toISOString().slice(0, 10)}] ${e.s}`).join('\n')}`)
   const guilds = clientRef ? [...clientRef.guilds.cache.values()].map((g) => g.name) : []
-  const messages: Msg[] = [{ role: 'system', content: SYSTEM_PROMPT + routesBlock + capsule + nodeBlock(indexProjectCount, guilds) }, ...history]
+  turnLocal.push(nodeBlock(indexProjectCount, guilds).trim())
+  const last = history[history.length - 1]
+  const messages: Msg[] = [
+    { role: 'system', content: SYSTEM_PROMPT + memoryBlock },
+    ...history.slice(0, -1),
+    { ...last, content: `${userText}\n\n[context for this turn - not spoken by the owner]\n${turnLocal.join('\n\n')}` },
+  ]
   // Newer llama.cpp builds hard-reject consecutive assistant messages (400:
   // "Cannot have 2 or more assistant messages at the end of the list").
   // History can legitimately contain them (superseded turns, error acks) -
