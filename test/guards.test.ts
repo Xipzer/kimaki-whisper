@@ -86,3 +86,11 @@ test('self-directive detection', async () => {
   assert.equal(isSelfDirective("Don't ask the thread, read it yourself."), true)
   assert.equal(isSelfDirective('Ask the builder thread to summarise it'), false)
 })
+
+test('summaryIsCompliance catches a summariser that obeyed the quoted prompt', async () => {
+  const { summaryIsCompliance, mechanicalSummary } = await import('../dist/brain/guards.js')
+  assert.equal(summaryIsCompliance("[HIGH] Xipz, you've pointed me at tasks/b20-heartbeat.md to read and follow — I need to see what's in that file before I can act on it."), true)
+  assert.equal(summaryIsCompliance('[LOW] COINc verify: all green, cursor 8 blocks behind, COINc still unissued.'), false)
+  const md = '### 👤 User\nRead tasks/b20-heartbeat.md and follow it.\n\n### 🤖 Assistant (x)\n```\nservice inactive\n```\nAll green: watching, in step, and COINc/CRCLc are still unissued and unbuyable.\n'
+  assert.equal(mechanicalSummary('COINc verify', md), '[LOW] COINc verify: All green: watching, in step, and COINc/CRCLc are still unissued and unbuyable.')
+})

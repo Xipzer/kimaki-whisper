@@ -101,3 +101,19 @@ export const isAffirmative = (text: string): boolean => AFFIRMATIVE.test(text.tr
 /** The owner asked her to do the work herself, not delegate it. */
 export const SELF_DIRECTIVE = /\b(independently|on your own|by yourself|do it yourself|figure (it|this|that) out yourself|without (asking|delegating|dispatching)|don'?t (ask|delegate|dispatch|send (it|this|that) (to|off))|use your own (hands|tools)|read it yourself)\b/i
 export const isSelfDirective = (text: string): boolean => SELF_DIRECTIVE.test(text)
+
+/** A summariser that answered the quoted prompt instead of summarising the
+ *  thread. Seen live: an agent thread whose user turn was "Read tasks/x.md and
+ *  follow it" produced "[HIGH] Xipz, you've pointed me at tasks/x.md - I need to
+ *  see what's in that file before I can act on it" and text-pinged the owner. */
+export function summaryIsCompliance(text: string): boolean {
+  return /\b(you'?ve (pointed|directed|asked) me|before I can (act|proceed|do)|I need to (see|read|open) (what'?s in |the )?(that|this|the) file|let me (read|open|check) (that|the) file|I'?ll (read|open) (that|the) file|I cannot (see|find|access) (that|the) file)\b/i.test(text)
+}
+
+/** Mechanical fallback summary: the agent's last sentence, tagged LOW. */
+export function mechanicalSummary(label: string, transcript: string): string {
+  const parts = transcript.split(/^### (?=👤|🤖)/m).filter((p) => p.startsWith('🤖'))
+  const last = (parts[parts.length - 1] ?? '').replace(/^🤖[^\n]*\n?/, '').replace(/```[\s\S]*?```/g, ' ').replace(/\s+/g, ' ').trim()
+  const sentence = last.split(/(?<=[.!?])\s+/).filter((s) => s.length > 12)[0] ?? last.slice(0, 160)
+  return `[LOW] ${label}: ${sentence.slice(0, 200) || 'new activity.'}`
+}

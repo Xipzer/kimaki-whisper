@@ -32,6 +32,7 @@ import { SYSTEM_PROMPT } from './prompt.js'
 import { TOOLS } from './tools/specs.js'
 import { executeTelegramTool } from './tools/telegram.js'
 import { isDispatchTool, isThreadDispatchTool, dispatchSucceeded, claimsSend, sendClaimAck, isTrailingFragment, isAffirmative, isSelfDirective, soundsLikePromise, dispatchKey, collapsePriorityTags, isUrgentUpdate, queueDedupeMarkers, repairHistory, SESSION_ID, isSessionId, stripReminderPrefix } from './brain/guards.js'
+import { summaryIsCompliance, mechanicalSummary } from './brain/guards.js'
 import { onBrainUp, brainUrl, brainRequest, brainFetch, brainText, brainHealth, probeBrain, type BrainOut } from './brain/client.js'
 import { startTelegram, setTelegramFlaggedHandler, telegramAutoDrain, telegramLowBudgets, setTelegramAutonomousHandler, telegramPendingSummaries, telegramDrainChatStats, telegramPendingPeopleSummaries, telegramDrainPerson, telegramProfile, telegramProfilesDue, telegramProfileWrite, telegramPrivacyFor, telegramEffectiveTone, telegramRoomContext, telegramPersonThread, setReplyTarget, telegramChatDigest } from './telegram.js'
 
@@ -148,6 +149,12 @@ function recentMessages(md: string, n = 4): string {
       .replace(/^> 🛠️[^\n]*\n?/gm, '')
       .replace(/^\*Completed in [^\n]+\n?/gm, '')
       .trim()
+    // Owner/cron prompts are quoted, never presented as imperatives: a local
+    // summariser will otherwise obey "Read X and follow it" instead of summarising.
+    if (body.startsWith('👤')) {
+      const q = body.replace(/^👤 User\n?/, '').replace(/\s+/g, ' ').trim().slice(0, 300)
+      return `👤 Prompt Xipz gave the agent (quoted, not addressed to you): "${q}"`
+    }
     return body
   }).filter((p) => {
     const afterHeader = p.replace(/^(👤 User|🤖 Assistant[^\n]*)\n?/, '').replace(/\s+/g, '')
@@ -1719,7 +1726,13 @@ async function summarizeForVoice(label: string, content: string): Promise<string
       { role: 'user', content } ] }, { timeoutMs: 60000 })
   if (!res?.ok) return `Update from ${label} - new activity in that thread.`
   const d = await res.json().catch(() => null) as { choices?: Array<{ message?: { content?: string } }> } | null
-  return d?.choices?.[0]?.message?.content?.trim() || `Update from ${label} - new activity.`
+  const out = d?.choices?.[0]?.message?.content?.trim() || ''
+  if (!out) return `Update from ${label} - new activity.`
+  if (summaryIsCompliance(out)) {
+    diag('summary_compliance_rejected', { label, text: out.slice(0, 200) })
+    return mechanicalSummary(label, content)
+  }
+  return out
 }
 let connection: VoiceConnection | null = null
 let player: AudioPlayer | null = null
