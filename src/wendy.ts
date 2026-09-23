@@ -207,7 +207,11 @@ async function executeToolInner(name: string, args: Record<string, unknown>): Pr
     const hits = lookupThreads(String(args.query ?? ''))
     // Live tails for the active hits (parallel, ~1-2s): freshness by construction.
     const liveTails = new Map<string, string>()
-    await Promise.all(hits.slice(0, 4).filter((h) => { const a = threadAgeMs(h); return a !== null && a < 3600000 }).map(async (h) => { const t = await liveTailFor(h.id); if (t) liveTails.set(h.id, t) }))
+    // bounded at 3 s: measured lookups of 11-16 s were all waiting on `kimaki session read`
+    await Promise.race([
+      Promise.all(hits.slice(0, 4).filter((h) => { const a = threadAgeMs(h); return a !== null && a < 3600000 }).map(async (h) => { const t = await liveTailFor(h.id); if (t) liveTails.set(h.id, t) })),
+      new Promise((r) => setTimeout(r, 3000)),
+    ])
     return hits.length
       ? hits.map((h) => {
           const ms = threadAgeMs(h)
@@ -545,6 +549,8 @@ const history: Msg[] = (() => {
   if (process.env.WENDY_TEST) return []
   try { return JSON.parse(fs.readFileSync(path.join(workspaceDir(), 'history.json'), 'utf-8')) as Msg[] } catch { return [] }
 })()
+const SLOW_TOOLS = new Set(['lookup_thread', 'read_session', 'search_sessions', 'ask_thread', 'send_to_session', 'dispatch_task', 'spawn_agent', 'fetch_reply', 'list_recent_sessions'])
+const READ_ONLY_TOOLS = new Set(['lookup_thread', 'read_session', 'spawns_status', 'recall', 'search_sessions', 'list_recent_sessions', 'fetch_reply', 'brain_health', 'owner_autonomy_status'])
 const HISTORY_MAX = 48
 const HISTORY_KEEP = 24
 function persistHistory(): void {
@@ -689,6 +695,12 @@ export async function think(userText: string, onSentence?: (s: string) => void):
     const msg = { content: out.content || null, tool_calls: out.toolCalls.length ? out.toolCalls : undefined }
     if (!out.content && !out.toolCalls.length) return fail('I got an empty response from my reasoning engine.')
 
+    if (msg.tool_calls?.length && hop === 0 && onSentence && !out.content.trim() && msg.tool_calls.some((t) => SLOW_TOOLS.has(t.function.name))) {
+      // He should not sit in silence while tools run (measured: 40 s of dead air).
+      const acks = ['On it.', 'One sec.', 'Checking.', 'Give me a moment.', 'Let me look.']
+      onSentence(acks[Math.floor(Math.random() * acks.length)])
+      diag('tool_ack', { tools: msg.tool_calls.map((t) => t.function.name) })
+    }
     if (msg.tool_calls?.length) {
       // Repair truncated tool-call JSON BEFORE it re-enters the conversation:
       // a generation cut mid-arguments would 500 every subsequent hop.
@@ -703,6 +715,14 @@ export async function think(userText: string, onSentence?: (s: string) => void):
       // Push a sanitized copy: re-sending reasoning_content wastes tokens and
       // risks template quirks.
       messages.push({ role: 'assistant', content: msg.content ?? null, tool_calls: msg.tool_calls })
+      // Read-only calls start together (measured: 4 sequential lookups = 25 s).
+      const prefetched = new Map<string, Promise<string>>()
+      for (const tc of msg.tool_calls) {
+        if (!READ_ONLY_TOOLS.has(tc.function.name) || truncatedCalls.has(tc.id)) continue
+        let a: Record<string, unknown> = {}
+        try { a = JSON.parse(tc.function.arguments || '{}') } catch {}
+        prefetched.set(tc.id, executeTool(tc.function.name, a))
+      }
       for (const tc of msg.tool_calls) {
         const args = ((): Record<string, unknown> => {
           try { return JSON.parse(tc.function.arguments) } catch { return {} }
@@ -753,7 +773,7 @@ export async function think(userText: string, onSentence?: (s: string) => void):
                   diag('send_thrash_stopped', {})
                   return 'STOP: the outbound filter has already blocked two drafts this turn. Do NOT keep rewriting and resending - you will spam the chat with fragments. Tell the owner what was blocked and why, and let him decide.'
                 }
-                const r = await executeTool(tc.function.name, args)
+                const r = await (prefetched.get(tc.id) ?? executeTool(tc.function.name, args))
                 if (r.startsWith('BLOCKED') && (tc.function.name === 'telegram_send' || tc.function.name === 'telegram_reply')) blockedSendsThisTurn++
                 if (isSend && dispatchSucceeded(r)) {
                   ledger.recordSend(dispatchKey(tc.function.name, args), tc.function.name)
@@ -835,10 +855,13 @@ function threadAgeMs(e: ThreadIndexEntry): number | null {
 // time. So the harness refreshes: any queued item about a thread or chat that
 // is older than FRESH_MS is replaced with a LIVE tail before she ever sees it.
 const FRESH_MS = 60000
+const tailCache = new Map<string, { at: number; p: Promise<string> }>()
 async function liveTailFor(id: string): Promise<string> {
-  const tail = await runKimaki(['session', 'read', id], 20000, 500_000, true)
-  if (tail.startsWith('ERROR')) return ''
-  return recentMessages(tail, 1).replace(/^### /, '').replace(/\s+/g, ' ').slice(0, 320)
+  const c = tailCache.get(id)
+  if (c && Date.now() - c.at < 45000) return c.p
+  const p = runKimaki(['session', 'read', id], 20000, 500_000, true).then((tail) => tail.startsWith('ERROR') ? '' : recentMessages(tail, 1).replace(/^### /, '').replace(/\s+/g, ' ').slice(0, 320))
+  tailCache.set(id, { at: Date.now(), p })
+  return p
 }
 async function refreshQueuedItems(items: string[]): Promise<string[]> {
   const now = Date.now()
@@ -2102,7 +2125,9 @@ async function joinAndServe(channel: VoiceBasedChannel, userId: string): Promise
       adapterCreator: channel.guild.voiceAdapterCreator,
       selfDeaf: false,
     })
-    player = createAudioPlayer()
+    // Default maxMissedFrames is 5 (100 ms): a gap between two streamed sentences
+    // longer than that STOPPED the player and the rest of the reply was lost.
+    player = createAudioPlayer({ behaviors: { maxMissedFrames: 750 } })
     player.on('error', (e) => log('wendy playback error:', e.message))
     connection.subscribe(player)
     const conn = connection
