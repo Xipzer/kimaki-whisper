@@ -50,6 +50,7 @@ export class VoiceLoop {
       close: () => { log('wendy: stt stream closed'); diag('stt_closed', {}); if (!this.stopped) setTimeout(() => void this.reconnect(), 1500) },
     })
     await this.stt.connect()
+    this.sttSince = Date.now()
     const sink = (pcm: Float32Array): void => { this.stt?.push(pcm) }
     this.unsub = this.audioSource ? this.audioSource(sink) : ownerAudioIn(this.connection!.receiver, this.ownerId, sink, (rms) => this.onLevel(rms), this.audioIn)
     // Deafness watchdog: he has been speaking (Discord says so) but nothing is
@@ -61,16 +62,24 @@ export class VoiceLoop {
         const spoke = a.speakingStarts - lastStarts, pk = a.packets - lastPackets, wd = this.wordsSeen - lastWords
         lastStarts = a.speakingStarts; lastPackets = a.packets; lastWords = this.wordsSeen
         if (spoke > 0) diag('audio_in', { speakingStarts: spoke, packets: pk, words: wd, resubscribes: a.resubscribes })
-        const deaf = spoke >= 2 && (pk === 0 || (pk > 400 && wd === 0))
-        strikes = deaf ? strikes + 1 : 0
-        if (strikes === 2) { const why = pk === 0 ? 'no_audio_from_discord' : 'stt_no_words'; diag('deaf', { why }); log(`wendy: DEAF (${why}) - recovering`); this.onDeaf?.(why) }
+        // Audio arrived (>= 4 s of it) and not one word came back: the STT stream is
+        // broken. Restart it at once - he will not keep talking into silence.
+        if (pk >= 200 && wd === 0) { diag('deaf', { why: 'stt_no_words', packets: pk }); log('wendy: DEAF (stt_no_words) - restarting stt'); this.onDeaf?.('stt_no_words') }
+        const noAudio = spoke >= 2 && pk === 0
+        strikes = noAudio ? strikes + 1 : 0
+        if (strikes === 2) { diag('deaf', { why: 'no_audio_from_discord' }); log('wendy: DEAF (no_audio_from_discord) - recovering'); this.onDeaf?.('no_audio_from_discord') }
+        // Kyutai STT positions are trained to ~55 min of stream; the ticker feeds
+        // silence continuously, so a VC session crosses that and goes deaf
+        // (measured: 5 h session, 0 words). Recycle the stream every 25 min, never mid-speech.
+        if (Date.now() - this.sttSince > 25 * 60 * 1000 && !this.utter.length && !this.speaking && Date.now() - this.lastWordAt > 5000) { diag('stt_recycle', {}); void this.restartStt() }
       }, 10000)
     }
     log('wendy: voice loop live (kyutai stt + tts)')
     diag('loop_started', { tts: ttsEngineName() })
   }
   private stopped = false
-  async restartStt(): Promise<void> { diag('stt_restart', {}); this.stt?.close() }
+  private sttSince = Date.now()
+  async restartStt(): Promise<void> { diag('stt_restart', {}); this.sttSince = Date.now(); this.stt?.close() }
   private async reconnect(): Promise<void> {
     if (this.stopped) return
     try { this.unsub?.(); await this.start() } catch (e) { log('wendy: stt reconnect failed:', (e as Error).message); setTimeout(() => void this.reconnect(), 3000) }

@@ -175,7 +175,13 @@ async def handler(ws):
     path = ws.request.path
     loop = asyncio.get_running_loop()
     if path.split("?")[0] == "/stt":
-        if sessions["stt"]: sessions["stt"].stop()
+        # The STT model's streaming state is global: the old session thread must
+        # have LEFT its streaming context before a new one enters it
+        # (seen: "is already streaming!" and a session that never became ready).
+        old = sessions["stt"]
+        if old:
+            old.stop()
+            await asyncio.get_running_loop().run_in_executor(None, old.th.join, 10)
         s = sessions["stt"] = SttSession(ws, loop)
         try:
             async for msg in ws:
