@@ -8,6 +8,25 @@ REPO="$HOME/WebstormProjects/kimaki-whisper"
 up() { curl -s -m 2 -o /dev/null -w '%{http_code}' "$1" 2>/dev/null | grep -q '^200$'; }
 wait_up() { for _ in $(seq 1 "$2"); do up "$1" && return 0; sleep 1; done; return 1; }
 
+# 0. Kimaki >= 0.30 hardcodes https://api.openai.com for voice transcription and
+#    ignores OPENAI_BASE_URL (voice notes 401'd against real OpenAI, 2026-09-27).
+#    Prefetch the version npx is about to run and patch it to honour the env var.
+#    Idempotent; re-applied on every launch because npx replaces the package on update.
+npx -y kimaki@latest --version >/dev/null 2>&1 || true
+for f in "$HOME"/.npm/_npx/*/node_modules/kimaki/dist/voice.js; do
+  [ -f "$f" ] || continue
+  if grep -q "^const OPENAI_CHAT_COMPLETIONS_URL = 'https://api.openai.com/v1/chat/completions';" "$f"; then
+    python3 - "$f" <<'PY'
+import re, sys
+f = sys.argv[1]; s = open(f).read()
+s = re.sub(r"^const OPENAI_CHAT_COMPLETIONS_URL = 'https://api.openai.com/v1/chat/completions';$",
+           "const OPENAI_CHAT_COMPLETIONS_URL = (process.env.OPENAI_BASE_URL || 'https://api.openai.com/v1').replace(/[/]$/, '') + '/chat/completions';", s, flags=re.M)
+open(f, 'w').write(s)
+PY
+    echo "[prereqs] patched kimaki transcription URL ($f)"
+  fi
+done
+
 # 1. speaches on :8000 - Whisper for Kimaki voice notes (:7070 forwards here)
 if ! up http://localhost:8000/health; then
   echo "[prereqs] speaches down - starting"
