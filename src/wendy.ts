@@ -580,7 +580,9 @@ export async function think(userText: string, onSentence?: (s: string) => void):
   history.push({ role: 'user', content: userText })
   // Evict in blocks, not one message per turn: a sliding window changes the
   // prefix every turn and the KV cache only survives up to the system prompt.
-  if (history.length > HISTORY_MAX) {
+  // Also evict on SIZE: the brain slot holds 49k tokens and big tool results made
+  // the prompt 40k (measured) - one more long turn would overflow the slot.
+  if (history.length > HISTORY_MAX || (lastPromptTokens > 36000 && history.length > HISTORY_KEEP)) {
     const evicted = history.splice(0, history.length - HISTORY_KEEP)
     evictionBuffer.push(...evicted.filter((m) => {
       const c = String(m.content ?? '')

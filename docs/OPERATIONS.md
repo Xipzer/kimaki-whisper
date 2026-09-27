@@ -150,6 +150,17 @@ Verify the cache is working from a diag line: `"prompt_tokens_details":
 If the projector reboots, WSL's ssh portproxy on :2222 breaks — run
 `C:\llama-cpp\wsl-ssh-heal.ps1` (scheduled task `WslSshHeal`).
 
+### Reaching the brain from anywhere (travel)
+
+The brain is exposed on the tailnet by `brain-forward` (systemd user unit in
+the projector's WSL, `~/bin/brain-forward.py`): `100.88.30.110:8080` →
+Windows llama-server. `brainUrl` is `http://100.88.30.110:8080` and the ssh
+alias `projector` points at the tailnet (`projector-lan` = the old LAN
+portproxy), so wake/stop and inference work identically at home and abroad.
+WSL is kept alive at Windows logon by `Startup\wsl-keepalive.vbs`.
+If the projector reboots, someone must log in to Windows once (the brain,
+the wake watcher and WSL all start at logon).
+
 ## 8. When something is wrong
 
 | Symptom | Check | Fix |
