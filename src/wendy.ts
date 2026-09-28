@@ -2126,6 +2126,7 @@ async function joinAndServe(channel: VoiceBasedChannel, userId: string): Promise
       guildId: channel.guild.id,
       adapterCreator: channel.guild.voiceAdapterCreator,
       selfDeaf: false,
+      debug: true, // surfaces DAVE (E2EE) negotiation + UDP events on 'debug'
     })
     // Default maxMissedFrames is 5 (100 ms): a gap between two streamed sentences
     // longer than that STOPPED the player and the rest of the reply was lost.
@@ -2143,6 +2144,16 @@ async function joinAndServe(channel: VoiceBasedChannel, userId: string): Promise
   }
   const conn = connection!
   conn.on('error', (e) => log('wendy voice error:', e.message))
+  // Receive-path visibility: DAVE (E2EE) decrypt failures and UDP/state changes
+  // are only reported on the debug channel - without this, "speaking but no
+  // packets" is indistinguishable from a network block.
+  let dbgN = 0
+  conn.on('debug', (m: string) => {
+    if (!/decrypt|dave|transition|udp|ip discovery|keep ?alive|closed|resum|epoch|mls/i.test(m)) return
+    if (++dbgN > 400) return
+    log('voice debug:', m.slice(0, 200)); diag('voice_debug', { m: m.slice(0, 200) })
+  })
+  conn.on('stateChange', (a, b) => { if (a.status !== b.status) diag('voice_state', { from: a.status, to: b.status }) })
   conn.on(VoiceConnectionStatus.Disconnected, () => {
     void (async () => {
       // Discord moved us / UDP blip: it auto-resumes if we reach Signalling or
