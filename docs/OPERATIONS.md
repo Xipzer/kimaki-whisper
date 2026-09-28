@@ -161,6 +161,14 @@ WSL is kept alive at Windows logon by `Startup\wsl-keepalive.vbs`.
 If the projector reboots, someone must log in to Windows once (the brain,
 the wake watcher and WSL all start at logon).
 
+### Travelling where VoIP is blocked (UAE, etc.)
+
+Discord voice is UDP and some networks (UAE carriers: du, Etisalat) block it: the
+bot's voice connection sits in `connecting` and `voice_connect_failed` appears in
+the diagnostics, so she flickers in and out of the channel. Fix: the printer's
+Windows Mullvad (`mullvad.exe connect`, relay `de fra`, DAITA off, auto-connect
+on). WSL traffic, Tailscale to the brain, and Discord voice all ride the tunnel.
+
 ## 8. When something is wrong
 
 | Symptom | Check | Fix |
