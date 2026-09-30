@@ -120,3 +120,16 @@ export function mechanicalSummary(label: string, transcript: string): string {
   const sentence = last.split(/(?<=[.!?])\s+/).filter((s) => s.length > 12)[0] ?? last.slice(0, 160)
   return `[LOW] ${label}: ${sentence.slice(0, 200) || 'new activity.'}`
 }
+
+/** Two promises are the same promise ("flag when the table lands" / "report the
+ *  moment the table lands"): content-word overlap. Stops one waiting-on-X promise
+ *  becoming five parallel commitments that each fire a turn. */
+export function samePromise(a: string, b: string): boolean {
+  const stop = new Set(['the', 'a', 'an', 'to', 'of', 'and', 'or', 'it', 'its', 'when', 'moment', 'second', 'owner', 'him', 'you', 'me', 'on', 'in', 'for', 'if', 'back', 'let', 'know', 'report', 'flag', 'ping', 'tell', 'check', 'again', 'that', 'this', 'with', 'what', 'whether', 'once', 'as', 'soon', 'is', 'be', 'lands', 'land'])
+  const words = (s: string): Set<string> => new Set(s.toLowerCase().replace(/[^a-z0-9 ]/g, ' ').split(/\s+/).filter((w) => w.length > 2 && !stop.has(w)))
+  const A = words(a), B = words(b)
+  if (!A.size || !B.size) return false
+  let inter = 0
+  for (const w of A) if (B.has(w)) inter++
+  return inter / Math.min(A.size, B.size) >= 0.5
+}

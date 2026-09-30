@@ -105,3 +105,11 @@ test('repairHistory never mutates the persistent history objects', () => {
   repairHistory([...history])
   assert.equal(a.content, 'one', 'second call must not append again')
 })
+
+test('samePromise merges re-statements of one promise, not different ones', async () => {
+  const { samePromise } = await import('../dist/brain/guards.js')
+  assert.equal(samePromise('Report the moment the table lands', 'Flag when the version table lands'), true)
+  assert.equal(samePromise('Flag the owner when the contracts thread lands', 'Report when the contracts thread finishes'), true)
+  assert.equal(samePromise('Report the moment the table lands', 'Check back on the unblocker'), false)
+  assert.equal(samePromise('Dictate the Sky Broadband answer', 'Nudge the contracts thread with plainer language'), false)
+})

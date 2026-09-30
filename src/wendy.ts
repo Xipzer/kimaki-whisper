@@ -33,7 +33,7 @@ import { SYSTEM_PROMPT } from './prompt.js'
 import { TOOLS } from './tools/specs.js'
 import { executeTelegramTool } from './tools/telegram.js'
 import { isDispatchTool, isThreadDispatchTool, dispatchSucceeded, claimsSend, sendClaimAck, isTrailingFragment, isAffirmative, isSelfDirective, soundsLikePromise, dispatchKey, collapsePriorityTags, isUrgentUpdate, queueDedupeMarkers, repairHistory, SESSION_ID, isSessionId, stripReminderPrefix } from './brain/guards.js'
-import { summaryIsCompliance, mechanicalSummary } from './brain/guards.js'
+import { summaryIsCompliance, mechanicalSummary, samePromise } from './brain/guards.js'
 import { onBrainUp, setConversationActive, preemptBackground, brainUrl, brainRequest, brainFetch, brainText, brainHealth, probeBrain, type BrainOut } from './brain/client.js'
 import { startTelegram, setTelegramFlaggedHandler, telegramAutoDrain, telegramLowBudgets, setTelegramAutonomousHandler, telegramPendingSummaries, telegramDrainChatStats, telegramPendingPeopleSummaries, telegramDrainPerson, telegramProfile, telegramProfilesDue, telegramProfileWrite, telegramPrivacyFor, telegramEffectiveTone, telegramRoomContext, telegramPersonThread, setReplyTarget, telegramChatDigest } from './telegram.js'
 
@@ -170,6 +170,7 @@ async function executeTool(name: string, args: Record<string, unknown>): Promise
   const t0 = Date.now()
   const result = await executeToolInner(name, args)
   for (const m of result.matchAll(SESSION_ID)) ledger.markVerified(m[0])
+  turnTools.add(name)
   if (typeof args.session_id === 'string') turnSessionIds.add(args.session_id)
   if (['dispatch_task', 'spawn_agent', 'send_to_session', 'ask_thread'].includes(name)) for (const m of result.matchAll(SESSION_ID)) turnSessionIds.add(m[0])
   diag('tool', { name, args, ms: Date.now() - t0, result: result.slice(0, 2000) })
@@ -1941,12 +1942,14 @@ function playerActive(): boolean { return loop?.speaking ?? false }
 type Commitment = { id: string; what: string; sessionId?: string; made: number; dueAt: number; attempts: number; status: 'open' | 'done' | 'dropped' | 'expired'; lastFire?: number }
 const commitmentsPath = () => path.join(workspaceDir(), 'commitments.json')
 let commitments: Commitment[] = []
-try { commitments = JSON.parse(fs.readFileSync(commitmentsPath(), 'utf-8')) as Commitment[] } catch {}
+if (!process.env.WENDY_TEST) try { commitments = JSON.parse(fs.readFileSync(commitmentsPath(), 'utf-8')) as Commitment[] } catch {}
 function saveCommitments(): void {
   commitments = commitments.filter((c) => c.status === 'open' || Date.now() - c.made < 3 * 86400000).slice(-80)
-  try { fs.writeFileSync(commitmentsPath(), JSON.stringify(commitments, null, 1)) } catch {}
+  if (!process.env.WENDY_TEST) try { fs.writeFileSync(commitmentsPath(), JSON.stringify(commitments, null, 1)) } catch {}
 }
 const turnSessionIds = new Set<string>()
+const turnTools = new Set<string>()
+let lastTrack: Promise<void> = Promise.resolve()
 let lastTurnReply = ''
 let firingCommitment: Commitment | null = null
 
@@ -1954,7 +1957,7 @@ async function trackCommitments(reply: string, userText: string): Promise<void> 
   if (!soundsLikePromise(reply) || /^skip\.?$/i.test(reply.trim())) return
   const ids = [...turnSessionIds].slice(0, 6)
   const res = await brainFetch('aux', { max_tokens: 400, temperature: 0, messages: [
-    { role: 'system', content: 'You extract promises. Wendy (a voice assistant) just said the REPLY below to her owner. List only concrete promises to DO or REPORT something LATER that she has not done in this reply - e.g. "I will tell you when the table lands", "I will check back in 10 minutes", "I will chase them". Ignore offers and questions ("want me to...?"), and things already done. Output ONLY JSON: {"commitments":[{"what":"<imperative, max 20 words>","sessionId":"<one of THREADS if the promise is about that thread, else null>","minutes":<number if a time is stated or clearly implied, else null>}]} - empty list if none.' },
+    { role: 'system', content: 'You extract promises. Wendy (a voice assistant) just said the REPLY below to her owner. List only concrete promises to DO or REPORT something LATER that she has not done in this reply - e.g. "I will tell you when the table lands", "I will check back in 10 minutes", "I will chase them". Ignore offers and questions ("want me to...?"), things already done, and modes or settings she just applied ("I will keep it quiet for half an hour" is a setting, not a task). Output ONLY JSON: {"commitments":[{"what":"<imperative, max 20 words>","sessionId":"<one of THREADS if the promise is about that thread, else null>","minutes":<number if a time is stated or clearly implied, else null>}]} - empty list if none.' },
     { role: 'user', content: `THREADS: ${ids.join(', ') || 'none'}\nOWNER SAID: ${userText.replace(/^\[[^\]]*\]\s*/, '').slice(0, 600)}\nREPLY: ${reply.slice(0, 1500)}` },
   ] }, { timeoutMs: 45000 })
   if (!res?.ok) return
@@ -1965,11 +1968,15 @@ async function trackCommitments(reply: string, userText: string): Promise<void> 
   for (const x of parsed.commitments ?? []) {
     const what = String(x.what ?? '').trim()
     if (!what) continue
-    const sid = x.sessionId && isSessionId(String(x.sessionId)) ? String(x.sessionId) : undefined
+    // the model often omits the id; if this turn touched exactly one thread, the promise is about it
+    const sid = x.sessionId && isSessionId(String(x.sessionId)) ? String(x.sessionId) : (ids.length === 1 ? ids[0] : undefined)
+    // she set a schedule_check this turn: that timer already covers a time-based promise
+    if (!sid && x.minutes && turnTools.has('schedule_check')) { diag('commitment_skipped_scheduled', { what }); continue }
     const due = Date.now() + (x.minutes && x.minutes > 0 ? x.minutes * 60000 : 45 * 60000)
     // one live promise per thread: a re-promise updates it and keeps its history
-    const same = sid ? commitments.find((c) => c.sessionId === sid && (c.status === 'open' || (c.lastFire && Date.now() - c.lastFire < 5 * 60000))) : undefined
-    if (same) { same.what = what; same.dueAt = due; same.status = 'open'; diag('commitment_updated', { what, sessionId: sid }) }
+    const live = (c: Commitment): boolean => c.status === 'open' || !!(c.lastFire && Date.now() - c.lastFire < 5 * 60000)
+    const same = commitments.find((c) => live(c) && ((sid && c.sessionId === sid) || samePromise(c.what, what)))
+    if (same) { same.what = what; same.dueAt = due; same.status = 'open'; if (sid) same.sessionId = sid; diag('commitment_updated', { what, sessionId: sid ?? same.sessionId ?? null }) }
     else { commitments.push({ id: `c${Date.now().toString(36)}${Math.random().toString(36).slice(2, 5)}`, what, sessionId: sid, made: Date.now(), dueAt: due, attempts: 0, status: 'open' }); diag('commitment_recorded', { what, sessionId: sid ?? null, minutes: x.minutes ?? null }) }
   }
   saveCommitments()
@@ -1994,8 +2001,8 @@ function commitmentsOnActivity(srcId: string | undefined): void {
 type AwayEntry = { at: number; kind: string; trigger: string; reply: string }
 const awayPath = () => path.join(workspaceDir(), 'away-log.json')
 let awayLog: AwayEntry[] = []
-try { awayLog = JSON.parse(fs.readFileSync(awayPath(), 'utf-8')) as AwayEntry[] } catch {}
-function saveAway(): void { try { fs.writeFileSync(awayPath(), JSON.stringify(awayLog.slice(-60), null, 1)) } catch {} }
+if (!process.env.WENDY_TEST) try { awayLog = JSON.parse(fs.readFileSync(awayPath(), 'utf-8')) as AwayEntry[] } catch {}
+function saveAway(): void { if (process.env.WENDY_TEST) return; try { fs.writeFileSync(awayPath(), JSON.stringify(awayLog.slice(-60), null, 1)) } catch {} }
 function takeAwayReport(): string {
   if (!awayLog.length) return ''
   const items = awayLog.splice(0)
@@ -2009,7 +2016,7 @@ function takeAwayReport(): string {
 const autonomyPath = () => path.join(workspaceDir(), 'autonomy.json')
 let autonomy: { askFirst: string[] } = { askFirst: [] }
 try { autonomy = { askFirst: [], ...JSON.parse(fs.readFileSync(autonomyPath(), 'utf-8')) } } catch {}
-function saveAutonomy(): void { try { fs.writeFileSync(autonomyPath(), JSON.stringify(autonomy, null, 1)) } catch {} }
+function saveAutonomy(): void { if (process.env.WENDY_TEST) return; try { fs.writeFileSync(autonomyPath(), JSON.stringify(autonomy, null, 1)) } catch {} }
 
 const NOT_READY = /\b(not (yet|finished|done|ready|complete)|still (actively |)(working|running|building|grinding|going|in progress|mid)|in progress|hasn'?t (finished|landed|completed)|isn'?t (done|finished|ready))\b/i
 async function fireCommitment(c: Commitment): Promise<void> {
@@ -2025,6 +2032,7 @@ async function fireCommitment(c: Commitment): Promise<void> {
   try {
     await runTurn(`[COMMITMENT DUE - rules: EVENT RULES > COMMITMENT${away ? ' + AWAY' : ''}] At ${hm}Z you told the owner you would: ${c.what}.${c.sessionId ? ` Thread: ${c.sessionId}.` : ''} Trigger: ${trigger}. ${away ? 'He is AWAY - do it now; your final reply goes into his away report.' : 'He is in voice - do it, then tell him the outcome briefly.'}`)
   } finally { firingCommitment = null }
+  await lastTrack // her reply may have re-promised: let that land before judging the outcome
   const again = commitments.find((x) => x.id === c.id)
   // "still building / not finished yet": the promise is not kept - keep it open; the thread's next move re-fires it
   if (again?.status === 'done' && NOT_READY.test(lastTurnReply)) {
@@ -2146,11 +2154,11 @@ async function runTurn(text: string): Promise<void> {
       loop.say(sent)
     }
 
-    turnSessionIds.clear()
+    turnSessionIds.clear(); turnTools.clear()
     const reply = await think(text, streamer)
     lastTurnReply = reply
     if (reply.trim() && !/^skip\.?$/i.test(reply.trim())) {
-      void trackCommitments(reply, text).catch(() => {})
+      lastTrack = trackCommitments(reply, text).catch(() => {})
       if (!connection && text.startsWith('[')) { awayLog.push({ at: Date.now(), kind: text.startsWith('[COMMITMENT') ? 'commitment' : 'event', trigger: (firingCommitment?.what ?? text.replace(/^\[[^\]]*\]\s*/, '')).slice(0, 160), reply: reply.slice(0, 700) }); saveAway() }
     }
     diag('turn_done', { ms: Date.now() - turnT0, reply: reply.slice(0, 800), superseded: seq !== inputSeq, streamed: streamedCount })
