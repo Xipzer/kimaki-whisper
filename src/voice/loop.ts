@@ -44,14 +44,21 @@ export class VoiceLoop {
 
   constructor(private connection: VoiceConnection | null, private player: AudioPlayer, private ownerId: string, private hooks: LoopHooks, private audioSource?: (sink: (pcm: Float32Array) => void) => () => void) {}
 
-  async start(): Promise<void> {
-    this.stt = new SttStream({
+  /** Ears only: (re)open the STT socket. The Discord audio subscription is
+   *  independent and survives STT restarts - tearing it down and re-subscribing
+   *  in the same tick handed back the destroyed stream (deaf for 4 min, live). */
+  private async connectStt(): Promise<void> {
+    const stt = new SttStream({
       word: (w, t) => this.onWord(w, t),
       vad: (p) => this.onVad(p),
-      close: () => { log('wendy: stt stream closed'); diag('stt_closed', {}); if (!this.stopped) setTimeout(() => void this.reconnect(), 1500) },
+      close: () => { if (this.stt !== stt) return; log('wendy: stt stream closed'); diag('stt_closed', {}); if (!this.stopped) setTimeout(() => void this.reconnect(), 1500) },
     })
-    await this.stt.connect()
+    await stt.connect()
+    this.stt = stt
     this.sttSince = Date.now()
+  }
+  async start(): Promise<void> {
+    await this.connectStt()
     const sink = (pcm: Float32Array): void => { this.stt?.push(pcm) }
     this.unsub = this.audioSource ? this.audioSource(sink) : ownerAudioIn(this.connection!.receiver, this.ownerId, sink, (rms) => this.onLevel(rms), this.audioIn)
     // Deafness watchdog: he has been speaking (Discord says so) but nothing is
@@ -65,7 +72,13 @@ export class VoiceLoop {
         if (spoke > 0) diag('audio_in', { speakingStarts: spoke, packets: pk, words: wd, resubscribes: a.resubscribes })
         // Audio arrived (>= 4 s of it) and not one word came back: the STT stream is
         // broken. Restart it at once - he will not keep talking into silence.
-        if (pk >= 200 && wd === 0) { diag('deaf', { why: 'stt_no_words', packets: pk }); log('wendy: DEAF (stt_no_words) - restarting stt'); this.onDeaf?.('stt_no_words') }
+        if (pk >= 200 && wd === 0) {
+          // first strike: fresh STT socket. Still deaf within 60 s of that: rebuild the whole voice connection.
+          const again = Date.now() - this.lastSttRestart < 60000
+          diag('deaf', { why: again ? 'stt_dead' : 'stt_no_words', packets: pk })
+          log(`wendy: DEAF (${again ? 'stt still silent after restart - rejoining' : 'stt_no_words - restarting stt'})`)
+          this.onDeaf?.(again ? 'no_audio_from_discord' : 'stt_no_words')
+        }
         const noAudio = spoke >= 2 && pk === 0
         strikes = noAudio ? strikes + 1 : 0
         if (strikes === 2) { diag('deaf', { why: 'no_audio_from_discord' }); log('wendy: DEAF (no_audio_from_discord) - recovering'); this.onDeaf?.('no_audio_from_discord') }
@@ -80,10 +93,11 @@ export class VoiceLoop {
   }
   private stopped = false
   private sttSince = Date.now()
-  async restartStt(): Promise<void> { diag('stt_restart', {}); this.sttSince = Date.now(); this.stt?.close() }
+  private lastSttRestart = 0
+  async restartStt(): Promise<void> { diag('stt_restart', {}); this.lastSttRestart = Date.now(); this.sttSince = Date.now(); this.stt?.close() }
   private async reconnect(): Promise<void> {
     if (this.stopped) return
-    try { this.unsub?.(); await this.start() } catch (e) { log('wendy: stt reconnect failed:', (e as Error).message); setTimeout(() => void this.reconnect(), 3000) }
+    try { await this.connectStt(); log('wendy: stt reconnected'); diag('stt_reconnected', {}) } catch (e) { log('wendy: stt reconnect failed:', (e as Error).message); setTimeout(() => void this.reconnect(), 3000) }
   }
   stop(): void {
     this.stopped = true
