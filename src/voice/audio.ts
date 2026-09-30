@@ -64,12 +64,16 @@ export class AudioOut extends Readable {
   private queue: Buffer[] = []
   private waiting = false
   ended = false
+  closed = false // EOF pushed: the player has (or will) go idle; cannot be reused
   constructor() { super({ highWaterMark: 1 << 16 }) }
   _read(): void {
     if (this.queue.length) { this.push(this.queue.shift()); return }
-    if (this.ended) { this.push(null); return }
+    if (this.ended) { this.closed = true; this.push(null); return }
     this.waiting = true
   }
+  /** A new reply arrived while this one is still playing: keep the stream open
+   *  and append, instead of starting a second resource that would cut it off. */
+  reopen(): boolean { if (this.closed || this.destroyed) return false; this.ended = false; return true }
   pushPcm(pcm24: Float32Array): void {
     // 24k float -> 48k s16le stereo, linear interpolation
     const out = Buffer.alloc(pcm24.length * 2 * 4)
@@ -82,5 +86,5 @@ export class AudioOut extends Readable {
     }
     if (this.waiting) { this.waiting = false; this.push(out) } else this.queue.push(out)
   }
-  finish(): void { this.ended = true; if (this.waiting) { this.waiting = false; this.push(null) } }
+  finish(): void { this.ended = true; if (this.waiting) { this.waiting = false; this.closed = true; this.push(null) } }
 }

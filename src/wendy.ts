@@ -640,7 +640,8 @@ export async function think(userText: string, onSentence?: (s: string) => void):
     if (turnAbort?.signal.aborted) return ''
     const hopT0 = Date.now()
     const elapsed = Date.now() - hopT0Turn
-    if (elapsed > 45000 && !progressSpoken && !userText.startsWith('[') && !ownerTalking()) {
+    // Never while she is already talking - it was queued into the live reply and chopped it.
+    if (elapsed > 45000 && !progressSpoken && !userText.startsWith('[') && !ownerTalking() && !playerActive()) {
       progressSpoken = true
       void speak('Still on it - digging through a few things, give me a moment.')
       diag('turn_progress_ack', { ms: elapsed })

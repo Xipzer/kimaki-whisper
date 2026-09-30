@@ -35,3 +35,18 @@ test('loudness barge-in cuts her after ~0.45 s of his voice, not on a blip', () 
   assert.deepEqual(fired, ['barge'])
   loop.stop()
 })
+
+test('a second reply while the first is still playing is appended, not swapped in', async () => {
+  const plays: unknown[] = []
+  const player = Object.assign(new EventEmitter(), { state: { status: 'idle' }, play(r: unknown) { plays.push(r); (this as { state: { status: string } }).state.status = 'playing' }, stop() {} })
+  const loop = new VoiceLoop(null, player as never, 'o', { gate: () => ({ silenced: false, nameOnly: false, expectingAnswer: false }), onUtterance: () => {} }, () => () => {})
+  const L = loop as unknown as { stream: { reopen(): boolean; pushPcm(p: Float32Array): void } | null; beginReply(): void; tts: unknown }
+  const { AudioOut } = await import('../dist/voice/audio.js')
+  const first = new AudioOut(); first.pushPcm(new Float32Array(1920)); first.finish()
+  L.stream = first as never
+  ;(L as { tts: unknown }).tts = null
+  L.beginReply()
+  assert.equal(L.stream, first, 'still-playing stream is reused')
+  assert.equal(plays.length, 0, 'no new resource swapped onto the player')
+  loop.stop()
+})

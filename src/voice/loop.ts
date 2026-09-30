@@ -30,6 +30,7 @@ export class VoiceLoop {
   private eotTimer: NodeJS.Timeout | null = null
   // mouth
   private tts: TtsEngine | null = null
+  private stream: AudioOut | null = null
   private out: AudioOut | null = null
   private spokenThisReply: string[] = []
   private replyStartedAt = 0
@@ -194,8 +195,14 @@ export class VoiceLoop {
     if (this.tts) return
     this.replyStartedAt = Date.now()
     this.spokenThisReply = []
-    const out = new AudioOut()
-    let started = false, buffered = 0
+    // Still playing an earlier reply: append to the SAME stream. Starting a new
+    // resource would replace the one on air and cut her off mid-sentence
+    // (seen live: "You're half right..." chopped by "It's underway...").
+    const playing = this.stream && this.stream.reopen()
+    const out = playing ? this.stream! : new AudioOut()
+    this.stream = out
+    if (playing) diag('reply_chained', {})
+    let started = playing, buffered = 0
     const PREBUFFER = ttsEngineName() === 'kyutai' ? 5 : 1 // kyutai streams frames (absorb jitter); kokoro delivers whole sentences
     const start = (): void => {
       if (started) return
@@ -244,6 +251,8 @@ export class VoiceLoop {
     this.tts?.cancel(); this.tts = null
     try { this.out?.destroy() } catch {}
     this.out = null
+    try { this.stream?.destroy() } catch {}
+    this.stream = null
     try { this.player.stop(true) } catch {}
     if (had) diag('speech_cancelled', { why })
     this.lastSpeechEnd = Date.now()
