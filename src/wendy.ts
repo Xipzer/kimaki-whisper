@@ -21,6 +21,7 @@ import {
 import type { Client, VoiceState, VoiceBasedChannel } from 'discord.js'
 import { Client as DClient, GatewayIntentBits } from 'discord.js'
 import { VoiceLoop } from './voice/loop.js'
+import { initActivity } from './activity.js'
 import { execFile, spawn } from 'node:child_process'
 import { loadConfig, log } from './config.js'
 import { diag, pruneDiagnostics } from './diag.js'
@@ -169,6 +170,8 @@ async function executeTool(name: string, args: Record<string, unknown>): Promise
   const t0 = Date.now()
   const result = await executeToolInner(name, args)
   for (const m of result.matchAll(SESSION_ID)) ledger.markVerified(m[0])
+  if (typeof args.session_id === 'string') turnSessionIds.add(args.session_id)
+  if (['dispatch_task', 'spawn_agent', 'send_to_session', 'ask_thread'].includes(name)) for (const m of result.matchAll(SESSION_ID)) turnSessionIds.add(m[0])
   diag('tool', { name, args, ms: Date.now() - t0, result: result.slice(0, 2000) })
   if (result.startsWith('ERROR')) diag('tool_error', { name, err: result.slice(0, 150) })
   return result
@@ -440,6 +443,20 @@ async function executeToolInner(name: string, args: Record<string, unknown>): Pr
     diag('selftask_created', { id: t.id, goal: goal.slice(0, 100) })
     return `accepted (${t.id}) - working on it in the background; result will arrive as an update`
   }
+  if (name === 'commitments') {
+    if (typeof args.drop_id === 'string' && args.drop_id) {
+      const c = commitments.find((x) => x.id === args.drop_id && x.status === 'open')
+      if (!c) return 'ERROR: no open commitment with that id'
+      c.status = 'dropped'; saveCommitments(); diag('commitment_dropped', { what: c.what })
+      return `dropped: ${c.what}`
+    }
+    const open = commitments.filter((c) => c.status === 'open')
+    return open.length ? open.map((c) => `${c.id} | ${c.what} | ${c.sessionId ? `thread ${c.sessionId}` : 'no thread'} | due ${new Date(c.dueAt).toISOString().slice(11, 16)}Z | fired ${c.attempts}x`).join('\n') : 'no open commitments'
+  }
+  if (name === 'autonomy_rules') {
+    if (Array.isArray(args.ask_first)) { autonomy.askFirst = (args.ask_first as unknown[]).map(String).filter(Boolean); saveAutonomy(); diag('autonomy_rules_set', { askFirst: autonomy.askFirst }) }
+    return autonomy.askFirst.length ? `Needs his OK while he is away: ${autonomy.askFirst.join('; ')}. Everything else: full authority.` : 'Full authority while he is away - nothing needs his OK first.'
+  }
   if (name === 'self_tasks_status') {
     if (!selfTasks.length) return 'no self-tasks yet'
     return selfTasks.slice(-8).map((t) => {
@@ -573,7 +590,8 @@ function systemPrefix(memoryBlock: string): string {
   const routes = loadRoutes()
   const routesBlock = Object.keys(routes).length ? '\n\nKNOWN ROUTES (check here FIRST before searching):\n' + Object.entries(routes).map(([n, r]) => `- ${n} → ${r.kind} ${r.id} (${r.note})`).join('\n') : ''
   const guilds = clientRef ? [...clientRef.guilds.cache.values()].map((g) => g.name) : []
-  return SYSTEM_PROMPT + memoryBlock + routesBlock + nodeBlock(indexProjectCount, guilds)
+  const auto = `\n\nAUTONOMY: while he is away you act with his full authority, using every tool you have, exactly as you would with him present.${autonomy.askFirst.length ? ` Exceptions - these need his OK first; record them under NEEDS YOU in your reply instead of doing them: ${autonomy.askFirst.join('; ')}.` : ''}`
+  return SYSTEM_PROMPT + memoryBlock + routesBlock + nodeBlock(indexProjectCount, guilds) + auto
 }
 export async function warmBrain(why: string): Promise<void> {
   if (!brainUrl()) return
@@ -1443,6 +1461,7 @@ function announce(text: string, tier: NotifyTier, srcId?: string): void {
   const hm = new Date().toISOString().slice(11, 16)
   text = `${text} [queued ${hm}Z${srcId ? ` src:${srcId}` : ''}]`
   diag('announce', { tier, text: text.slice(0, 300), inVc: !!connection })
+  commitmentsOnActivity(srcId ?? text.match(/src:(ses_\w{10,})/)?.[1])
   if (isSilenced()) { attention.push('held', text); return }
   if (tier === 'interrupt' && connection) { attention.push('live', text); return }
   // Owner absent + something he is waiting on: voice delivery is impossible,
@@ -1914,6 +1933,107 @@ setInterval(() => {
 }, 5000).unref()
 function playerActive(): boolean { return loop?.speaking ?? false }
 
+
+// ── commitments: promises she makes are tracked and brought back to her ─────
+// "I'll tell you when the table lands" used to be just words. Now it is a
+// record with a wake condition (its thread moves, or its time comes); when it
+// fires she gets a COMMITMENT DUE turn and does the work - in voice or away.
+type Commitment = { id: string; what: string; sessionId?: string; made: number; dueAt: number; attempts: number; status: 'open' | 'done' | 'dropped' | 'expired'; lastFire?: number }
+const commitmentsPath = () => path.join(workspaceDir(), 'commitments.json')
+let commitments: Commitment[] = []
+try { commitments = JSON.parse(fs.readFileSync(commitmentsPath(), 'utf-8')) as Commitment[] } catch {}
+function saveCommitments(): void {
+  commitments = commitments.filter((c) => c.status === 'open' || Date.now() - c.made < 3 * 86400000).slice(-80)
+  try { fs.writeFileSync(commitmentsPath(), JSON.stringify(commitments, null, 1)) } catch {}
+}
+const turnSessionIds = new Set<string>()
+let lastTurnReply = ''
+let firingCommitment: Commitment | null = null
+
+async function trackCommitments(reply: string, userText: string): Promise<void> {
+  if (!soundsLikePromise(reply) || /^skip\.?$/i.test(reply.trim())) return
+  const ids = [...turnSessionIds].slice(0, 6)
+  const res = await brainFetch('aux', { max_tokens: 400, temperature: 0, messages: [
+    { role: 'system', content: 'You extract promises. Wendy (a voice assistant) just said the REPLY below to her owner. List only concrete promises to DO or REPORT something LATER that she has not done in this reply - e.g. "I will tell you when the table lands", "I will check back in 10 minutes", "I will chase them". Ignore offers and questions ("want me to...?"), and things already done. Output ONLY JSON: {"commitments":[{"what":"<imperative, max 20 words>","sessionId":"<one of THREADS if the promise is about that thread, else null>","minutes":<number if a time is stated or clearly implied, else null>}]} - empty list if none.' },
+    { role: 'user', content: `THREADS: ${ids.join(', ') || 'none'}\nOWNER SAID: ${userText.replace(/^\[[^\]]*\]\s*/, '').slice(0, 600)}\nREPLY: ${reply.slice(0, 1500)}` },
+  ] }, { timeoutMs: 45000 })
+  if (!res?.ok) return
+  const d = (await res.json().catch(() => null)) as { choices?: Array<{ message?: { content?: string } }> } | null
+  const raw = d?.choices?.[0]?.message?.content ?? ''
+  let parsed: { commitments?: Array<{ what?: string; sessionId?: string | null; minutes?: number | null }> } = {}
+  try { parsed = JSON.parse(raw.slice(raw.indexOf('{'), raw.lastIndexOf('}') + 1)) } catch { return }
+  for (const x of parsed.commitments ?? []) {
+    const what = String(x.what ?? '').trim()
+    if (!what) continue
+    const sid = x.sessionId && isSessionId(String(x.sessionId)) ? String(x.sessionId) : undefined
+    const due = Date.now() + (x.minutes && x.minutes > 0 ? x.minutes * 60000 : 45 * 60000)
+    // one live promise per thread: a re-promise updates it and keeps its history
+    const same = sid ? commitments.find((c) => c.sessionId === sid && (c.status === 'open' || (c.lastFire && Date.now() - c.lastFire < 5 * 60000))) : undefined
+    if (same) { same.what = what; same.dueAt = due; same.status = 'open'; diag('commitment_updated', { what, sessionId: sid }) }
+    else { commitments.push({ id: `c${Date.now().toString(36)}${Math.random().toString(36).slice(2, 5)}`, what, sessionId: sid, made: Date.now(), dueAt: due, attempts: 0, status: 'open' }); diag('commitment_recorded', { what, sessionId: sid ?? null, minutes: x.minutes ?? null }) }
+  }
+  saveCommitments()
+}
+
+/** A watched thread moved: any promise about it is due now. */
+function commitmentsOnActivity(srcId: string | undefined): void {
+  if (!srcId) return
+  let hit = false
+  for (const c of commitments) if (c.status === 'open' && c.sessionId === srcId && Date.now() - (c.lastFire ?? 0) > 90000) { c.dueAt = Date.now(); hit = true }
+  // her own spawned agent moved while he is away: she owns collecting it
+  if (!hit && !connection && spawns.some((sp) => sp.id === srcId && sp.status === 'running') && !commitments.some((c) => c.status === 'open' && c.sessionId === srcId)) {
+    const sp = spawns.find((x) => x.id === srcId)!
+    commitments.push({ id: `c${Date.now().toString(36)}`, what: `collect and act on the result of the agent you spawned: "${sp.label}"`, sessionId: srcId, made: Date.now(), dueAt: Date.now(), attempts: 0, status: 'open' })
+    diag('commitment_recorded', { what: `collect spawned agent ${sp.label}`, sessionId: srcId, auto: true })
+    hit = true
+  }
+  if (hit) saveCommitments()
+}
+
+// ── away log -> the report he gets when he rejoins ───────────────────────────
+type AwayEntry = { at: number; kind: string; trigger: string; reply: string }
+const awayPath = () => path.join(workspaceDir(), 'away-log.json')
+let awayLog: AwayEntry[] = []
+try { awayLog = JSON.parse(fs.readFileSync(awayPath(), 'utf-8')) as AwayEntry[] } catch {}
+function saveAway(): void { try { fs.writeFileSync(awayPath(), JSON.stringify(awayLog.slice(-60), null, 1)) } catch {} }
+function takeAwayReport(): string {
+  if (!awayLog.length) return ''
+  const items = awayLog.splice(0)
+  saveAway()
+  diag('away_report', { items: items.length })
+  const open = commitments.filter((c) => c.status === 'open')
+  return ` AWAY REPORT (${items.length} item(s) while he was away): ${items.map((e) => `[${new Date(e.at).toISOString().slice(11, 16)}Z ${e.kind}: ${e.trigger}] ${e.reply}`).join(' | ').slice(0, 3500)}${open.length ? ` STILL OPEN: ${open.map((c) => c.what).join('; ').slice(0, 600)}` : ''}`
+}
+
+// ── autonomy rules: what needs his OK while he is away (default: nothing) ────
+const autonomyPath = () => path.join(workspaceDir(), 'autonomy.json')
+let autonomy: { askFirst: string[] } = { askFirst: [] }
+try { autonomy = { askFirst: [], ...JSON.parse(fs.readFileSync(autonomyPath(), 'utf-8')) } } catch {}
+function saveAutonomy(): void { try { fs.writeFileSync(autonomyPath(), JSON.stringify(autonomy, null, 1)) } catch {} }
+
+async function fireCommitment(c: Commitment): Promise<void> {
+  c.attempts++
+  c.lastFire = Date.now()
+  c.status = 'done' // re-opened by trackCommitments if her reply promises again
+  saveCommitments()
+  const away = !connection
+  const hm = new Date(c.made).toISOString().slice(11, 16)
+  const trigger = c.sessionId && c.dueAt <= Date.now() ? `the thread ${c.sessionId} moved` : 'its time came'
+  diag('commitment_fired', { what: c.what, attempts: c.attempts, away })
+  firingCommitment = c
+  try {
+    await runTurn(`[COMMITMENT DUE - rules: EVENT RULES > COMMITMENT${away ? ' + AWAY' : ''}] At ${hm}Z you told the owner you would: ${c.what}.${c.sessionId ? ` Thread: ${c.sessionId}.` : ''} Trigger: ${trigger}. ${away ? 'He is AWAY - do it now; your final reply goes into his away report.' : 'He is in voice - do it, then tell him the outcome briefly.'}`)
+  } finally { firingCommitment = null }
+  const again = commitments.find((x) => x.id === c.id)
+  if (again?.status === 'done') diag('commitment_done', { what: c.what, attempts: c.attempts })
+  else if (again && again.attempts >= 10) { again.status = 'expired'; saveCommitments(); awayLog.push({ at: Date.now(), kind: 'gave up', trigger: c.what, reply: 'still not resolved after 10 attempts - needs you' }); saveAway() }
+}
+setInterval(() => {
+  if (busy || draining || isSilenced() || ownerTalking() || playerActive()) return
+  const due = commitments.filter((c) => c.status === 'open' && c.dueAt <= Date.now()).sort((a, b) => a.dueAt - b.dueAt)[0]
+  if (due) void fireCommitment(due)
+}, 20000).unref()
+
 // The owner kept talking after an end-of-turn fired: the prepared reply answered
 // half a sentence. It is dropped unspoken and his earlier words are prepended to
 // what he says next, so the brain sees the whole thought.
@@ -2021,7 +2141,13 @@ async function runTurn(text: string): Promise<void> {
       loop.say(sent)
     }
 
+    turnSessionIds.clear()
     const reply = await think(text, streamer)
+    lastTurnReply = reply
+    if (reply.trim() && !/^skip\.?$/i.test(reply.trim())) {
+      void trackCommitments(reply, text).catch(() => {})
+      if (!connection && text.startsWith('[')) { awayLog.push({ at: Date.now(), kind: text.startsWith('[COMMITMENT') ? 'commitment' : 'event', trigger: (firingCommitment?.what ?? text.replace(/^\[[^\]]*\]\s*/, '')).slice(0, 160), reply: reply.slice(0, 700) }); saveAway() }
+    }
     diag('turn_done', { ms: Date.now() - turnT0, reply: reply.slice(0, 800), superseded: seq !== inputSeq, streamed: streamedCount })
     if (ownerTurn) scheduleHeldActionRecovery(inputSeq)
     if (!reply.trim()) return
@@ -2190,7 +2316,8 @@ async function joinAndServe(channel: VoiceBasedChannel, userId: string): Promise
   lastGreetedAt = Date.now()
   const totalHeld = attention.count('held')
   const hi = attention.highCount('held')
-  void runTurn(`[OWNER JOINED VOICE - rules: EVENT RULES > JOIN]${ledger.groundTruth()}${totalHeld ? ` ${hi ? `One queued update is HIGH priority - mention that single fact casually (no contents yet).` : `Updates are queued but NONE are high priority - do NOT mention the queue, counts, or offer a rundown; he knows he can ask. Just greet.`}` : ''}]`)
+  const awayReport = takeAwayReport()
+  void runTurn(`[OWNER JOINED VOICE - rules: EVENT RULES > JOIN]${awayReport}${ledger.groundTruth()}${totalHeld ? ` ${hi ? `One queued update is HIGH priority - mention that single fact casually (no contents yet).` : `Updates are queued but NONE are high priority - do NOT mention the queue, counts, or offer a rundown; he knows he can ask. Just greet.`}` : ''}]`)
 }
 
 function leave(): void {
@@ -2211,6 +2338,8 @@ export function initWendy(client: Client): void {
   }
   clientRef = client
   ledger.load()
+  const startActivity = (): void => { void initActivity(client, (loadConfig() as { wendyChannelId?: string }).wendyChannelId) }
+  if (client.isReady()) startActivity(); else client.once('clientReady', startActivity)
   // Restarts kill finish-waiter child processes silently - re-arm every
   // dispatch that never reported done (quick exit on re-arm = legit finish).
   for (const [id, v] of ledger.unfinished(45 * 60000)) setTimeout(() => armFinishWatch(id, v.label, true), 15000)

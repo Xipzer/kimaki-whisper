@@ -261,6 +261,22 @@ export const TOOLS = [
   {
     type: 'function',
     function: {
+      name: 'commitments',
+      description: 'List the promises you have made that are still open (tracked automatically from what you say, e.g. "I\'ll tell you when the table lands"). Each fires a COMMITMENT DUE turn when its thread moves or its time comes - even while the owner is away.',
+      parameters: { type: 'object', properties: { drop_id: { type: 'string', description: 'optional: id of a commitment to drop because it no longer applies' } } },
+    },
+  },
+  {
+    type: 'function',
+    function: {
+      name: 'autonomy_rules',
+      description: 'View or set what needs the owner\'s OK before you do it while he is away. Default: nothing - you act with his full authority using every tool you have. Only change when HE asks.',
+      parameters: { type: 'object', properties: { ask_first: { type: 'array', items: { type: 'string' }, description: 'kinds of action that need his OK first, in plain words (e.g. "sending Telegram messages", "deploys"). Omit to just view.' } } },
+    },
+  },
+  {
+    type: 'function',
+    function: {
       name: 'schedule_check',
       description: 'Set a future follow-up: in N minutes, either re-check a session (reads it fresh and reports its state) or deliver a plain reminder. Survives restarts; delivered at a natural conversation pause. Use when the owner says "remind me" / "check on it later", and proactively as a safety net after dispatching long work the owner cares about.',
       parameters: {

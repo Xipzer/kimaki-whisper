@@ -11,7 +11,14 @@ function diagDir(): string {
   return d
 }
 
+type DiagListener = (ev: string, data: Record<string, unknown>, ts: number) => void
+const listeners: DiagListener[] = []
+/** Subscribe to the live event stream (activity mirror, etc). Listener errors never propagate. */
+export function onDiag(fn: DiagListener): void { listeners.push(fn) }
+
 export function diag(ev: string, data: Record<string, unknown> = {}): void {
+  const ts = Date.now()
+  for (const l of listeners) { try { l(ev, data, ts) } catch {} }
   try {
     const day = new Date().toISOString().slice(0, 10)
     fs.appendFileSync(path.join(diagDir(), `${day}.jsonl`), JSON.stringify({ ts: Date.now(), ev, ...data }) + '\n')
