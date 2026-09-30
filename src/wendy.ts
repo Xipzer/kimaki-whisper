@@ -2011,6 +2011,7 @@ let autonomy: { askFirst: string[] } = { askFirst: [] }
 try { autonomy = { askFirst: [], ...JSON.parse(fs.readFileSync(autonomyPath(), 'utf-8')) } } catch {}
 function saveAutonomy(): void { try { fs.writeFileSync(autonomyPath(), JSON.stringify(autonomy, null, 1)) } catch {} }
 
+const NOT_READY = /\b(not (yet|finished|done|ready|complete)|still (actively |)(working|running|building|grinding|going|in progress|mid)|in progress|hasn'?t (finished|landed|completed)|isn'?t (done|finished|ready))\b/i
 async function fireCommitment(c: Commitment): Promise<void> {
   c.attempts++
   c.lastFire = Date.now()
@@ -2025,7 +2026,11 @@ async function fireCommitment(c: Commitment): Promise<void> {
     await runTurn(`[COMMITMENT DUE - rules: EVENT RULES > COMMITMENT${away ? ' + AWAY' : ''}] At ${hm}Z you told the owner you would: ${c.what}.${c.sessionId ? ` Thread: ${c.sessionId}.` : ''} Trigger: ${trigger}. ${away ? 'He is AWAY - do it now; your final reply goes into his away report.' : 'He is in voice - do it, then tell him the outcome briefly.'}`)
   } finally { firingCommitment = null }
   const again = commitments.find((x) => x.id === c.id)
-  if (again?.status === 'done') diag('commitment_done', { what: c.what, attempts: c.attempts })
+  // "still building / not finished yet": the promise is not kept - keep it open; the thread's next move re-fires it
+  if (again?.status === 'done' && NOT_READY.test(lastTurnReply)) {
+    again.status = 'open'; again.dueAt = Date.now() + 45 * 60000; saveCommitments()
+    diag('commitment_waiting', { what: c.what, attempts: c.attempts })
+  } else if (again?.status === 'done') diag('commitment_done', { what: c.what, attempts: c.attempts })
   else if (again && again.attempts >= 10) { again.status = 'expired'; saveCommitments(); awayLog.push({ at: Date.now(), kind: 'gave up', trigger: c.what, reply: 'still not resolved after 10 attempts - needs you' }); saveAway() }
 }
 setInterval(() => {

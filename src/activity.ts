@@ -14,8 +14,9 @@ const clip = (s: unknown, n: number): string => String(s ?? '').replace(/\s+/g, 
 const hhmm = (ts: number): string => new Date(ts).toTimeString().slice(0, 8)
 
 let thread: ThreadChannel | null = null
-let lines: string[] = []
-let msg: Message | null = null
+type Turn = { lines: string[]; msg: Message | null; closedAt: number }
+let turn: Turn | null = null   // the turn being written
+let last: Turn | null = null   // most recently closed turn (late events append to it)
 let flushTimer: NodeJS.Timeout | null = null
 let chain: Promise<unknown> = Promise.resolve()
 
@@ -31,34 +32,40 @@ function kindOf(text: string): string {
 function stripTags(text: string): string { return text.replace(/^\[[^\]]*\]\s*/, '').replace(/\n\n\[context for this turn[\s\S]*$/, '') }
 
 function newTurn(header: string): void {
-  if (lines.length) void flush(true)
-  lines = [header]
-  msg = null
+  closeTurn()
+  turn = { lines: [header], msg: null, closedAt: 0 }
   schedule()
 }
+function closeTurn(): void {
+  if (!turn) return
+  const t = turn
+  t.closedAt = Date.now()
+  last = t
+  turn = null
+  write(t)
+}
 function add(line: string): void {
-  if (!lines.length) lines = [`**${hhmm(Date.now())}**`]
-  lines.push(line)
-  schedule()
+  // a late event (e.g. "promise kept") right after a turn closed belongs to that turn
+  const t = turn ?? (last && Date.now() - last.closedAt < 30000 ? last : null)
+  if (!t) { turn = { lines: [`**${hhmm(Date.now())}**`, line], msg: null, closedAt: 0 }; schedule(); return }
+  t.lines.push(line)
+  if (t === turn) schedule(); else write(t)
 }
 function schedule(): void {
   if (flushTimer) return
-  flushTimer = setTimeout(() => { flushTimer = null; void flush(false) }, 1200)
+  flushTimer = setTimeout(() => { flushTimer = null; if (turn) write(turn) }, 1200)
 }
-function flush(final: boolean): Promise<unknown> {
-  const snapshot = lines.slice()
-  const current = msg
-  if (final) { lines = []; msg = null }
+/** Serialised: one Discord message per turn, created once, then edited. */
+function write(t: Turn): void {
   chain = chain.then(async () => {
-    if (!thread || !snapshot.length) return
-    let body = snapshot.join('\n')
+    if (!thread || !t.lines.length) return
+    let body = t.lines.join('\n')
     if (body.length > MAX) body = body.slice(0, 400) + '\n…\n' + body.slice(-(MAX - 420))
     try {
-      if (current) await current.edit(body)
-      else { const m = await thread.send({ content: body, allowedMentions: { parse: [] } }); if (!final) msg = m }
+      if (t.msg) await t.msg.edit(body)
+      else t.msg = await thread.send({ content: body, allowedMentions: { parse: [] } })
     } catch (e) { log('activity mirror: post failed:', String(e).slice(0, 120)) }
   })
-  return chain
 }
 
 function onEvent(ev: string, d: Record<string, unknown>, ts: number): void {
@@ -72,7 +79,6 @@ function onEvent(ev: string, d: Record<string, unknown>, ts: number): void {
       const tools = (d.tools as string[] | undefined) ?? []
       const r = clip(d.reasoning, 220)
       if (r) add(`💭 _${r}_`)
-      if (!tools.length && d.text) add(`🗣️ ${clip(d.text, 500)}`)
       break
     }
     case 'tool': {
@@ -81,15 +87,16 @@ function onEvent(ev: string, d: Record<string, unknown>, ts: number): void {
       add(`🔧 \`${d.name}\` ${a} → ${clip(d.result, 110)} _(${d.ms} ms)_`)
       break
     }
-    case 'turn_done': add(`✅ done in ${Math.round(Number(d.ms ?? 0) / 100) / 10}s${d.superseded ? ' (superseded)' : ''}`); void flush(true); break
-    case 'turn_skipped': add('🤫 skipped (not worth interrupting)'); void flush(true); break
+    case 'turn_done': if (d.reply) add(`🗣️ ${clip(d.reply, 700)}`); add(`✅ done in ${Math.round(Number(d.ms ?? 0) / 100) / 10}s${d.superseded ? ' (superseded)' : ''}`); closeTurn(); break
+    case 'turn_skipped': add('🤫 skipped (not worth interrupting)'); closeTurn(); break
     case 'turn_aborted': add(`⛔ aborted (${d.why})`); break
     case 'barge_in': add('✋ you cut in'); break
     case 'commitment_recorded': add(`📌 promise tracked: ${clip(d.what, 160)}`); break
     case 'commitment_done': add(`☑️ promise kept: ${clip(d.what, 160)}`); break
-    case 'selftask_created': newTurn(`**${hhmm(ts)} · 🧵 background task started**\n> ${clip(d.goal, 200)}`); void flush(true); break
-    case 'selftask_done': case 'selftask_failed': newTurn(`**${hhmm(ts)} · 🧵 background task ${ev === 'selftask_done' ? 'finished' : 'failed'}**`); void flush(true); break
-    case 'away_report': newTurn(`**${hhmm(ts)} · 🌙 away report delivered** (${d.items} item(s))`); void flush(true); break
+    case 'commitment_waiting': add(`⏳ not ready yet - still tracking: ${clip(d.what, 160)}`); break
+    case 'selftask_created': newTurn(`**${hhmm(ts)} · 🧵 background task started**\n> ${clip(d.goal, 200)}`); closeTurn(); break
+    case 'selftask_done': case 'selftask_failed': newTurn(`**${hhmm(ts)} · 🧵 background task ${ev === 'selftask_done' ? 'finished' : 'failed'}**`); closeTurn(); break
+    case 'away_report': newTurn(`**${hhmm(ts)} · 🌙 away report delivered** (${d.items} item(s))`); closeTurn(); break
   }
 }
 
