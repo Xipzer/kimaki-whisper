@@ -94,6 +94,23 @@ Her original Kokoro `af_heart` voice cannot be loaded into Kyutai. Getting it
 back = Qwen3-TTS-Base voice clone from a Kokoro sample (planned, `TtsEngine`
 swap-in).
 
+## 4b. Autonomy: promises, away duty, activity mirror
+
+- **Promises are tracked.** When she says "I'll tell you when X lands", an aux
+  brain call records it in `workspace/commitments.json` (what, thread, due).
+  It fires a `COMMITMENT DUE` turn when that thread moves (watcher/change feed)
+  or its time comes; "still not finished" keeps it open; 10 attempts -> "gave up"
+  in the away report. She can list/drop them with the `commitments` tool.
+- **Away duty.** With you out of voice she keeps firing due promises and
+  collects agents she spawned. Replies go to `workspace/away-log.json`.
+- **Away report.** On your next join the greeting carries the away log: a short
+  rundown of what she did, what's open, what needs you.
+- **Autonomy rules.** `workspace/autonomy.json` `askFirst` (default empty = full
+  authority). Change by voice via the `autonomy_rules` tool.
+- **Activity mirror.** Locked thread "Wendy activity (read-only)" in her channel
+  (`workspace/activity.json`): one live-edited message per turn - heard, reasoning,
+  tool calls + results, reply. She never reads it.
+
 ## 5. Config files
 
 | File | Travels between nodes? | Holds |
