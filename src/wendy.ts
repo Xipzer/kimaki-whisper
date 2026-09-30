@@ -547,7 +547,17 @@ async function executeToolInner(name: string, args: Record<string, unknown>): Pr
 type Msg = { role: string; content: string | null; tool_calls?: unknown[]; tool_call_id?: string; name?: string }
 const history: Msg[] = (() => {
   if (process.env.WENDY_TEST) return []
-  try { return JSON.parse(fs.readFileSync(path.join(workspaceDir(), 'history.json'), 'utf-8')) as Msg[] } catch { return [] }
+  try {
+    // Compact on load: older builds stored long per-event instructions and the
+    // per-turn context in every message (71k chars -> 13k once compacted).
+    const h = JSON.parse(fs.readFileSync(path.join(workspaceDir(), 'history.json'), 'utf-8')) as Msg[]
+    return h.map((m) => typeof m.content !== 'string' ? m : { ...m, content: m.content
+      .replace(/\n\n\[context for this turn - not spoken by the owner\][\s\S]*$/, '')
+      .replace(/^\[BACKGROUND UPDATE - this is NOT the owner speaking\. Results from parallel work just arrived:\]\n([\s\S]*?)\n\[Tell the owner briefly[\s\S]*$/, '[BACKGROUND UPDATE - this is NOT the owner speaking - rules: EVENT RULES > BACKGROUND UPDATE]\n$1')
+      .replace(/^\[The owner joined moments ago and this is his FIRST real input[^\]]*\]\n/, '[FIRST INPUT AFTER JOIN - rules: EVENT RULES > FIRST INPUT]\n')
+      .replace(/\[Context - updates queued while you were quiet or the owner was away \(each tagged HIGH\/MED\/LOW\): ([\s\S]*?)\. You may have offered a catch-up\.[\s\S]*?no spillover into other updates unless asked\.\]/, '[QUEUED UPDATES - rules: EVENT RULES > QUEUED UPDATES] $1]')
+      .replace(/^\[The owner just joined voice\. Greet them[^\]]*\]/, '[OWNER JOINED VOICE - rules: EVENT RULES > JOIN]') })
+  } catch { return [] }
 })()
 const SLOW_TOOLS = new Set(['lookup_thread', 'read_session', 'search_sessions', 'ask_thread', 'send_to_session', 'dispatch_task', 'spawn_agent', 'fetch_reply', 'list_recent_sessions'])
 const READ_ONLY_TOOLS = new Set(['lookup_thread', 'read_session', 'spawns_status', 'recall', 'search_sessions', 'list_recent_sessions', 'fetch_reply', 'brain_health', 'owner_autonomy_status'])
