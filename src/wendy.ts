@@ -559,11 +559,17 @@ function persistHistory(): void {
 }
 
 /** Prefill the stable prefix so the first real turn hits the KV cache. Cheap (1 token out). */
+function systemPrefix(memoryBlock: string): string {
+  const routes = loadRoutes()
+  const routesBlock = Object.keys(routes).length ? '\n\nKNOWN ROUTES (check here FIRST before searching):\n' + Object.entries(routes).map(([n, r]) => `- ${n} → ${r.kind} ${r.id} (${r.note})`).join('\n') : ''
+  const guilds = clientRef ? [...clientRef.guilds.cache.values()].map((g) => g.name) : []
+  return SYSTEM_PROMPT + memoryBlock + routesBlock + nodeBlock(indexProjectCount, guilds)
+}
 export async function warmBrain(why: string): Promise<void> {
   if (!brainUrl()) return
   let memoryBlock = ''
   try { const md = fs.readFileSync(path.join(workspaceDir(), 'memory.md'), 'utf-8').trim(); if (md) memoryBlock = `\n\nSTANDING MEMORY (auto-consolidated - trust it):\n${md.slice(0, 1800)}` } catch {}
-  const messages: Msg[] = [{ role: 'system', content: SYSTEM_PROMPT + memoryBlock }, ...history]
+  const messages: Msg[] = [{ role: 'system', content: systemPrefix(memoryBlock) }, ...history]
   repairHistory(messages)
   const t0 = Date.now()
   if (busy) return
@@ -582,8 +588,8 @@ export async function think(userText: string, onSentence?: (s: string) => void):
   // prefix every turn and the KV cache only survives up to the system prompt.
   // Also evict on SIZE: the brain slot holds 49k tokens and big tool results made
   // the prompt 40k (measured) - one more long turn would overflow the slot.
-  if (history.length > HISTORY_MAX || (lastPromptTokens > 36000 && history.length > HISTORY_KEEP)) {
-    const evicted = history.splice(0, history.length - HISTORY_KEEP)
+  if (history.length > HISTORY_MAX || (lastPromptTokens > 24000 && history.length > 12)) {
+    const evicted = history.splice(0, history.length - (lastPromptTokens > 24000 ? 12 : HISTORY_KEEP))
     evictionBuffer.push(...evicted.filter((m) => {
       const c = String(m.content ?? '')
       return c && c !== '[background update delivered]' && !c.startsWith('[BACKGROUND UPDATE')
@@ -602,19 +608,15 @@ export async function think(userText: string, onSentence?: (s: string) => void):
     const md = fs.readFileSync(path.join(workspaceDir(), 'memory.md'), 'utf-8').trim()
     if (md) memoryBlock = `\n\nSTANDING MEMORY (auto-consolidated - trust it):\n${md.slice(0, 1800)}`
   } catch {}
-  const routes = loadRoutes()
   const turnLocal: string[] = []
-  if (Object.keys(routes).length) turnLocal.push('KNOWN ROUTES (check here FIRST before searching):\n' + Object.entries(routes).map(([n, r]) => `- ${n} → ${r.kind} ${r.id} (${r.note})`).join('\n'))
   const eps = searchJournal(userText, 2)
   if (eps.length) turnLocal.push(`POSSIBLY RELEVANT PAST MOMENTS:\n${eps.map((e) => `- [${new Date(e.ts).toISOString().slice(0, 10)}] ${e.s}`).join('\n')}`)
-  const guilds = clientRef ? [...clientRef.guilds.cache.values()].map((g) => g.name) : []
-  turnLocal.push(nodeBlock(indexProjectCount, guilds).trim())
   // Stored AS SENT: this model is hybrid-attention, so llama.cpp can only reuse
   // the cache up to a checkpoint inside the previous prompt. Any later edit to a
   // message it already saw (like dropping this context next turn) rolls the cache
   // back to an early checkpoint - measured: 13,799 of ~21k cached every turn.
-  history[history.length - 1] = { role: 'user', content: `${userText}\n\n[context for this turn - not spoken by the owner]\n${turnLocal.join('\n\n')}` }
-  const messages: Msg[] = [{ role: 'system', content: SYSTEM_PROMPT + memoryBlock }, ...history]
+  if (turnLocal.length) history[history.length - 1] = { role: 'user', content: `${userText}\n\n[context for this turn - not spoken by the owner]\n${turnLocal.join('\n\n')}` }
+  const messages: Msg[] = [{ role: 'system', content: systemPrefix(memoryBlock) }, ...history]
   // Newer llama.cpp builds hard-reject consecutive assistant messages (400:
   // "Cannot have 2 or more assistant messages at the end of the list").
   // History can legitimately contain them (superseded turns, error acks) -
@@ -1897,7 +1899,7 @@ setInterval(() => {
   const events = await refreshQueuedItems(events0)
   log(`wendy: conversation idle - delivering ${events.length} background event(s)`)
   diag('bg_delivery', { count: events.length })
-  void runTurn(`[BACKGROUND UPDATE - this is NOT the owner speaking. Results from parallel work just arrived:]\n${events.join('\n')}\n[Tell the owner briefly and naturally, like a colleague mentioning news at a pause. Prioritize if several. Anything you ALREADY told the owner this conversation, or anything not worth interrupting for: reply with exactly SKIP (nothing else) - never say you are staying quiet, never restate old news in new words. STALENESS: each item carries [queued HH:MMZ src:ses_...]; items that had aged carry a '-> LIVE NOW:' line fetched THIS SECOND - that is the current state, speak from it, never from the older note above it. TELEGRAM items carry <tg:ChatName> and, if they had aged, a LIVE NOW line with the chat as of this second - speak from that. Never speak the <tg:...> marker. Never speak the bracketed metadata. IDENTITY: updates may describe YOU in the third person ("Wendy", "the user", "the assistant") because agents write about you - you are still Wendy speaking directly to your owner. Never adopt an outside-observer voice, never say "you should be able to X" about YOUR OWN capabilities, and never talk about yourself as a third party.]`)
+  void runTurn(`[BACKGROUND UPDATE - this is NOT the owner speaking - rules: EVENT RULES > BACKGROUND UPDATE]\n${events.join('\n')}`)
   })()
 }, 5000).unref()
 function playerActive(): boolean { return loop?.speaking ?? false }
@@ -1982,13 +1984,13 @@ async function runTurn(text: string): Promise<void> {
       // Fresh join and he is TALKING: his first words are his agenda. Serve
       // them clean - the queue stays held and injects on a later turn/lull.
       diag('join_priority_clean_turn', {})
-      text = `[The owner joined moments ago and this is his FIRST real input - answer EXACTLY what he says and nothing else. Do NOT deliver, mention, or allude to any queued updates this turn unless he explicitly asks for them.]\n${text}`
+      text = `[FIRST INPUT AFTER JOIN - rules: EVENT RULES > FIRST INPUT]\n${text}`
     } else if ((attention.has('held') || (dnd && (attention.has('live') || attention.has('digest')))) && !text.startsWith('[') && !isTrailingFragment(text)) {
       const held = await refreshQueuedItems([...attention.take('held'), ...(dnd ? [...attention.take('live'), ...attention.take('digest')] : [])])
       lastDeliveredAt = Date.now()
       const saidYes = Date.now() - lastDigestAsk < 90000 && isAffirmative(text)
       if (saidYes) diag('updates_accepted', { n: held.length })
-      text = `${saidYes ? '[He just said YES to your offer of updates - DELIVER THEM NOW, highs first, concise. This is not a false start.]\n' : ''}[Context - updates queued while you were quiet or the owner was away (each tagged HIGH/MED/LOW): ${held.join(' | ')}. You may have offered a catch-up. Deliver HIGH items first, then MED; skip LOW unless they want everything. Items carry [queued HH:MMZ src:ses_...] - items that had aged carry a '-> LIVE NOW:' line fetched THIS SECOND - that line is the truth, speak from it and ignore the older note above it; items without one were fresh at delivery. TELEGRAM items carry <tg:ChatName> and, if they had aged, a LIVE NOW line with the chat as of this second - speak from that. Never speak the bracketed metadata or the <tg:...> marker. Updates may describe YOU in third person ("Wendy", "the assistant") - you are still Wendy speaking directly to your owner; never slip into narrating yourself from the outside. NO editorial framing or preamble ("two things worth knowing", "all polish, nothing structural") - open directly with the first item's substance; verdicts only if asked. Dismissal rule: ONLY treat their words as declining updates if you ACTUALLY offered updates and they are clearly responding to that offer - if you never offered, their words are about something else entirely: just answer them (the queued items are silent context, not the topic). A genuine dismissal -> snooze_updates and drop the subject instantly. If the owner wants everything, deliver it concisely. If they ask for the most urgent or most recent only, REASON over the list yourself, pick the single most important item (breakages and blockers beat progress notes; newest beats oldest), deliver just that one, and stop - no extra digging, no spillover into other updates unless asked.]\n${text}`
+      text = `${saidYes ? '[He said YES to your offer of updates - deliver them now.]\n' : ''}[QUEUED UPDATES - rules: EVENT RULES > QUEUED UPDATES] ${held.join(' | ')}]\n${text}`
     }
     if (supersededAnswer && Date.now() - supersededAnswer.at < 120000) {
       text = `${text}\n[note: your previous reply was cut off before he heard it: "${supersededAnswer.text}". Answer what he just said; fold in anything from that reply that still matters.]`
@@ -2178,7 +2180,7 @@ async function joinAndServe(channel: VoiceBasedChannel, userId: string): Promise
   lastGreetedAt = Date.now()
   const totalHeld = attention.count('held')
   const hi = attention.highCount('held')
-  void runTurn(`[The owner just joined voice. Greet them briefly and naturally - ONE short line, warm but efficient, no jokes or bits. Vary it; never a stock phrase.${ledger.groundTruth()} EXCEPTION: if the recent history shows a restart interrupted them mid-speech, acknowledge that first and respond to what they had been saying.${totalHeld ? ` ${hi ? `One queued update is HIGH priority - mention that single fact casually (no contents yet).` : `Updates are queued but NONE are high priority - do NOT mention the queue, counts, or offer a rundown; he knows he can ask. Just greet.`}` : ''}]`)
+  void runTurn(`[OWNER JOINED VOICE - rules: EVENT RULES > JOIN]${ledger.groundTruth()}${totalHeld ? ` ${hi ? `One queued update is HIGH priority - mention that single fact casually (no contents yet).` : `Updates are queued but NONE are high priority - do NOT mention the queue, counts, or offer a rundown; he knows he can ask. Just greet.`}` : ''}]`)
 }
 
 function leave(): void {
