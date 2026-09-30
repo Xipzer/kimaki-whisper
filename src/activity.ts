@@ -72,7 +72,7 @@ function onEvent(ev: string, d: Record<string, unknown>, ts: number): void {
   switch (ev) {
     case 'owner_said': {
       const t = String(d.text ?? '')
-      newTurn(`**${hhmm(ts)} · ${kindOf(t)}**\n> ${clip(stripTags(t), 300)}`)
+      newTurn(`**${hhmm(ts)} · ${kindOf(t)}**\n> ${clip(stripTags(t), 700)}`)
       break
     }
     case 'brain': {
@@ -90,6 +90,7 @@ function onEvent(ev: string, d: Record<string, unknown>, ts: number): void {
     case 'turn_done': if (d.reply) add(`🗣️ ${clip(d.reply, 700)}`); add(`✅ done in ${Math.round(Number(d.ms ?? 0) / 100) / 10}s${d.superseded ? ' (superseded)' : ''}`); closeTurn(); break
     case 'turn_skipped': add('🤫 skipped (not worth interrupting)'); closeTurn(); break
     case 'turn_aborted': add(`⛔ aborted (${d.why})`); break
+    case 'reply_dropped_owner_continued': add('↩️ dropped unspoken - you were still talking; merged into your next words'); closeTurn(); break
     case 'barge_in': add('✋ you cut in'); break
     case 'commitment_recorded': add(`📌 promise tracked: ${clip(d.what, 160)}`); break
     case 'commitment_done': add(`☑️ promise kept: ${clip(d.what, 160)}`); break

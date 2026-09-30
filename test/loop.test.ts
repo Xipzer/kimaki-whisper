@@ -50,3 +50,17 @@ test('a second reply while the first is still playing is appended, not swapped i
   assert.equal(plays.length, 0, 'no new resource swapped onto the player')
   loop.stop()
 })
+
+test('a thinking pause after an unfinished phrase does not end his turn', async () => {
+  const got: string[] = []
+  const loop = new VoiceLoop(null, fakePlayer() as never, 'o', { gate: () => ({ silenced: false, nameOnly: false, expectingAnswer: false }), onUtterance: (t) => got.push(t) }, () => () => {})
+  const l = loop as unknown as { onWord: (w: string, t: number) => void; commit: (why: string) => void }
+  for (const w of ['if', "I'm", 'guesstimating', 'correctly.', 'So', 'in']) l.onWord(w, 0)
+  l.commit('vad')
+  assert.equal(got.length, 0, '"...So in" is held, not committed')
+  for (const w of ['calculate', 'the', 'delta.']) l.onWord(w, 0)
+  l.commit('vad')
+  assert.equal(got.length, 1)
+  assert.match(got[0], /So in calculate the delta\.$/)
+  loop.stop()
+})

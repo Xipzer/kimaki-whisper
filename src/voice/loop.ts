@@ -13,6 +13,8 @@ import { diag } from '../diag.js'
 
 const BACKCHANNEL = /^(yeah|yep|yes|ok(ay)?|mhm+|uh-?huh|right|true|sure|lol|haha+|nice|cool|got it|go on|i see|wow|no|nah)[.!,\s]*$/i
 const WAKE = /\bw[ei]+nd[iy]e?\b/i
+// ends on a connective / preposition / article / filler / comma: the sentence is not finished
+const INCOMPLETE_END = /(,|\b(so|and|but|or|because|cause|like|um|uh|er|in|on|at|to|of|for|with|from|into|about|the|a|an|my|your|our|their|this|that|these|those|is|are|was|were|be|which|who|if|when|then|than|basically|actually|just|also|maybe|i|we|you|it's|i'm|i've|i'd))\s*$/i
 
 export type LoopHooks = {
   onBargeIn?: () => void
@@ -137,9 +139,17 @@ export class VoiceLoop {
     // 1.4 s of no new words is the fallback when the VAD never fires (owner trails off)
     this.eotTimer = setTimeout(() => { if (this.utter.length) this.commit(this.eotWhy) }, ms)
   }
+  private holdSince = 0
   private commit(why: 'vad' | 'timeout'): void {
     if (this.eotTimer) { clearTimeout(this.eotTimer); this.eotTimer = null }
     const text = this.utter.join(' ').replace(/\s+([.,!?])/g, '$1').trim()
+    // A thinking pause mid-sentence ("...correctly. So in" + 2 s) is not the end of
+    // his turn. Unfinished endings get up to 4 s more; any new word resets it.
+    if (INCOMPLETE_END.test(text) && !/[.?!]$/.test(text)) {
+      if (!this.holdSince) this.holdSince = Date.now()
+      if (Date.now() - this.holdSince < 4000) { diag('eot_held_incomplete', { tail: text.slice(-40) }); this.armEot(1000, why); return }
+    }
+    this.holdSince = 0
     const words = this.utter.length
     this.utter = []
     this.utterAt = []
