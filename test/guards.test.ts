@@ -138,3 +138,16 @@ test('unblock and resume prompts keep the same task, plan and format', async () 
     assert.doesNotMatch(p, /bullet|numbered parts|stop and wait|summar(y|ise) it|local model|switch/i)
   }
 })
+
+test('stuckRun picks the first user message of the failed run and flags patches', async () => {
+  const { stuckRun } = await import('../dist/senses/filterBlock.js')
+  const M = (id: string, role: string, err?: string, parts: Array<{ type: string; text?: string }> = []) => ({ info: { id, role, error: err ? { name: err } : undefined }, parts })
+  const base = [M('m1', 'user', undefined, [{ type: 'text', text: 'task' }]), M('m2', 'assistant', undefined, [{ type: 'text', text: 'good state' }])]
+  const r = stuckRun([...base, M('m3', 'user', undefined, [{ type: 'text', text: 'go on' }]), M('m4', 'assistant', 'ContentFilterError'), M('m5', 'assistant', 'ContentFilterError')])!
+  assert.equal(r.revertPoint, 'm3'); assert.equal(r.removed, 3); assert.equal(r.failed, 2); assert.equal(r.hasPatches, false); assert.match(r.lastGoodText, /good state/)
+  const p = stuckRun([...base, M('m3', 'user'), M('m4', 'assistant', 'ContentFilterError', [{ type: 'patch' }])])!
+  assert.equal(p.hasPatches, true)
+  const noUser = stuckRun([...base, M('m3', 'assistant', 'ContentFilterError')])!
+  assert.equal(noUser.revertPoint, null, 'failure inside a turn with good steps: no revert')
+  assert.equal(stuckRun(base), null)
+})

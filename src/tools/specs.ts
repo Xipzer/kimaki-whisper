@@ -269,6 +269,14 @@ export const TOOLS = [
   {
     type: 'function',
     function: {
+      name: 'recover_thread',
+      description: 'Deterministic stuck-thread recovery: finds the run of failed turns at the end, reverts to the first user message of that run (refuses if those turns carry file patches), resends ONE brief (last confirmed state + same task, same model), then verifies ~90 s later. dry_run:true reports the plan without changing anything.',
+      parameters: { type: 'object', properties: { session_id: { type: 'string' }, dry_run: { type: 'boolean' } }, required: ['session_id'] },
+    },
+  },
+  {
+    type: 'function',
+    function: {
       name: 'guard_thread',
       description: 'Auto-unblock a thread: from now on every content-filter block on it is pushed past automatically within ~20 s, forever, without being asked again (it is told to continue the same task, same plan and format, rewording only what tripped the filter; transient provider errors resumed the same way; never changes its model). Use when the owner asks you to tail/babysit/keep unblocking a thread. on:false stops it. Your own spawned agents are guarded automatically.',
       parameters: { type: 'object', properties: { session_id: { type: 'string' }, on: { type: 'boolean', description: 'false to stop guarding' } }, required: ['session_id'] },

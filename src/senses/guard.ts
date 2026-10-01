@@ -8,7 +8,7 @@
 // A guard stays on until the owner (or Wendy) turns it off.
 import fs from 'node:fs'
 import path from 'node:path'
-import { threadHealth } from './filterBlock.js'
+import { threadHealth, listMessages, stuckRun, opencodeBase, sessionDir, type StuckRun } from './filterBlock.js'
 
 export type Guard = { since: number; attempts: number; handledBlockAt: number | null; handledErrorAt?: number | null; resumes?: number }
 export type GuardDeps = {
@@ -77,10 +77,46 @@ export class Guards {
         g.attempts++
         g.handledBlockAt = h.filter.lastBlockAt
         this.save()
-        const out = await this.d.send(id, unblockPrompt(g.attempts))
-        this.d.diag('guard_unblock', { sessionId: id, attempt: g.attempts, ok: !out.startsWith('ERROR') })
+        // one revert + brief per block; verification runs in the background
+        void recoverThread(id, this.d.send).then(async (rec) => {
+          if (rec.action === 'none' && !rec.ok) await this.d.send(id, unblockPrompt(g.attempts))
+          this.d.diag('guard_unblock', { sessionId: id, attempt: g.attempts, action: rec.action, ok: rec.ok, note: rec.note.slice(0, 200) })
+          if (rec.run?.hasPatches) this.d.notify(id, `is stuck but its failed turns carry file patches - not reverted automatically (${rec.note.slice(0, 160)})`)
+        })
         this.save()
       }
     } finally { this.running = false }
   }
+}
+
+export type Recovery = { ok: boolean; action: 'reverted+brief' | 'brief' | 'none'; run: StuckRun | null; note: string }
+export function recoveryBrief(run: StuckRun): string {
+  return [
+    `Your last ${run.failed} turn(s) failed (${run.errors.join(', ')}) and ${run.revertPoint ? 'were rolled back' : 'did not complete'}.`,
+    run.lastGoodText ? `Last confirmed state:\n${run.lastGoodText}` : '',
+    run.partialFiles.length ? `Check these files - a write may be incomplete: ${run.partialFiles.join(', ')}.` : '',
+    run.briefTask ? `Task (unchanged):\n${run.briefTask}` : 'Task: unchanged - continue the work you were doing.',
+    'Same plan, same output format. Plain wording.',
+  ].filter(Boolean).join('\n\n')
+}
+/** Inspect, revert to the first user message of the failed run, resend one brief, verify. */
+export async function recoverThread(sessionId: string, send: (id: string, prompt: string) => Promise<string>, opts: { dryRun?: boolean; verifyMs?: number } = {}): Promise<Recovery> {
+  const msgs = await listMessages(sessionId)
+  if (!msgs) return { ok: false, action: 'none', run: null, note: 'cannot reach the OpenCode server or session' }
+  const run = stuckRun(msgs)
+  if (!run) return { ok: true, action: 'none', run: null, note: 'no failed turns at the end - not stuck' }
+  const canRevert = !!run.revertPoint && !run.hasPatches
+  const plan = `${run.failed} failed turn(s) [${run.errors.join(', ')}]; revert point ${run.revertPoint ?? 'none'} removes ${run.removed} message(s)${run.hasPatches ? ' - includes FILE PATCHES, not auto-reverted' : ''}${run.partialFiles.length ? `; partial files: ${run.partialFiles.join(', ')}` : ''}`
+  if (opts.dryRun) return { ok: true, action: 'none', run, note: `dry run: ${plan}` }
+  if (canRevert) {
+    const base = await opencodeBase(); const dir = await sessionDir(sessionId)
+    const r = base && dir ? await fetch(`${base}/session/${sessionId}/revert?directory=${encodeURIComponent(dir)}`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ messageID: run.revertPoint }) }).catch(() => null) : null
+    if (!r?.ok) return { ok: false, action: 'none', run, note: `revert failed (${r?.status ?? 'no server'}): ${plan}` }
+  }
+  const out = await send(sessionId, recoveryBrief(run))
+  if (out.startsWith('ERROR')) return { ok: false, action: canRevert ? 'reverted+brief' : 'brief', run, note: `brief not delivered: ${out.slice(0, 120)}` }
+  await new Promise((res) => setTimeout(res, opts.verifyMs ?? 90000))
+  const h = await threadHealth(sessionId)
+  const ok = !!h && h.status !== 'blocked' && h.status !== 'errored'
+  return { ok, action: canRevert ? 'reverted+brief' : 'brief', run, note: `${plan}; after ${Math.round((opts.verifyMs ?? 90000) / 1000)}s: ${h?.status ?? 'unknown'}` }
 }

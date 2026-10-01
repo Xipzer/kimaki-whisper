@@ -125,3 +125,66 @@ export function describeHealth(h: ThreadHealth): string {
     : 'IDLE: finished its last turn.'
   return `${head} Last activity ${ago}. Model ${h.model ?? '?'}${h.contextTokens ? `, context ~${Math.round(h.contextTokens / 1000)}k tokens` : ''}.`
 }
+
+// ── recovery analysis via the OpenCode server API ──
+import { execFileSync } from 'node:child_process'
+export type ApiMsg = { info: { id: string; role: string; error?: { name?: string }; modelID?: string; providerID?: string }; parts: Array<{ type: string; text?: string; tool?: string; state?: { status?: string; input?: { filePath?: string } } }> }
+let apiBase: string | null = null
+export async function opencodeBase(): Promise<string | null> {
+  if (apiBase && (await fetch(`${apiBase}/doc`, { signal: AbortSignal.timeout(2000) }).then((r) => r.ok).catch(() => false))) return apiBase
+  apiBase = null
+  let out = ''
+  try { out = execFileSync('ss', ['-ltnpH'], { encoding: 'utf-8' }) } catch { return null }
+  for (const m of out.matchAll(/127\.0\.0\.1:(\d+)\s.*"opencode"/g)) {
+    const b = `http://127.0.0.1:${m[1]}`
+    if (await fetch(`${b}/doc`, { signal: AbortSignal.timeout(2000) }).then((r) => r.ok).catch(() => false)) return (apiBase = b)
+  }
+  return null
+}
+export async function sessionDir(sessionId: string): Promise<string | null> {
+  const db = await open()
+  if (!db) return null
+  try { return String(db.prepare('SELECT directory FROM session WHERE id = ?').all(sessionId)[0]?.directory ?? '') || null } catch { return null } finally { db.close() }
+}
+export async function listMessages(sessionId: string, limit = 60): Promise<ApiMsg[] | null> {
+  const base = await opencodeBase(); const dir = await sessionDir(sessionId)
+  if (!base || !dir) return null
+  const r = await fetch(`${base}/session/${sessionId}/message?directory=${encodeURIComponent(dir)}&limit=${limit}`, { signal: AbortSignal.timeout(15000) }).catch(() => null)
+  return r?.ok ? ((await r.json()) as ApiMsg[]) : null
+}
+
+export type StuckRun = {
+  failed: number                // failed assistant turns at the end
+  errors: string[]              // their error names
+  revertPoint: string | null    // first USER message of the failed run
+  removed: number               // messages a revert would remove
+  hasPatches: boolean           // removed messages carry file patches
+  partialFiles: string[]        // write/edit calls that never completed
+  lastGoodText: string          // tail of the last successful assistant text
+  briefTask: string             // the user request being retried
+}
+const isFail = (m: ApiMsg): boolean => m.info.role === 'assistant' && !!m.info.error && m.info.error.name !== 'MessageAbortedError'
+/** msgs oldest-first. */
+export function stuckRun(msgs: ApiMsg[]): StuckRun | null {
+  let i = msgs.length - 1
+  while (i >= 0 && (isFail(msgs[i]) || msgs[i].info.role === 'user' || (msgs[i].info.error?.name === 'MessageAbortedError'))) i--
+  const run = msgs.slice(i + 1)
+  const failed = run.filter(isFail)
+  if (!failed.length) return null
+  const firstUser = run.find((m) => m.info.role === 'user')
+  const from = firstUser ? msgs.indexOf(firstUser) : -1
+  const removedMsgs = from >= 0 ? msgs.slice(from) : []
+  const good = msgs.slice(0, i + 1).reverse().find((m) => m.info.role === 'assistant' && !m.info.error && m.parts.some((p) => p.type === 'text' && p.text?.trim()))
+  const goodText = good?.parts.filter((p) => p.type === 'text').map((p) => p.text ?? '').join('\n').trim() ?? ''
+  const task = firstUser?.parts.filter((p) => p.type === 'text').map((p) => p.text ?? '').join('\n').trim() ?? ''
+  return {
+    failed: failed.length,
+    errors: [...new Set(failed.map((m) => m.info.error?.name ?? '?'))],
+    revertPoint: firstUser?.info.id ?? null,
+    removed: removedMsgs.length,
+    hasPatches: removedMsgs.some((m) => m.parts.some((p) => p.type === 'patch')),
+    partialFiles: [...new Set(run.flatMap((m) => m.parts.filter((p) => p.type === 'tool' && /write|edit/i.test(p.tool ?? '') && p.state?.status !== 'completed').map((p) => p.state?.input?.filePath ?? '').filter(Boolean)))],
+    lastGoodText: goodText.slice(-700),
+    briefTask: task.slice(0, 1500),
+  }
+}

@@ -23,7 +23,7 @@ import { Client as DClient, GatewayIntentBits } from 'discord.js'
 import { VoiceLoop } from './voice/loop.js'
 import { initActivity } from './activity.js'
 import { filterState, blockedSessions, describe as describeFilter, threadHealth, describeHealth } from './senses/filterBlock.js'
-import { Guards } from './senses/guard.js'
+import { Guards, recoverThread } from './senses/guard.js'
 import { execFile, spawn } from 'node:child_process'
 import { loadConfig, log } from './config.js'
 import { diag, pruneDiagnostics } from './diag.js'
@@ -466,6 +466,13 @@ async function executeToolInner(name: string, args: Record<string, unknown>): Pr
     const h = await threadHealth(sid)
     if (!h) return 'ERROR: cannot read the OpenCode database on this machine'
     return `${describeHealth(h)}${guards.has(sid) ? ' GUARDED: you auto-unblock it - no action needed from you.' : ''}`
+  }
+  if (name === 'recover_thread') {
+    const sid = String(args.session_id ?? '')
+    if (!isSessionId(sid)) return 'ERROR: need a ses_ id (lookup_thread first)'
+    const rec = await recoverThread(sid, sendKeepModel, { dryRun: args.dry_run === true })
+    diag('thread_recovered', { sessionId: sid, action: rec.action, ok: rec.ok, note: rec.note.slice(0, 200) })
+    return `${rec.ok ? 'OK' : 'NOT RECOVERED'} (${rec.action}): ${rec.note}`
   }
   if (name === 'guard_thread') {
     const sid = String(args.session_id ?? '')
@@ -2077,9 +2084,13 @@ async function fireCommitment(c: Commitment): Promise<void> {
   } else if (again?.status === 'done') diag('commitment_done', { what: c.what, attempts: c.attempts })
   else if (again && again.attempts >= 10) { again.status = 'expired'; saveCommitments(); awayLog.push({ at: Date.now(), kind: 'gave up', trigger: c.what, reply: 'still not resolved after 10 attempts - needs you' }); saveAway() }
 }
+function sendKeepModel(sid: string, prompt: string): Promise<string> {
+  const keep = modelPins.pinned(sid)?.model ?? currentModel(sid)
+  return runKimaki(['send', '--session', sid, ...(keep ? ['--model', keep] : []), '--prompt', prompt], 60000)
+}
 const guards = new Guards({
   dir: workspaceDir(),
-  send: (sid, prompt) => { const keep = modelPins.pinned(sid)?.model ?? currentModel(sid); return runKimaki(['send', '--session', sid, ...(keep ? ['--model', keep] : []), '--prompt', prompt], 60000) },
+  send: sendKeepModel,
   diag,
   notify: (sid, line) => announce(`[LOW] "${threadIdent(sid)}" ${line}.`, 'digest', sid),
 })
