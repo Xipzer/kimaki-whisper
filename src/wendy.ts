@@ -416,6 +416,16 @@ async function executeToolInner(name: string, args: Record<string, unknown>): Pr
     const mdl = resolveSpawnModel(String(args.model))
     if (!mdl) return 'ERROR: unknown model - only local, opus, or fable are permitted'
     const sid = String(args.session_id ?? '')
+    // A thread keeps the model it was given. Moving work to a weaker model to get
+    // past a block trades a stall for regressions - only the owner may do that,
+    // in his own words, this turn.
+    const rank = (m: string | null | undefined): number => !m ? 0 : /opus/i.test(m) ? 3 : /fable|sonnet/i.test(m) ? 2 : 1
+    const cur = currentModel(sid)
+    const ownerAsked = new RegExp(`\\b(${mdl.alias}|switch|move|change)\\b`, 'i').test(lastOwnerUtterance) && Date.now() - lastOwnerAt < 5 * 60000
+    if (cur && rank(mdl.id) < rank(cur) && !ownerAsked) {
+      diag('model_downgrade_blocked', { id: sid, from: cur, to: mdl.alias })
+      return `BLOCKED: "${threadIdent(sid)}" runs on ${cur}; ${mdl.alias} is weaker and would regress its work. Threads stay on their designated model - to get past a content-filter block use guard_thread (rewording only). Only the owner can downgrade a thread, by asking for it himself.`
+    }
     const out = await runKimaki([
       'send', '--session', sid, '--model', mdl.id,
       '--prompt', `(Wendy switched this thread to a different model to balance compute load. Continue exactly where you left off.)`,
@@ -2094,6 +2104,8 @@ setInterval(() => {
 // half a sentence. It is dropped unspoken and his earlier words are prepended to
 // what he says next, so the brain sees the whole thought.
 let carryOver: { text: string; at: number } | null = null
+let lastOwnerUtterance = ''
+let lastOwnerAt = 0
 let turnAbort: AbortController | null = null
 let turnEntryAt = 0
 let warmAbort: AbortController | null = null
@@ -2106,6 +2118,7 @@ function abortTurn(why: string): void {
 async function runTurn(text: string): Promise<void> {
   if (draining) return
   const ownerTurn = !text.startsWith('[')
+  if (ownerTurn || text.startsWith('[FIRST INPUT')) { lastOwnerUtterance = text; lastOwnerAt = Date.now() }
   const turnEntry = Date.now()
   warmAbort?.abort()
   if (ownerTurn && !busy && carryOver && Date.now() - carryOver.at < 90000) {

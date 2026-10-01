@@ -219,7 +219,7 @@ export const TOOLS = [
     type: 'function',
     function: {
       name: 'switch_thread_model',
-      description: 'Switch an existing thread to a different model on the fly - e.g. move a thread OFF your own LLM (local) onto opus to free up your compute when you are slowing down or expect load. Only local, opus, or fable exist; NOTHING else is permitted (other local models would kill your own brain - fragile).',
+      description: 'Switch an existing thread to a different model on the fly - e.g. move a thread OFF your own LLM (local) onto opus to free up your compute when you are slowing down or expect load. Upgrades only: moving a thread to a WEAKER model (e.g. opus -> local) is blocked unless the owner asks for it himself - never use it to get past a content-filter block. Only local, opus, or fable exist; NOTHING else is permitted (other local models would kill your own brain - fragile).',
       parameters: {
         type: 'object',
         properties: {
