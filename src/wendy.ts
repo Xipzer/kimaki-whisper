@@ -22,6 +22,7 @@ import type { Client, VoiceState, VoiceBasedChannel } from 'discord.js'
 import { Client as DClient, GatewayIntentBits } from 'discord.js'
 import { VoiceLoop } from './voice/loop.js'
 import { initActivity } from './activity.js'
+import { filterState, blockedSessions, describe as describeFilter } from './senses/filterBlock.js'
 import { execFile, spawn } from 'node:child_process'
 import { loadConfig, log } from './config.js'
 import { diag, pruneDiagnostics } from './diag.js'
@@ -216,6 +217,8 @@ async function executeToolInner(name: string, args: Record<string, unknown>): Pr
       Promise.all(hits.slice(0, 4).filter((h) => { const a = threadAgeMs(h); return a !== null && a < 3600000 }).map(async (h) => { const t = await liveTailFor(h.id); if (t) liveTails.set(h.id, t) })),
       new Promise((r) => setTimeout(r, 3000)),
     ])
+    const blockedIds = new Set<string>()
+    await Promise.all(hits.slice(0, 6).map(async (h) => { const st = await filterState(h.id); if (st?.blocked) blockedIds.add(h.id) }))
     return hits.length
       ? hits.map((h) => {
           const ms = threadAgeMs(h)
@@ -236,7 +239,7 @@ async function executeToolInner(name: string, args: Record<string, unknown>): Pr
           const brief = active
             ? (liveTails.get(h.id) ? ` | LIVE NOW: ${liveTails.get(h.id)}` : '')
             : (b && briefAge < 15 * 60 * 1000 ? ` | BRIEFING (${Math.max(1, Math.round(briefAge / 60000))}m old): ${b.s.slice(0, 220)}` : '')
-          return `${nicknames[h.id] ? `[${nicknames[h.id]}] ` : ''}${h.title} - session ${h.id} (project: ${h.dir.split('/').pop()}${age})${threadLocation(h.threadId)}${sub}${brief}`
+          return `${blockedIds.has(h.id) ? '⚠ STUCK ON CONTENT FILTER (read it for details) - ' : ''}${nicknames[h.id] ? `[${nicknames[h.id]}] ` : ''}${h.title} - session ${h.id} (project: ${h.dir.split('/').pop()}${age})${threadLocation(h.threadId)}${sub}${brief}`
         }).join('\n')
       : `no matches in index${runningSpawns().length ? ` - NOTE: your running spawned agents (may not be indexed yet): ${runningSpawns().slice(-5).map((d) => `"${d.label}" = ${d.id}`).join('; ')}` : ' - try search_sessions for a deep search'}`
   }
@@ -281,7 +284,9 @@ async function executeToolInner(name: string, args: Record<string, unknown>): Pr
     if (unverified) diag('unverified_read', { id: rid })
     const out = await runKimaki(['session', 'read', String(args.session_id ?? '')], 60000, 500_000, true)
     if (out.startsWith('ERROR')) return out
-    const hdr = `[LIVE TRANSCRIPT of "${threadIdent(rid)}"${unverified ? ' - WARNING: this id did NOT come from a lookup this turn; it may be a sibling of the thread you meant. Check the title above against what the owner asked about before reporting anything from it.' : ''} - fetched seconds ago, OVERRIDES anything said earlier. VERIFY this is the thread the owner meant before reporting.]\n`
+    const fs0 = isSessionId(rid) ? await filterState(rid) : null
+    const stuck = fs0?.blocked ? `[${describeFilter(fs0)}]\n` : ''
+    const hdr = stuck + `[LIVE TRANSCRIPT of "${threadIdent(rid)}"${unverified ? ' - WARNING: this id did NOT come from a lookup this turn; it may be a sibling of the thread you meant. Check the title above against what the owner asked about before reporting anything from it.' : ''} - fetched seconds ago, OVERRIDES anything said earlier. VERIFY this is the thread the owner meant before reporting.]\n`
     if (deep) return hdr + (out.replace(/\S{400,}/g, '[attachment]').slice(-Math.min(Math.max(deep, 500), 30000)) || 'empty session')
     return hdr + (recentMessages(out, 4) || 'empty session')
   }
@@ -443,6 +448,13 @@ async function executeToolInner(name: string, args: Record<string, unknown>): Pr
     saveSelfTasks()
     diag('selftask_created', { id: t.id, goal: goal.slice(0, 100) })
     return `accepted (${t.id}) - working on it in the background; result will arrive as an update`
+  }
+  if (name === 'thread_health') {
+    const sid = String(args.session_id ?? '')
+    if (!isSessionId(sid)) return 'ERROR: need a ses_ id (lookup_thread first)'
+    const st = await filterState(sid)
+    if (!st) return 'ERROR: cannot read the OpenCode database on this machine'
+    return st.blocked ? describeFilter(st) : `not blocked${st.totalBlocks ? ` (it was blocked ${st.totalBlocks} time(s) among its last 40 messages, but has replied since)` : ''}`
   }
   if (name === 'commitments') {
     if (typeof args.drop_id === 'string' && args.drop_id) {
@@ -2041,6 +2053,17 @@ async function fireCommitment(c: Commitment): Promise<void> {
   } else if (again?.status === 'done') diag('commitment_done', { what: c.what, attempts: c.attempts })
   else if (again && again.attempts >= 10) { again.status = 'expired'; saveCommitments(); awayLog.push({ at: Date.now(), kind: 'gave up', trigger: c.what, reply: 'still not resolved after 10 attempts - needs you' }); saveAway() }
 }
+const filterAnnounced = new Map<string, number>()
+setInterval(() => {
+  void blockedSessions(3 * 3600000).then((list) => {
+    for (const { sessionId, state } of list) {
+      if (filterAnnounced.get(sessionId) === state.lastBlockAt) continue
+      filterAnnounced.set(sessionId, state.lastBlockAt ?? 0)
+      diag('filter_block_detected', { sessionId, consecutive: state.consecutive, nudgedSince: state.nudgedSince })
+      announce(`[HIGH] "${threadIdent(sessionId)}" is stuck: ${describeFilter(state)}`, 'interrupt', sessionId)
+    }
+  }).catch(() => {})
+}, 60000).unref()
 setInterval(() => {
   if (busy || draining || isSilenced() || ownerTalking() || playerActive()) return
   const due = commitments.filter((c) => c.status === 'open' && c.dueAt <= Date.now()).sort((a, b) => a.dueAt - b.dueAt)[0]

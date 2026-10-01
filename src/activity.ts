@@ -97,6 +97,7 @@ function onEvent(ev: string, d: Record<string, unknown>, ts: number): void {
     case 'commitment_waiting': add(`⏳ not ready yet - still tracking: ${clip(d.what, 160)}`); break
     case 'selftask_created': newTurn(`**${hhmm(ts)} · 🧵 background task started**\n> ${clip(d.goal, 200)}`); closeTurn(); break
     case 'selftask_done': case 'selftask_failed': newTurn(`**${hhmm(ts)} · 🧵 background task ${ev === 'selftask_done' ? 'finished' : 'failed'}**`); closeTurn(); break
+    case 'filter_block_detected': add(`🚫 content-filter block detected on ${clip(d.sessionId, 40)} (${d.consecutive}x)`); break
     case 'away_report': newTurn(`**${hhmm(ts)} · 🌙 away report delivered** (${d.items} item(s))`); closeTurn(); break
   }
 }

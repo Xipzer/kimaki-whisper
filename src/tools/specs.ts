@@ -261,6 +261,14 @@ export const TOOLS = [
   {
     type: 'function',
     function: {
+      name: 'thread_health',
+      description: 'Deterministic status of a thread: is its last reply BLOCKED by the provider\'s content filter (invisible in read_session tails - the thread just looks cut off and quiet)? Read from the OpenCode database, not guessed.',
+      parameters: { type: 'object', properties: { session_id: { type: 'string' } }, required: ['session_id'] },
+    },
+  },
+  {
+    type: 'function',
+    function: {
       name: 'commitments',
       description: 'List the promises you have made that are still open (tracked automatically from what you say, e.g. "I\'ll tell you when the table lands"). Each fires a COMMITMENT DUE turn when its thread moves or its time comes - even while the owner is away.',
       parameters: { type: 'object', properties: { drop_id: { type: 'string', description: 'optional: id of a commitment to drop because it no longer applies' } } },

@@ -113,3 +113,14 @@ test('samePromise merges re-statements of one promise, not different ones', asyn
   assert.equal(samePromise('Report the moment the table lands', 'Check back on the unblocker'), false)
   assert.equal(samePromise('Dictate the Sky Broadband answer', 'Nudge the contracts thread with plainer language'), false)
 })
+
+test('content-filter state: blocked, nudged-after-block, recovered', async () => {
+  const { stateFrom } = await import('../dist/senses/filterBlock.js')
+  const A = (error?: string) => ({ role: 'assistant', error, at: 1 })
+  const U = () => ({ role: 'user', at: 1 })
+  assert.equal(stateFrom([A('ContentFilterError'), A('ContentFilterError'), U(), A()]).consecutive, 2)
+  const nudged = stateFrom([U(), A('ContentFilterError'), U()])
+  assert.equal(nudged.blocked, true); assert.equal(nudged.nudgedSince, true)
+  assert.equal(stateFrom([A(), A('ContentFilterError')]).blocked, false, 'replied since the block')
+  assert.equal(stateFrom([A('MessageAbortedError'), A('ContentFilterError')]).blocked, true, 'abort after a block is still the block')
+})
