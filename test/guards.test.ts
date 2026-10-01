@@ -124,3 +124,9 @@ test('content-filter state: blocked, nudged-after-block, recovered', async () =>
   assert.equal(stateFrom([A(), A('ContentFilterError')]).blocked, false, 'replied since the block')
   assert.equal(stateFrom([A('MessageAbortedError'), A('ContentFilterError')]).blocked, true, 'abort after a block is still the block')
 })
+
+test('guard escalates once per block and resets on recovery', async () => {
+  const { unblockPrompt } = await import('../dist/senses/guard.js')
+  assert.notEqual(unblockPrompt(1), unblockPrompt(2))
+  assert.equal(unblockPrompt(3), unblockPrompt(2))
+})

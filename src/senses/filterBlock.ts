@@ -82,3 +82,46 @@ export function describe(s: FilterState): string {
   const ago = s.lastBlockAt ? `${Math.max(1, Math.round((Date.now() - s.lastBlockAt) / 60000))} min ago` : 'recently'
   return `STUCK ON CONTENT FILTER: its last ${s.consecutive > 1 ? `${s.consecutive} replies were` : 'reply was'} blocked by the provider's content filter (${ago})${s.nudgedSince ? ', a nudge was sent after it and has not been answered yet' : ''}. The thread is NOT working - it is silent because of the block. Re-sending the same wording will be blocked again: reword away from the trigger words, or switch the thread to the local model (switch_thread_model local), which has no filter.`
 }
+
+export type ThreadHealth = {
+  status: 'blocked' | 'errored' | 'working' | 'idle' | 'aborted' | 'unknown'
+  lastActivityAt: number | null
+  model: string | null
+  contextTokens: number | null
+  lastError: string | null
+  filter: FilterState
+  awaitingReply: boolean
+}
+/** Everything the OpenCode DB can tell about a thread right now. */
+export async function threadHealth(sessionId: string): Promise<ThreadHealth | null> {
+  const db = await open()
+  if (!db) return null
+  try {
+    const rows = db.prepare('SELECT time_created, data FROM message WHERE session_id = ? ORDER BY time_created DESC LIMIT 40').all(sessionId)
+    if (!rows.length) return { status: 'unknown', lastActivityAt: null, model: null, contextTokens: null, lastError: null, filter: stateFrom([]), awaitingReply: false }
+    type M = { role?: string; error?: { name?: string; data?: { message?: string } }; time?: { completed?: number }; modelID?: string; tokens?: { input?: number; cache?: { read?: number } } }
+    const ms = rows.map((r) => { try { return JSON.parse(String(r.data)) as M } catch { return {} as M } })
+    const filter = stateFrom(parse(rows))
+    const lastA = ms.find((m) => m.role === 'assistant')
+    const lastDone = ms.find((m) => m.role === 'assistant' && m.time?.completed && !m.error)
+    const latest = ms[0]
+    const err = lastA?.error
+    let status: ThreadHealth['status'] = 'idle'
+    if (filter.blocked) status = 'blocked'
+    else if (latest.role === 'assistant' && err && err.name !== 'MessageAbortedError') status = 'errored'
+    else if (latest.role === 'assistant' && err?.name === 'MessageAbortedError') status = 'aborted'
+    else if (latest.role === 'assistant' && !latest.time?.completed && Date.now() - Number(rows[0].time_created) < 20 * 60000) status = 'working'
+    const ctx = lastDone?.tokens ? (lastDone.tokens.input ?? 0) + (lastDone.tokens.cache?.read ?? 0) : null
+    return { status, lastActivityAt: Number(rows[0].time_created), model: lastA?.modelID ?? null, contextTokens: ctx || null, lastError: err ? `${err.name}: ${err.data?.message ?? ''}`.slice(0, 200) : null, filter, awaitingReply: latest.role === 'user' }
+  } catch { return null } finally { db.close() }
+}
+export function describeHealth(h: ThreadHealth): string {
+  const ago = h.lastActivityAt ? `${Math.max(0, Math.round((Date.now() - h.lastActivityAt) / 60000))} min ago` : 'never'
+  const head = h.status === 'blocked' ? describe(h.filter)
+    : h.status === 'errored' ? `ERRORED: its last turn failed (${h.lastError}). It is not working until someone re-prompts it.`
+    : h.status === 'aborted' ? 'ABORTED: its last turn was cancelled; it is idle.'
+    : h.status === 'working' ? 'WORKING: a reply is being generated right now.'
+    : h.awaitingReply ? 'WAITING: a prompt was sent and has no reply yet.'
+    : 'IDLE: finished its last turn.'
+  return `${head} Last activity ${ago}. Model ${h.model ?? '?'}${h.contextTokens ? `, context ~${Math.round(h.contextTokens / 1000)}k tokens` : ''}.`
+}

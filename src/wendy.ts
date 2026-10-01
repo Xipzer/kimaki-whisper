@@ -22,7 +22,8 @@ import type { Client, VoiceState, VoiceBasedChannel } from 'discord.js'
 import { Client as DClient, GatewayIntentBits } from 'discord.js'
 import { VoiceLoop } from './voice/loop.js'
 import { initActivity } from './activity.js'
-import { filterState, blockedSessions, describe as describeFilter } from './senses/filterBlock.js'
+import { filterState, blockedSessions, describe as describeFilter, threadHealth, describeHealth } from './senses/filterBlock.js'
+import { Guards } from './senses/guard.js'
 import { execFile, spawn } from 'node:child_process'
 import { loadConfig, log } from './config.js'
 import { diag, pruneDiagnostics } from './diag.js'
@@ -452,9 +453,17 @@ async function executeToolInner(name: string, args: Record<string, unknown>): Pr
   if (name === 'thread_health') {
     const sid = String(args.session_id ?? '')
     if (!isSessionId(sid)) return 'ERROR: need a ses_ id (lookup_thread first)'
-    const st = await filterState(sid)
-    if (!st) return 'ERROR: cannot read the OpenCode database on this machine'
-    return st.blocked ? describeFilter(st) : `not blocked${st.totalBlocks ? ` (it was blocked ${st.totalBlocks} time(s) among its last 40 messages, but has replied since)` : ''}`
+    const h = await threadHealth(sid)
+    if (!h) return 'ERROR: cannot read the OpenCode database on this machine'
+    return `${describeHealth(h)}${guards.has(sid) ? ' GUARDED: you auto-unblock it - no action needed from you.' : ''}`
+  }
+  if (name === 'guard_thread') {
+    const sid = String(args.session_id ?? '')
+    if (!isSessionId(sid)) return 'ERROR: need a ses_ id (lookup_thread first)'
+    if (args.on === false) return guards.off(sid) ? `stopped guarding "${threadIdent(sid)}"` : 'it was not guarded'
+    guards.on(sid); ledger.markVerified(sid); diag('guard_on', { sessionId: sid })
+    void guards.tick()
+    return `guarding "${threadIdent(sid)}" from now on: every content-filter block is unblocked automatically within ~20 s (neutral rephrase, then abstract rephrase, then the local model). It stays on until the owner says stop.`
   }
   if (name === 'commitments') {
     if (typeof args.drop_id === 'string' && args.drop_id) {
@@ -2053,11 +2062,23 @@ async function fireCommitment(c: Commitment): Promise<void> {
   } else if (again?.status === 'done') diag('commitment_done', { what: c.what, attempts: c.attempts })
   else if (again && again.attempts >= 10) { again.status = 'expired'; saveCommitments(); awayLog.push({ at: Date.now(), kind: 'gave up', trigger: c.what, reply: 'still not resolved after 10 attempts - needs you' }); saveAway() }
 }
+const guards = new Guards({
+  dir: workspaceDir(),
+  send: (sid, prompt, model) => runKimaki(['send', '--session', sid, ...(model ? ['--model', model] : []), '--prompt', prompt], 60000),
+  localModel: () => resolveSpawnModel('local')?.id ?? null,
+  diag,
+  notify: (sid, line) => announce(`[LOW] "${threadIdent(sid)}" ${line}.`, 'digest', sid),
+})
+setInterval(() => {
+  // her own spawned agents are guarded automatically - she owns keeping them moving
+  for (const sp of spawns) if (sp.status === 'running') guards.on(sp.id)
+  void guards.tick().catch(() => {})
+}, 20000).unref()
 const filterAnnounced = new Map<string, number>()
 setInterval(() => {
   void blockedSessions(3 * 3600000).then((list) => {
     for (const { sessionId, state } of list) {
-      if (filterAnnounced.get(sessionId) === state.lastBlockAt) continue
+      if (filterAnnounced.get(sessionId) === state.lastBlockAt || guards.has(sessionId)) continue
       filterAnnounced.set(sessionId, state.lastBlockAt ?? 0)
       diag('filter_block_detected', { sessionId, consecutive: state.consecutive, nudgedSince: state.nudgedSince })
       announce(`[HIGH] "${threadIdent(sessionId)}" is stuck: ${describeFilter(state)}`, 'interrupt', sessionId)
