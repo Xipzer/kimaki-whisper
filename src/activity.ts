@@ -99,7 +99,7 @@ function onEvent(ev: string, d: Record<string, unknown>, ts: number): void {
     case 'selftask_done': case 'selftask_failed': newTurn(`**${hhmm(ts)} · 🧵 background task ${ev === 'selftask_done' ? 'finished' : 'failed'}**`); closeTurn(); break
     case 'filter_block_detected': add(`🚫 content-filter block detected on ${clip(d.sessionId, 40)} (${d.consecutive}x)`); break
     case 'guard_on': add(`🛡️ now auto-unblocking ${clip(d.sessionId, 40)}`); break
-    case 'guard_unblock': newTurn(`**${hhmm(ts)} · 🛡️ auto-unblock** ${clip(d.sessionId, 40)} - attempt ${d.attempt}${d.local ? ' (switched to local model)' : ''}${d.ok ? '' : ' - send FAILED'}`); closeTurn(); break
+    case 'guard_unblock': newTurn(`**${hhmm(ts)} · 🛡️ auto-unblock** ${clip(d.sessionId, 40)} - attempt ${d.attempt}${d.ok ? '' : ' - send FAILED'}`); closeTurn(); break
     case 'guard_recovered': newTurn(`**${hhmm(ts)} · 🛡️ unblocked** ${clip(d.sessionId, 40)} after ${d.attempts} attempt(s)`); closeTurn(); break
     case 'away_report': newTurn(`**${hhmm(ts)} · 🌙 away report delivered** (${d.items} item(s))`); closeTurn(); break
   }

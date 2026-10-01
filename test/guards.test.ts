@@ -128,5 +128,6 @@ test('content-filter state: blocked, nudged-after-block, recovered', async () =>
 test('guard escalates once per block and resets on recovery', async () => {
   const { unblockPrompt } = await import('../dist/senses/guard.js')
   assert.notEqual(unblockPrompt(1), unblockPrompt(2))
-  assert.equal(unblockPrompt(3), unblockPrompt(2))
+  assert.notEqual(unblockPrompt(3), unblockPrompt(2))
+  for (let i = 1; i < 12; i++) assert.doesNotMatch(unblockPrompt(i), /local model|switch/i, 'never switches model')
 })

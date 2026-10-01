@@ -463,7 +463,7 @@ async function executeToolInner(name: string, args: Record<string, unknown>): Pr
     if (args.on === false) return guards.off(sid) ? `stopped guarding "${threadIdent(sid)}"` : 'it was not guarded'
     guards.on(sid); ledger.markVerified(sid); diag('guard_on', { sessionId: sid })
     void guards.tick()
-    return `guarding "${threadIdent(sid)}" from now on: every content-filter block is unblocked automatically within ~20 s (neutral rephrase, then abstract rephrase, then the local model). It stays on until the owner says stop.`
+    return `guarding "${threadIdent(sid)}" from now on: every content-filter block is unblocked automatically within ~20 s (neutral rephrase, then abstract design note, then smaller parts). Its model is never changed. It stays on until the owner says stop.`
   }
   if (name === 'commitments') {
     if (typeof args.drop_id === 'string' && args.drop_id) {
@@ -2064,8 +2064,7 @@ async function fireCommitment(c: Commitment): Promise<void> {
 }
 const guards = new Guards({
   dir: workspaceDir(),
-  send: (sid, prompt, model) => runKimaki(['send', '--session', sid, ...(model ? ['--model', model] : []), '--prompt', prompt], 60000),
-  localModel: () => resolveSpawnModel('local')?.id ?? null,
+  send: (sid, prompt) => runKimaki(['send', '--session', sid, '--prompt', prompt], 60000),
   diag,
   notify: (sid, line) => announce(`[LOW] "${threadIdent(sid)}" ${line}.`, 'digest', sid),
 })

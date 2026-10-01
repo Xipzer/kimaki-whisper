@@ -80,7 +80,7 @@ export async function blockedSessions(windowMs = 6 * 3600000): Promise<Array<{ s
 
 export function describe(s: FilterState): string {
   const ago = s.lastBlockAt ? `${Math.max(1, Math.round((Date.now() - s.lastBlockAt) / 60000))} min ago` : 'recently'
-  return `STUCK ON CONTENT FILTER: its last ${s.consecutive > 1 ? `${s.consecutive} replies were` : 'reply was'} blocked by the provider's content filter (${ago})${s.nudgedSince ? ', a nudge was sent after it and has not been answered yet' : ''}. The thread is NOT working - it is silent because of the block. Re-sending the same wording will be blocked again: reword away from the trigger words, or switch the thread to the local model (switch_thread_model local), which has no filter.`
+  return `STUCK ON CONTENT FILTER: its last ${s.consecutive > 1 ? `${s.consecutive} replies were` : 'reply was'} blocked by the provider's content filter (${ago})${s.nudgedSince ? ', a nudge was sent after it and has not been answered yet' : ''}. The thread is NOT working - it is silent because of the block. Re-sending the same wording will be blocked again: ask it to continue in neutral design language, in smaller parts. Use guard_thread to have this done automatically. Do not switch its model.`
 }
 
 export type ThreadHealth = {
