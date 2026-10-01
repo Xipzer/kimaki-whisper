@@ -203,13 +203,13 @@ export const TOOLS = [
     type: 'function',
     function: {
       name: 'spawn_agent',
-      description: 'Spawn a full agent (opencode, local model) in the #wendy Discord channel where the owner can read and reply. For delegating substantial subtasks. Concurrency-capped: check spawns_status first; collect finished work before spawning more. Every spawn is ledgered and auto-watched - results arrive as updates.',
+      description: 'Spawn a full agent (opencode, top-tier model by default) in the #wendy Discord channel where the owner can read and reply. For delegating substantial subtasks. Concurrency-capped: check spawns_status first; collect finished work before spawning more. Every spawn is ledgered and auto-watched - results arrive as updates.',
       parameters: {
         type: 'object',
         properties: {
           goal: { type: 'string', description: 'Complete self-contained task for the agent' },
           label: { type: 'string', description: 'Short spoken name for this agent, e.g. "repo scanner"' },
-          model: { type: 'string', enum: ['local', 'opus', 'fable'], description: 'local = your own LLM (default; shares YOUR compute - conversation may slow while it works), opus = strongest cloud model, fable = fast cloud model' },
+          model: { type: 'string', enum: ['opus', 'fable'], description: 'opus = strongest (default, the model the owner keeps his threads on), fable = quick cheap tasks. Local (your own brain) is not available for agents.' },
         },
         required: ['goal'],
       },
@@ -219,12 +219,12 @@ export const TOOLS = [
     type: 'function',
     function: {
       name: 'switch_thread_model',
-      description: 'Switch an existing thread to a different model on the fly - e.g. move a thread OFF your own LLM (local) onto opus to free up your compute when you are slowing down or expect load. ONLY when the owner explicitly asks you to change that thread\'s model - threads keep their designated model otherwise (it is blocked if he did not ask). Never use it to unblock or balance load; use guard_thread. Only local, opus, or fable exist; NOTHING else is permitted (other local models would kill your own brain - fragile).',
+      description: 'Switch an existing thread to a different model. ONLY when the owner explicitly asks you to change that thread\'s model - threads keep their designated model otherwise (it is blocked if he did not ask). Never use it to unblock or balance load; use guard_thread. Use opus or fable only: local is your own brain on the only inference GPU and is refused for agents.',
       parameters: {
         type: 'object',
         properties: {
           session_id: { type: 'string', description: 'ses_... to switch' },
-          model: { type: 'string', enum: ['local', 'opus', 'fable'] },
+          model: { type: 'string', enum: ['opus', 'fable'] },
         },
         required: ['session_id', 'model'],
       },

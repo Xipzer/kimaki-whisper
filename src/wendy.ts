@@ -354,6 +354,7 @@ async function executeToolInner(name: string, args: Record<string, unknown>): Pr
     const goal = String(args.goal ?? '').trim()
     if (goal.length < 10) return 'ERROR: goal too vague'
     const label = String(args.label ?? goal.slice(0, 40))
+    if (String(args.model ?? '').toLowerCase() === 'local' && !localAgentsAllowed()) { diag('local_agent_refused', { tool: 'spawn_agent' }); return LOCAL_REFUSED }
     const mdl = resolveSpawnModel(args.model as string | undefined)
     if (!mdl) return 'ERROR: unknown model - only local, opus, or fable are permitted'
     const out = await runKimaki([
@@ -413,6 +414,7 @@ async function executeToolInner(name: string, args: Record<string, unknown>): Pr
     return n === triggers.length ? 'no such trigger' : 'removed'
   }
   if (name === 'switch_thread_model') {
+    if (String(args.model ?? '').toLowerCase() === 'local' && !localAgentsAllowed()) { diag('local_agent_refused', { tool: 'switch_thread_model' }); return LOCAL_REFUSED }
     const mdl = resolveSpawnModel(String(args.model))
     if (!mdl) return 'ERROR: unknown model - only local, opus, or fable are permitted'
     const sid = String(args.session_id ?? '')
@@ -1146,7 +1148,7 @@ let selfTasks: SelfTask[] = []
 try { selfTasks = JSON.parse(fs.readFileSync(selfTasksPath(), 'utf-8')) as SelfTask[] } catch {}
 function saveSelfTasks(): void { try { fs.writeFileSync(selfTasksPath(), JSON.stringify(selfTasks)) } catch {} }
 
-const WORKER_PROMPT = `You are Wendy's background worker, autonomously executing a long-running task for the owner while Wendy converses in the foreground. Work strictly with your tools; be systematic and persistent. Write intermediate findings to notes if useful. For heavy or parallelizable subtasks, DELEGATE with spawn_agent (full opencode agents on the local model, visible to the owner in the #wendy channel). Respect the concurrency cap - check spawns_status, collect finished work before spawning more, and never lose track: the ledger is authoritative. Collect results via read_session/fetch_reply. You are an orchestrator with your own hands, not just a worker. When the task is genuinely COMPLETE, reply starting with exactly "RESULT:" followed by a concise summary written for SPOKEN delivery (2-4 sentences, concrete findings). If the task is impossible or permanently stuck, reply "FAILED:" plus the reason. Otherwise, keep calling tools - plain text replies are treated as thinking notes and you will resume later.`
+const WORKER_PROMPT = `You are Wendy's background worker, autonomously executing a long-running task for the owner while Wendy converses in the foreground. Work strictly with your tools; be systematic and persistent. Write intermediate findings to notes if useful. For heavy or parallelizable subtasks, DELEGATE with spawn_agent (full opencode agents on the top-tier model (never local - that is your own brain), visible to the owner in the #wendy channel). Respect the concurrency cap - check spawns_status, collect finished work before spawning more, and never lose track: the ledger is authoritative. Collect results via read_session/fetch_reply. You are an orchestrator with your own hands, not just a worker. When the task is genuinely COMPLETE, reply starting with exactly "RESULT:" followed by a concise summary written for SPOKEN delivery (2-4 sentences, concrete findings). If the task is impossible or permanently stuck, reply "FAILED:" plus the reason. Otherwise, keep calling tools - plain text replies are treated as thinking notes and you will resume later.`
 
 let sliceRunning = false
 let sliceAbort: AbortController | null = null
@@ -1551,6 +1553,11 @@ function ledgerComplete(id: string, result?: string): void {
   if (result) sp.result = result.slice(0, 300)
   saveSpawns()
 }
+/** Her brain is ONE inference host. An agent on it shares her GPU: the agent stalls
+ *  or crawls and she slows down too (seen live). 'local' agents are refused unless a
+ *  separate inference host is configured for them (localAgentHost, e.g. the M4 Max). */
+function localAgentsAllowed(): boolean { return !!(loadConfig() as { localAgentHost?: string }).localAgentHost }
+const LOCAL_REFUSED = 'BLOCKED: local is your own brain - there is only one inference GPU, so an agent on it stalls or crawls and slows you down too. Use opus (the default) - it runs off your hardware.'
 function resolveSpawnModel(alias: string | undefined): { id: string; alias: string } | null {
   const models = (loadConfig() as { spawnModels?: Record<string, string> }).spawnModels ?? {}
   const a = (alias ?? 'opus').toLowerCase().trim() // default: top-tier
