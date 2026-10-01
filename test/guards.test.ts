@@ -128,6 +128,13 @@ test('content-filter state: blocked, nudged-after-block, recovered', async () =>
 test('guard escalates once per block and resets on recovery', async () => {
   const { unblockPrompt } = await import('../dist/senses/guard.js')
   assert.notEqual(unblockPrompt(1), unblockPrompt(2))
-  assert.notEqual(unblockPrompt(3), unblockPrompt(2))
   for (let i = 1; i < 12; i++) assert.doesNotMatch(unblockPrompt(i), /local model|switch/i, 'never switches model')
+})
+
+test('unblock and resume prompts keep the same task, plan and format', async () => {
+  const { unblockPrompt, resumePrompt } = await import('../dist/senses/guard.js')
+  for (const p of [unblockPrompt(1), unblockPrompt(2), unblockPrompt(5), resumePrompt()]) {
+    assert.match(p, /Same task, same plan, same output format/)
+    assert.doesNotMatch(p, /bullet|numbered parts|stop and wait|summar(y|ise) it|local model|switch/i)
+  }
 })

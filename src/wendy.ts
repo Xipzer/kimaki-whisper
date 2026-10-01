@@ -416,15 +416,13 @@ async function executeToolInner(name: string, args: Record<string, unknown>): Pr
     const mdl = resolveSpawnModel(String(args.model))
     if (!mdl) return 'ERROR: unknown model - only local, opus, or fable are permitted'
     const sid = String(args.session_id ?? '')
-    // A thread keeps the model it was given. Moving work to a weaker model to get
-    // past a block trades a stall for regressions - only the owner may do that,
-    // in his own words, this turn.
-    const rank = (m: string | null | undefined): number => !m ? 0 : /opus/i.test(m) ? 3 : /fable|sonnet/i.test(m) ? 2 : 1
-    const cur = currentModel(sid)
-    const ownerAsked = new RegExp(`\\b(${mdl.alias}|switch|move|change)\\b`, 'i').test(lastOwnerUtterance) && Date.now() - lastOwnerAt < 5 * 60000
-    if (cur && rank(mdl.id) < rank(cur) && !ownerAsked) {
-      diag('model_downgrade_blocked', { id: sid, from: cur, to: mdl.alias })
-      return `BLOCKED: "${threadIdent(sid)}" runs on ${cur}; ${mdl.alias} is weaker and would regress its work. Threads stay on their designated model - to get past a content-filter block use guard_thread (rewording only). Only the owner can downgrade a thread, by asking for it himself.`
+    // A thread keeps the model it was designated: another model reasons differently
+    // and can drift off the task. Only the owner changes a thread's model, in his
+    // own words, this turn - never Wendy on her own (not to unblock, not to balance load).
+    const ownerAsked = /\b(switch|move|change|put|use|run)\b/i.test(lastOwnerUtterance) && new RegExp(`\\b(${mdl.alias}|model)\\b`, 'i').test(lastOwnerUtterance) && Date.now() - lastOwnerAt < 5 * 60000
+    if (!ownerAsked) {
+      diag('model_switch_blocked', { id: sid, to: mdl.alias, current: currentModel(sid) })
+      return `BLOCKED: threads stay on their designated model (${currentModel(sid) ?? 'its current model'}) - a different model can drift off the task. Only the owner switches a thread's model, by asking for it himself. To get a blocked or stalled thread moving, use guard_thread.`
     }
     const out = await runKimaki([
       'send', '--session', sid, '--model', mdl.id,
@@ -1555,7 +1553,7 @@ function ledgerComplete(id: string, result?: string): void {
 }
 function resolveSpawnModel(alias: string | undefined): { id: string; alias: string } | null {
   const models = (loadConfig() as { spawnModels?: Record<string, string> }).spawnModels ?? {}
-  const a = (alias ?? 'local').toLowerCase().trim()
+  const a = (alias ?? 'opus').toLowerCase().trim() // default: top-tier
   return models[a] ? { id: models[a], alias: a } : null
 }
 function runningSpawns(): Spawn[] {
@@ -2074,7 +2072,7 @@ async function fireCommitment(c: Commitment): Promise<void> {
 }
 const guards = new Guards({
   dir: workspaceDir(),
-  send: (sid, prompt) => runKimaki(['send', '--session', sid, '--prompt', prompt], 60000),
+  send: (sid, prompt) => { const keep = modelPins.pinned(sid)?.model ?? currentModel(sid); return runKimaki(['send', '--session', sid, ...(keep ? ['--model', keep] : []), '--prompt', prompt], 60000) },
   diag,
   notify: (sid, line) => announce(`[LOW] "${threadIdent(sid)}" ${line}.`, 'digest', sid),
 })
