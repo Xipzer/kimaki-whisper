@@ -15,16 +15,19 @@ wait_up() { for _ in $(seq 1 "$2"); do up "$1" && return 0; sleep 1; done; retur
 npx -y kimaki@latest --version >/dev/null 2>&1 || true
 for f in "$HOME"/.npm/_npx/*/node_modules/kimaki/dist/voice.js; do
   [ -f "$f" ] || continue
-  if grep -q "^const OPENAI_CHAT_COMPLETIONS_URL = 'https://api.openai.com/v1/chat/completions';" "$f"; then
-    python3 - "$f" <<'PY'
+  python3 - "$f" <<'PY'
 import re, sys
-f = sys.argv[1]; s = open(f).read()
-s = re.sub(r"^const OPENAI_CHAT_COMPLETIONS_URL = 'https://api.openai.com/v1/chat/completions';$",
-           "const OPENAI_CHAT_COMPLETIONS_URL = (process.env.OPENAI_BASE_URL || 'https://api.openai.com/v1').replace(/[/]$/, '') + '/chat/completions';", s, flags=re.M)
-open(f, 'w').write(s)
+f = sys.argv[1]; s = open(f).read(); o = s
+env = "(process.env.OPENAI_BASE_URL || 'https://api.openai.com/v1').replace(/[/]$/, '')"
+# <= 0.30: hardcoded full chat/completions URL
+s = re.sub(r"^const OPENAI_CHAT_COMPLETIONS_URL = 'https://api.openai.com/v1/chat/completions';$", "const OPENAI_CHAT_COMPLETIONS_URL = " + env + " + '/chat/completions';", s, flags=re.M)
+# >= 0.31: hardcoded base URL constant
+s = re.sub(r"^const OPENAI_BASE_URL = 'https://api.openai.com/v1';$", "const OPENAI_BASE_URL = " + env + ";", s, flags=re.M)
+if s != o:
+    open(f, 'w').write(s); print(f"[prereqs] patched kimaki transcription URL ({f})")
+elif 'api.openai.com/v1' in s and 'process.env.OPENAI_BASE_URL' not in s:
+    print(f"[prereqs] WARNING: kimaki voice.js changed shape - transcription may hit api.openai.com ({f})")
 PY
-    echo "[prereqs] patched kimaki transcription URL ($f)"
-  fi
 done
 
 # 1. speaches on :8000 - Whisper for Kimaki voice notes (:7070 forwards here)
