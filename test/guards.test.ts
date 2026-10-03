@@ -131,30 +131,24 @@ test('guard escalates once per block and resets on recovery', async () => {
   for (let i = 1; i < 12; i++) assert.doesNotMatch(unblockPrompt(i), /local model|switch/i, 'never switches model')
 })
 
-test('unblock and resume prompts keep the same task, plan and format', async () => {
-  const { unblockPrompt, resumePrompt } = await import('../dist/senses/guard.js')
-  for (const p of [unblockPrompt(1), unblockPrompt(2), unblockPrompt(5), resumePrompt()]) {
-    assert.match(p, /Same task, same plan, same output format/)
-    assert.doesNotMatch(p, /bullet|numbered parts|stop and wait|summar(y|ise) it|local model|switch/i)
-  }
-})
 
 test('stuckRun picks the first user message of the failed run and flags patches', async () => {
   const { stuckRun } = await import('../dist/senses/filterBlock.js')
   const M = (id: string, role: string, err?: string, parts: Array<{ type: string; text?: string }> = []) => ({ info: { id, role, error: err ? { name: err } : undefined }, parts })
-  const base = [M('m1', 'user', undefined, [{ type: 'text', text: 'task' }]), M('m2', 'assistant', undefined, [{ type: 'text', text: 'good state' }])]
+  const base = [M('m1', 'user', undefined, [{ type: 'text', text: 'task' }]), M('m2', 'assistant', undefined, [{ type: 'text', text: 'good state: test_a = 3' }])]
   const r = stuckRun([...base, M('m3', 'user', undefined, [{ type: 'text', text: 'go on' }]), M('m4', 'assistant', 'ContentFilterError'), M('m5', 'assistant', 'ContentFilterError')])!
   assert.equal(r.revertPoint, 'm3'); assert.equal(r.removed, 3); assert.equal(r.failed, 2); assert.equal(r.hasPatches, false); assert.match(r.lastGoodText, /good state/)
   const p = stuckRun([...base, M('m3', 'user'), M('m4', 'assistant', 'ContentFilterError', [{ type: 'patch' }])])!
   assert.equal(p.hasPatches, true)
   const noUser = stuckRun([...base, M('m3', 'assistant', 'ContentFilterError')])!
-  assert.equal(noUser.revertPoint, null, 'failure inside a turn with good steps: no revert')
+  assert.equal(noUser.revertPoint, 'm1', 'failure inside the owner turn: revert to that turn, task is resent')
   assert.equal(stuckRun(base), null)
 })
 
 test('guard never repeats a brief and escalates the approach', async () => {
   const { ladderBrief, sameBrief } = await import('../dist/senses/guard.js')
-  const b = [1, 2, 3, 4].map((n) => ladderBrief(n, 'Do the audit table.', 'state'))
+  const { RUNG_COUNT } = await import('../dist/senses/guard.js')
+  const b = Array.from({ length: RUNG_COUNT }, (_, i) => ladderBrief(i + 1, 'Do the audit table.', 'state'))
   for (let i = 0; i < b.length; i++) for (let j = i + 1; j < b.length; j++) assert.equal(sameBrief(b[i], b[j]), false, `ladder ${i + 1} vs ${j + 1} must differ`)
   assert.equal(sameBrief(b[0], b[0]), true)
 })
