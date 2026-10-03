@@ -18,6 +18,8 @@ export type BrainMessage = { role: string; content?: string | null; tool_calls?:
 
 type BrainConfig = { brainUrl?: string; auxBrainUrl?: string; auxBrainModel?: string }
 const strip = (u: string): string => u.replace(/\/$/, '')
+// Reasoning depth for every brain call (Qwen3.8 template: low | medium | xhigh). Config: brainReasoning.
+const effort = (): Record<string, unknown> => ({ chat_template_kwargs: { reasoning_effort: (loadConfig() as { brainReasoning?: string }).brainReasoning ?? 'xhigh' } })
 
 export function brainUrl(): string | undefined { return loadConfig().brainUrl }
 export function laneUrl(lane: Lane): string | undefined {
@@ -103,7 +105,7 @@ async function rawFetch(lane: Lane, body: Record<string, unknown>, opts: { timeo
     // One KV slot per lane (server runs -np 2): background summaries can never
     // evict the conversation's cached prefix.
     // toWellFormed: slicing text mid-emoji leaves a lone surrogate, which llama.cpp rejects with a 500.
-    body: JSON.stringify({ model: laneModel(lane), cache_prompt: true, id_slot: lane === 'conversation' ? 0 : 1, ...body }).toWellFormed(),
+    body: JSON.stringify({ model: laneModel(lane), cache_prompt: true, id_slot: lane === 'conversation' ? 0 : 1, ...effort(), ...body }).toWellFormed(),
     signal: opts.signal ? AbortSignal.any([opts.signal, timeout]) : timeout,
   }).catch(() => null)
 }
@@ -127,7 +129,7 @@ export async function brainRequest(lane: Lane, body: Record<string, unknown>, on
     res = await fetch(`${url}/v1/chat/completions`, {
       method: 'POST',
       headers: { 'content-type': 'application/json', connection: 'close' },
-      body: JSON.stringify({ model: laneModel(lane), cache_prompt: true, id_slot: lane === 'conversation' ? 0 : 1, ...body, ...(stream ? { stream: true, stream_options: { include_usage: true } } : {}) }).toWellFormed(),
+      body: JSON.stringify({ model: laneModel(lane), cache_prompt: true, id_slot: lane === 'conversation' ? 0 : 1, ...effort(), ...body, ...(stream ? { stream: true, stream_options: { include_usage: true } } : {}) }).toWellFormed(),
       signal: signal ? AbortSignal.any([signal, AbortSignal.timeout(120000)]) : AbortSignal.timeout(120000),
     })
   } catch (e) {
