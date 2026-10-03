@@ -91,6 +91,7 @@ export type ThreadHealth = {
   lastError: string | null
   filter: FilterState
   awaitingReply: boolean
+  lastOkAt: number | null      // last assistant turn that completed without error
 }
 /** Everything the OpenCode DB can tell about a thread right now. */
 export async function threadHealth(sessionId: string): Promise<ThreadHealth | null> {
@@ -98,7 +99,7 @@ export async function threadHealth(sessionId: string): Promise<ThreadHealth | nu
   if (!db) return null
   try {
     const rows = db.prepare('SELECT time_created, data FROM message WHERE session_id = ? ORDER BY time_created DESC LIMIT 40').all(sessionId)
-    if (!rows.length) return { status: 'unknown', lastActivityAt: null, model: null, contextTokens: null, lastError: null, filter: stateFrom([]), awaitingReply: false }
+    if (!rows.length) return { status: 'unknown', lastActivityAt: null, model: null, contextTokens: null, lastError: null, filter: stateFrom([]), awaitingReply: false, lastOkAt: null }
     type M = { role?: string; error?: { name?: string; data?: { message?: string } }; time?: { completed?: number }; modelID?: string; tokens?: { input?: number; cache?: { read?: number } } }
     const ms = rows.map((r) => { try { return JSON.parse(String(r.data)) as M } catch { return {} as M } })
     const filter = stateFrom(parse(rows))
@@ -112,7 +113,7 @@ export async function threadHealth(sessionId: string): Promise<ThreadHealth | nu
     else if (latest.role === 'assistant' && err?.name === 'MessageAbortedError') status = 'aborted'
     else if (latest.role === 'assistant' && !latest.time?.completed && Date.now() - Number(rows[0].time_created) < 20 * 60000) status = 'working'
     const ctx = lastDone?.tokens ? (lastDone.tokens.input ?? 0) + (lastDone.tokens.cache?.read ?? 0) : null
-    return { status, lastActivityAt: Number(rows[0].time_created), model: lastA?.modelID ?? null, contextTokens: ctx || null, lastError: err ? `${err.name}: ${err.data?.message ?? ''}`.slice(0, 200) : null, filter, awaitingReply: latest.role === 'user' }
+    return { status, lastActivityAt: Number(rows[0].time_created), model: lastA?.modelID ?? null, contextTokens: ctx || null, lastError: err ? `${err.name}: ${err.data?.message ?? ''}`.slice(0, 200) : null, filter, awaitingReply: latest.role === 'user', lastOkAt: (() => { const i = ms.findIndex((m) => m.role === 'assistant' && m.time?.completed && !m.error); return i >= 0 ? Number(rows[i].time_created) : null })() }
   } catch { return null } finally { db.close() }
 }
 export function describeHealth(h: ThreadHealth): string {
@@ -161,6 +162,7 @@ export type StuckRun = {
   hasPatches: boolean           // removed messages carry file patches
   partialFiles: string[]        // write/edit calls that never completed
   lastGoodText: string          // tail of the last successful assistant text
+  cutoffText: string            // tail of the latest failed turn's partial output
   briefTask: string             // the user request being retried
 }
 const isFail = (m: ApiMsg): boolean => m.info.role === 'assistant' && !!m.info.error && m.info.error.name !== 'MessageAbortedError'
@@ -185,6 +187,7 @@ export function stuckRun(msgs: ApiMsg[]): StuckRun | null {
     hasPatches: removedMsgs.some((m) => m.parts.some((p) => p.type === 'patch')),
     partialFiles: [...new Set(run.flatMap((m) => m.parts.filter((p) => p.type === 'tool' && /write|edit/i.test(p.tool ?? '') && p.state?.status !== 'completed').map((p) => p.state?.input?.filePath ?? '').filter(Boolean)))],
     lastGoodText: goodText.slice(-700),
+    cutoffText: (failed.at(-1)?.parts.filter((p) => p.type === 'text').map((p) => p.text ?? '').join('\n').trim() ?? '').slice(-600),
     briefTask: task.slice(0, 1500),
   }
 }

@@ -151,3 +151,10 @@ test('stuckRun picks the first user message of the failed run and flags patches'
   assert.equal(noUser.revertPoint, null, 'failure inside a turn with good steps: no revert')
   assert.equal(stuckRun(base), null)
 })
+
+test('guard never repeats a brief and escalates the approach', async () => {
+  const { ladderBrief, sameBrief } = await import('../dist/senses/guard.js')
+  const b = [1, 2, 3, 4].map((n) => ladderBrief(n, 'Do the audit table.', 'state'))
+  for (let i = 0; i < b.length; i++) for (let j = i + 1; j < b.length; j++) assert.equal(sameBrief(b[i], b[j]), false, `ladder ${i + 1} vs ${j + 1} must differ`)
+  assert.equal(sameBrief(b[0], b[0]), true)
+})
