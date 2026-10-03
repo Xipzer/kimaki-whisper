@@ -165,7 +165,7 @@ export type StuckRun = {
   errors: string[]
   revertPoint: string | null    // user message that opened the turn holding the first failure
   removed: number
-  hasPatches: boolean
+  hasPatches: boolean           // removed range carries patches or completed work - do not revert
   partialFiles: string[]        // write/edit targets inside failed turns (content may be truncated)
   lastGoodText: string          // facts from the last clean turn before the revert point
   briefTask: string             // the owner's request (never a guard brief)
@@ -175,10 +175,15 @@ const GUARD_TEXT = /^(\[guard\]|Your previous replies were cut off|Your previous
 const userText = (m: ApiMsg): string => m.parts.filter((p) => p.type === 'text').map((p) => p.text ?? '').join('\n').trim()
 export const isGuardBrief = (m: ApiMsg, sent?: Set<string>): boolean => m.info.role === 'user' && (!!sent?.has(m.info.id) || GUARD_TEXT.test(userText(m)))
 const isFail = (m: ApiMsg): boolean => m.info.role === 'assistant' && !!m.info.error && m.info.error.name !== 'MessageAbortedError'
-/** Lines that carry facts (numbers, file or test names) - no narrative. */
+/** Complete fact lines only (numbers, file or test names), at most 5 - never an unfinished sentence. */
 export function factsOnly(text: string): string {
-  return text.split(/\n+|(?<=[.!?])\s+/).map((l) => l.trim()).filter((l) => l && /\d|\w+\.(sol|ts|tsx|js|mjs|py|rs|go|md|json|toml|yml|yaml)\b|\btest\w*/i.test(l)).join('\n').slice(0, 600)
+  const t = text.trim()
+  const segs = t.split(/\n+|(?<=[.!?])\s+/).map((l) => l.trim()).filter(Boolean)
+  if (segs.length && !/[.!?)`:]$/.test(t)) segs.pop() // the reply was cut mid-sentence
+  return segs.filter((l) => /[.!?)`:]$/.test(l) || /^[-*\d]|=|:/.test(l)).filter((l) => /\d|\w+\.(sol|ts|tsx|js|mjs|py|rs|go|md|json|toml|yml|yaml)\b|\btest\w*/i.test(l)).slice(-5).join('\n').slice(0, 500)
 }
+/** Assistant turn that did real work: a completed tool call or a clean text reply. */
+export const didWork = (m: ApiMsg): boolean => m.info.role === 'assistant' && !m.info.error && (m.parts.some((p) => p.type === 'tool' && p.state?.status === 'completed') || m.parts.some((p) => p.type === 'text' && (p.text?.trim().length ?? 0) > 0))
 /** msgs oldest-first. Scoped to the episode: everything after the owner's last request. */
 export function stuckRun(msgs: ApiMsg[], sent?: Set<string>): StuckRun | null {
   const lastNonUser = [...msgs].reverse().find((m) => m.info.role !== 'user' && m.info.error?.name !== 'MessageAbortedError')
@@ -187,16 +192,22 @@ export function stuckRun(msgs: ApiMsg[], sent?: Set<string>): StuckRun | null {
   for (let i = msgs.length - 1; i >= 0; i--) if (msgs[i].info.role === 'user' && !isGuardBrief(msgs[i], sent)) { owner = i; break }
   const firstFail = msgs.findIndex((m, i) => i > owner && isFail(m))
   if (firstFail < 0) return null
-  let rp = firstFail; while (rp >= 0 && msgs[rp].info.role !== 'user') rp--
+  // never revert past successful work: start after the LAST good step before the latest failure
+  let lastWork = -1
+  for (let i = msgs.length - 1; i > owner; i--) if (didWork(msgs[i])) { lastWork = i; break }
+  const from = Math.max(owner, lastWork)
+  let rp = -1
+  for (let i = from + 1; i < msgs.length; i++) if (msgs[i].info.role === 'user') { rp = i; break }
+  if (lastWork < 0) { rp = firstFail; while (rp >= 0 && msgs[rp].info.role !== 'user') rp-- }
   const removed = rp >= 0 ? msgs.slice(rp) : []
-  const fails = msgs.slice(owner + 1).filter(isFail)
-  const good = msgs.slice(0, rp >= 0 ? rp : firstFail).reverse().find((m) => m.info.role === 'assistant' && !m.info.error && m.parts.some((p) => p.type === 'text' && p.text?.trim()))
+  const fails = msgs.slice(Math.max(owner, lastWork) + 1).filter(isFail)
+  const good = msgs.slice(0, rp >= 0 ? rp : msgs.length).reverse().find((m) => m.info.role === 'assistant' && !m.info.error && m.parts.some((p) => p.type === 'text' && p.text?.trim()))
   return {
     failed: fails.length,
     errors: [...new Set(fails.map((m) => m.info.error?.name ?? '?'))],
     revertPoint: rp >= 0 ? msgs[rp].info.id : null,
     removed: removed.length,
-    hasPatches: removed.some((m) => m.parts.some((p) => p.type === 'patch')),
+    hasPatches: removed.some((m) => m.parts.some((p) => p.type === 'patch') || didWork(m)),
     partialFiles: [...new Set(fails.flatMap((m) => m.parts.filter((p) => p.type === 'tool' && /write|edit/i.test(p.tool ?? '')).map((p) => p.state?.input?.filePath ?? '').filter(Boolean)))],
     lastGoodText: good ? factsOnly(good.parts.filter((p) => p.type === 'text').map((p) => p.text ?? '').join('\n')) : '',
     briefTask: owner >= 0 ? userText(msgs[owner]).slice(0, 1500) : '',

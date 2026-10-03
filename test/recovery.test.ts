@@ -5,7 +5,7 @@ import os from 'node:os'
 import path from 'node:path'
 import { execFileSync } from 'node:child_process'
 import { stuckRun, factsOnly, isGuardBrief, GUARD_MARK } from '../dist/senses/filterBlock.js'
-import { ladderBrief, unblockPrompt, sameBrief, invalidPaths, restorePartials, substantiveOkAt, failedSince, RUNG_COUNT } from '../dist/senses/guard.js'
+import { ladderBrief, unblockPrompt, sameBrief, invalidPaths, restorePartials, substantiveOkAt, failedSince, manualHold, RUNG_COUNT } from '../dist/senses/guard.js'
 
 type P = { type: string; text?: string; tool?: string; state?: { status?: string; input?: { filePath?: string } } }
 const T0 = 1_790_000_000_000
@@ -31,14 +31,14 @@ const fixture = () => [
   M('m649', 'assistant', { err: CF, parts: [], t: T0 + 12e3 }),
 ]
 
-test('1: revert scope covers the whole episode, not only the last failure', () => {
-  const r = stuckRun(fixture())!
-  assert.equal(r.revertPoint, 'm636', 'turn holding the first failure after the owner request')
-  assert.equal(r.failed, 4)
-  assert.equal(r.removed, 13)
+test('1: with no good step after it, the revert covers every failure since the owner request', () => {
+  const f = [fixture()[0], fixture()[2], fixture()[3], fixture()[4]]  // 636 owner, 639 fail, 640 brief, 641 fail
+  const r = stuckRun(f)!
+  assert.equal(r.revertPoint, 'm636'); assert.equal(r.failed, 2); assert.equal(r.removed, 4)
 })
 test('2: writes inside failed turns count as partial even when reported completed', () => {
-  assert.deepEqual(stuckRun(fixture())!.partialFiles.sort(), ['packages/contracts/test/A.t.sol', 'packages/contracts/test/B.t.sol', 'packages/contracts/test/C.t.sol'])
+  const f = [fixture()[0], fixture()[2], fixture()[3], fixture()[4]]
+  assert.deepEqual(stuckRun(f)!.partialFiles.sort(), ['packages/contracts/test/A.t.sol', 'packages/contracts/test/B.t.sol'])
   const repo = fs.mkdtempSync(path.join(os.tmpdir(), 'rp-'))
   const g = (...a: string[]) => execFileSync('git', ['-C', repo, ...a], { stdio: 'ignore' })
   g('init', '-q'); g('config', 'user.email', 't@t'); g('config', 'user.name', 't')
@@ -86,4 +86,37 @@ test('8/9: sameBrief sees briefs across the session and the rungs never repeat',
   const rungs = Array.from({ length: RUNG_COUNT }, (_, i) => ladderBrief(i + 1, 'task', 'facts'))
   for (let i = 0; i < rungs.length; i++) for (let j = i + 1; j < rungs.length; j++) assert.equal(sameBrief(rungs[i], rungs[j]), false)
   assert.equal(sameBrief(rungs[0], ladderBrief(1, 'other task', 'other facts')), true, 'same approach regardless of context')
+})
+
+test('10: never revert past successful work - revert starts after the last good step', () => {
+  const f = [
+    M('o', 'user', { parts: [txt('Build StaleSharesFork.t.sol and run it.')], t: T0 }),
+    M('f1', 'assistant', { err: CF, t: T0 + 1e3 }),
+    M('b1', 'user', { parts: [txt('manual recovery brief')], t: T0 + 2e3 }),
+    ...Array.from({ length: 6 }, (_, i) => M(`w${i}`, 'assistant', { parts: [write('packages/contracts/test/StaleSharesFork.t.sol'), bash], t: T0 + 3e3 + i })),
+    M('g1', 'user', { parts: [txt(GUARD_MARK + 'brief')], t: T0 + 20e3 }),
+    M('f2', 'assistant', { err: CF, t: T0 + 21e3 }),
+  ]
+  const r = stuckRun(f)!
+  assert.equal(r.revertPoint, 'g1', 'only the brief + failure after the last good step')
+  assert.equal(r.removed, 2); assert.equal(r.hasPatches, false)
+  const inTurn = stuckRun([...f.slice(0, 9), M('f3', 'assistant', { err: CF, t: T0 + 30e3 })])!
+  assert.equal(inTurn.revertPoint, null, 'failure right after good work in the same turn: no revert, brief only')
+  const withWork = stuckRun([f[0], M('w', 'assistant', { parts: [bash], t: T0 + 1 }), M('u', 'user', { t: T0 + 2 }), M('x', 'assistant', { parts: [bash], t: T0 + 3 }), M('f', 'assistant', { err: CF, t: T0 + 4 })])!
+  assert.equal(withWork.revertPoint, null)
+})
+test('11: confirmed state is complete fact lines only, never the cut-off sentence; plain preamble', () => {
+  const cut = 'Tally done.\ntest_stale_shares passes: 4 holders, 1.2 ETH unpaid.\nFile: packages/contracts/test/StaleSharesFork.t.sol.\nThe ordering lets a caller'
+  const f = factsOnly(cut)
+  assert.doesNotMatch(f, /lets a caller/)
+  assert.match(f, /1\.2 ETH unpaid/)
+  assert.ok(f.split('\n').length <= 5)
+  assert.ok(factsOnly(Array.from({ length: 9 }, (_, i) => `test_${i} = ${i}.`).join('\n')).split('\n').length <= 5)
+  for (let i = 1; i <= 3; i++) { assert.doesNotMatch(ladderBrief(i, 't', 'f'), /content filter|stopped by/i); assert.match(ladderBrief(i, 't', 'f'), /Resuming after an interruption/) }
+})
+test('hold: a non-guard user message in the last 10 min means hands off', () => {
+  const now = T0 + 60e3
+  assert.equal(manualHold([M('u', 'user', { parts: [txt('manual fix')], t: now - 30e3 })], new Set(), now), true)
+  assert.equal(manualHold([M('g', 'user', { parts: [txt(GUARD_MARK + 'b')], t: now - 30e3 })], new Set(), now), false)
+  assert.equal(manualHold([M('u', 'user', { parts: [txt('old')], t: now - 11 * 60e3 })], new Set(), now), false)
 })

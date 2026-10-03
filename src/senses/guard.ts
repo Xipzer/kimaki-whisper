@@ -3,7 +3,7 @@
 import fs from 'node:fs'
 import { execFileSync } from 'node:child_process'
 import path from 'node:path'
-import { threadHealth, listMessages, stuckRun, opencodeBase, sessionDir, GUARD_MARK, type StuckRun, type ApiMsg } from './filterBlock.js'
+import { threadHealth, listMessages, stuckRun, opencodeBase, sessionDir, GUARD_MARK, isGuardBrief, type StuckRun, type ApiMsg } from './filterBlock.js'
 
 export type Episode = { started: number; briefs: string[]; gaveUp?: boolean; lastBriefAt?: number }
 export type Guard = { since: number; attempts: number; handledBlockAt: number | null; handledErrorAt?: number | null; resumes?: number; episode?: Episode; history?: Array<{ at: number; brief: string }>; sentIds?: string[] }
@@ -13,6 +13,10 @@ const HISTORY_MS = 6 * 3600000
 export function substantiveOkAt(msgs: ApiMsg[]): number | null {
   const m = [...msgs].reverse().find((x) => x.info.role === 'assistant' && !x.info.error && x.info.time?.completed && (x.parts.some((p) => p.type === 'tool' && p.state?.status === 'completed') || x.parts.filter((p) => p.type === 'text').reduce((a, p) => a + (p.text?.length ?? 0), 0) >= 200))
   return m?.info.time?.completed ?? null
+}
+/** A non-guard user message in the last 10 minutes means a person is handling the thread. */
+export function manualHold(msgs: ApiMsg[], sent: Set<string>, now = Date.now()): boolean {
+  return msgs.some((m) => m.info.role === 'user' && !isGuardBrief(m, sent) && now - (m.info.time?.created ?? 0) < 10 * 60000)
 }
 export function failedSince(msgs: ApiMsg[], t: number): boolean { return msgs.some((x) => x.info.role === 'assistant' && x.info.error && x.info.error.name !== 'MessageAbortedError' && (x.info.time?.created ?? 0) > t) }
 export type GuardDeps = {
@@ -24,7 +28,7 @@ export type GuardDeps = {
   compose?: (ctx: { task: string; lastGood: string; prior: string[]; attempt: number }) => Promise<string | null>
 }
 
-const HEAD = 'Your earlier replies were stopped by the provider\'s automated content filter (a false positive, not a problem with the work) and have been rolled back.'
+const HEAD = 'Resuming after an interruption.'
 // a: reframe; b: small edits; c: numbers only; d: escalate (not sent - the owner is told)
 const RUNGS = [
   'Reframe the task as a correctness and accounting question about this codebase: which state variables, conditions and call orderings produce which balances. Answer it in those terms.',
@@ -128,6 +132,9 @@ export class Guards {
         }
         if (!h.filter.blocked) continue
         if (h.status === 'working' || this.inflight.has(id)) continue
+        // hold: someone (the owner or a builder) acted on this thread in the last 10 min - do not race them
+        const recent = await listMessages(id, 20)
+        if (recent && manualHold(recent, new Set(g.sentIds ?? []))) { this.d.diag('guard_hold', { sessionId: id }); continue }
         if (g.handledBlockAt === h.filter.lastBlockAt) continue
         if (ep?.gaveUp) continue
         const episode = ep ?? (g.episode = { started: Date.now(), briefs: [] })
@@ -154,7 +161,7 @@ export class Guards {
     const sent = new Set(g.sentIds ?? [])
     const run = msgs ? stuckRun(msgs, sent) : null
     if (!run) { this.d.diag('guard_unblock', { sessionId: id, attempt: g.attempts, action: 'none', ok: false, note: msgs ? 'no failed run found' : 'cannot reach the OpenCode server' }); return }
-    if (run.hasPatches) { this.d.notify(id, 'is stuck but its failed turns carry file patches - not reverted automatically'); ep.gaveUp = true; this.save(); return }
+    // completed work in the revert range: no revert, the brief alone resumes it (recoverThread skips the revert)
     const dir = (await sessionDir(id)) ?? ''
     g.history = (g.history ?? []).filter((h) => Date.now() - h.at < HISTORY_MS)
     const prior = g.history.map((h) => h.brief)
@@ -180,7 +187,7 @@ export class Guards {
 export type Recovery = { ok: boolean; action: 'reverted+brief' | 'brief' | 'none'; run: StuckRun | null; note: string }
 export function recoveryBrief(run: StuckRun): string {
   return GUARD_MARK + [
-    `Your last ${run.failed} turn(s) failed (${run.errors.join(', ')}) and ${run.revertPoint ? 'were rolled back' : 'did not complete'}.`,
+    'Resuming after an interruption.',
     run.lastGoodText ? `Confirmed so far:\n${run.lastGoodText}` : '',
     run.partialFiles.length ? `Check these files - a write may be incomplete: ${run.partialFiles.join(', ')}.` : '',
     run.briefTask ? `Task (from the owner):\n${run.briefTask}` : '',

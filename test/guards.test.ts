@@ -135,13 +135,13 @@ test('guard escalates once per block and resets on recovery', async () => {
 test('stuckRun picks the first user message of the failed run and flags patches', async () => {
   const { stuckRun } = await import('../dist/senses/filterBlock.js')
   const M = (id: string, role: string, err?: string, parts: Array<{ type: string; text?: string }> = []) => ({ info: { id, role, error: err ? { name: err } : undefined }, parts })
-  const base = [M('m1', 'user', undefined, [{ type: 'text', text: 'task' }]), M('m2', 'assistant', undefined, [{ type: 'text', text: 'good state: test_a = 3' }])]
+  const base = [M('m1', 'user', undefined, [{ type: 'text', text: 'task' }]), M('m2', 'assistant', undefined, [{ type: 'text', text: 'good state: test_a = 3.' }])]
   const r = stuckRun([...base, M('m3', 'user', undefined, [{ type: 'text', text: 'go on' }]), M('m4', 'assistant', 'ContentFilterError'), M('m5', 'assistant', 'ContentFilterError')])!
   assert.equal(r.revertPoint, 'm3'); assert.equal(r.removed, 3); assert.equal(r.failed, 2); assert.equal(r.hasPatches, false); assert.match(r.lastGoodText, /good state/)
   const p = stuckRun([...base, M('m3', 'user'), M('m4', 'assistant', 'ContentFilterError', [{ type: 'patch' }])])!
   assert.equal(p.hasPatches, true)
   const noUser = stuckRun([...base, M('m3', 'assistant', 'ContentFilterError')])!
-  assert.equal(noUser.revertPoint, 'm1', 'failure inside the owner turn: revert to that turn, task is resent')
+  assert.equal(noUser.revertPoint, null, 'failure right after a clean turn: no revert past it')
   assert.equal(stuckRun(base), null)
 })
 
