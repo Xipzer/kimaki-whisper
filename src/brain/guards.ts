@@ -14,6 +14,10 @@ export const isThreadDispatchTool = (name: string): boolean => (THREAD_DISPATCH_
 export const dispatchSucceeded = (result: string): boolean =>
   !/^(ERROR|BLOCKED|DUPLICATE|HELD|STOP|FAILED|UNCONFIRMED|SEARCHING)/.test(result)
 
+/** Context note for actions that were held and then dropped without running. */
+export const unsentNote = (actions: string[]): string =>
+  `[note: these actions from your earlier turn were NOT carried out (held while he was still talking, then dropped): ${actions.join('; ')}. Nothing was sent for them. Never say they were done; if they still fit what he wants now, do them this turn.]`
+
 /** Past-tense claims that a send/relay was completed. Third-party sends
  *  ("he sent me a photo") are excluded by lookbehind. */
 export const SEND_CLAIM = /(?<!\b(?:he|she|they|you|xipz|who|owner)\s)\b(sent( it| that| this| him| her| them)?|dispatched|fired (it|that|this) (off|into|to)|relayed|forwarded|passed (it|that|this) (along|on)|told (him|her|them|the (thread|builder|agent))|asked the (thread|builder|agent)|it'?s in there|in the (pinned )?thread now)\b/i

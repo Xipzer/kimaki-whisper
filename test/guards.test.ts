@@ -1,6 +1,6 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
-import { claimsSend, soundsLikePromise, dispatchKey, collapsePriorityTags, repairHistory, queueDedupeMarkers, isUrgentUpdate, dispatchSucceeded, isDispatchTool, stripReminderPrefix } from '../dist/brain/guards.js'
+import { claimsSend, soundsLikePromise, dispatchKey, collapsePriorityTags, repairHistory, queueDedupeMarkers, isUrgentUpdate, dispatchSucceeded, isDispatchTool, stripReminderPrefix, unsentNote } from '../dist/brain/guards.js'
 
 test('claimsSend catches first-person completed sends, not third-party', () => {
   for (const t of ['Sent it — investigating first.', "It's in there now — the pinned thread.", 'I passed that along to the builder.', 'I sent him the summary.']) assert.equal(claimsSend(t), true, t)
@@ -153,3 +153,9 @@ test('guard never repeats a brief and escalates the approach', async () => {
   assert.equal(sameBrief(b[0], b[0]), true)
 })
 
+test('unsentNote tells the brain held-then-dropped actions never happened', () => {
+  const n = unsentNote(['send_to_session -> ses_abcdefghijkl: "flag the builder"'])
+  assert.match(n, /NOT carried out/)
+  assert.match(n, /flag the builder/)
+  assert.match(n, /Never say they were done/)
+})

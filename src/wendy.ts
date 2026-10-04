@@ -39,7 +39,7 @@ import { SYSTEM_PROMPT } from './prompt.js'
 import { TOOLS } from './tools/specs.js'
 import { executeTelegramTool } from './tools/telegram.js'
 import { isDispatchTool, isThreadDispatchTool, dispatchSucceeded, claimsSend, sendClaimAck, isTrailingFragment, isAffirmative, isSelfDirective, soundsLikePromise, dispatchKey, collapsePriorityTags, isUrgentUpdate, queueDedupeMarkers, repairHistory, SESSION_ID, isSessionId, stripReminderPrefix } from './brain/guards.js'
-import { summaryIsCompliance, mechanicalSummary, samePromise } from './brain/guards.js'
+import { summaryIsCompliance, mechanicalSummary, samePromise, unsentNote } from './brain/guards.js'
 import { onBrainUp, setConversationActive, preemptBackground, brainUrl, brainRequest, brainFetch, brainText, brainHealth, probeBrain, type BrainOut } from './brain/client.js'
 import { startTelegram, setTelegramFlaggedHandler, telegramAutoDrain, telegramLowBudgets, setTelegramAutonomousHandler, telegramPendingSummaries, telegramDrainChatStats, telegramPendingPeopleSummaries, telegramDrainPerson, telegramProfile, telegramProfilesDue, telegramProfileWrite, telegramPrivacyFor, telegramEffectiveTone, telegramRoomContext, telegramPersonThread, setReplyTarget, telegramChatDigest } from './telegram.js'
 
@@ -1822,12 +1822,26 @@ let lastSpeechEnd = 0
 let fragmentHold: { text: string; timer: NodeJS.Timeout } | null = null
 // Actions held mid-turn because he seemed to be still speaking. If no
 // follow-up turn arrives, the hold was wrong - the original action stands.
-let heldActions: { name: string; args: Record<string, unknown>; at: number }[] = []
+type HeldAction = { name: string; args: Record<string, unknown>; at: number }
+let heldActions: HeldAction[] = []
+let pendingHeldBatch: HeldAction[] | null = null
+// Held actions that were then dropped: the brain only keeps its final replies in
+// history, so without this note it believes they happened (live: "I also flagged
+// the builder" after the send was held and dropped).
+let unsentActions: { s: string; at: number }[] = []
+function noteUnsent(batch: HeldAction[] | null): void {
+  for (const b of batch ?? []) unsentActions.push({ at: b.at, s: `${b.name} -> ${String(b.args.session_id ?? b.args.channel_id ?? b.args.chat ?? b.args.target ?? '?')}: "${String(b.args.prompt ?? b.args.text ?? b.args.goal ?? '').replace(/\s+/g, ' ').slice(0, 100)}"` })
+  if (batch?.length) diag('held_actions_dropped', { n: batch.length, tools: batch.map((b) => b.name) })
+  unsentActions = unsentActions.filter((u) => Date.now() - u.at < 15 * 60000).slice(-5)
+}
 function scheduleHeldActionRecovery(seqAtEnd: number): void {
   if (!heldActions.length) return
   const batch = heldActions.splice(0)
+  pendingHeldBatch = batch
   setTimeout(() => {
-    if (inputSeq !== seqAtEnd || busy) { diag('held_actions_superseded', { n: batch.length }); return }
+    if (pendingHeldBatch !== batch) return
+    pendingHeldBatch = null
+    if (inputSeq !== seqAtEnd || busy) { diag('held_actions_superseded', { n: batch.length }); noteUnsent(batch); return }
     diag('held_actions_autofire', { n: batch.length, tools: batch.map((b) => b.name) })
     const summary = batch.map((b) => `${b.name}(${JSON.stringify(b.args).slice(0, 600)})`).join('\n')
     void runTurn(`[system: the owner did NOT continue speaking after you held these actions - the hold was a false alarm. Execute them NOW exactly as intended, then confirm in one short line:\n${summary}]`)
@@ -2144,8 +2158,11 @@ async function runTurn(text: string): Promise<void> {
   // 27s search found his answer, a queued thread ping bumped the sequence,
   // the answer was binned and he had to ask again ten minutes later).
   // Fragments (< 3 words) never supersede a reply in flight - they merge into the pending input.
+  const seqBefore = inputSeq
   const seq = text.startsWith('[') || text.trim().split(/\s+/).length < 3 ? inputSeq : ++inputSeq
-  if (!text.startsWith('[')) heldActions = []
+  if (!text.startsWith('[')) { noteUnsent(heldActions); heldActions = [] }
+  // a real new utterance supersedes a held batch awaiting auto-fire (fragments do not, as before)
+  if (seq !== seqBefore) { noteUnsent(pendingHeldBatch); pendingHeldBatch = null }
   if (busy) {
     // Telegram/background turns queue properly instead of overwriting each other;
     // owner speech keeps the merge behaviour (latest intent wins).
@@ -2208,6 +2225,10 @@ async function runTurn(text: string): Promise<void> {
       text = `${text}\n[note: your previous reply was cut off before he heard it: "${supersededAnswer.text}". Answer what he just said; fold in anything from that reply that still matters.]`
       supersededAnswer = null
       diag('superseded_carried', {})
+    }
+    if (unsentActions.length && ownerTurn) {
+      text = `${text}\n${unsentNote(unsentActions.map((u) => u.s))}`
+      unsentActions = []
     }
     log(`wendy heard: "${text.slice(0, 80)}"`)
     diag('owner_said', { text })
