@@ -7,7 +7,10 @@
 //   - built-in ONNX model (config.model)          - zero-setup path
 //   - external backend  (config.backendUrl)      - advanced/GPU path, proxied
 import http from 'node:http'
-import { loadConfig, DEFAULT_PORT, log } from './config.js'
+import crypto from 'node:crypto'
+import fs from 'node:fs'
+import path from 'node:path'
+import { loadConfig, DEFAULT_PORT, log, configDir } from './config.js'
 import { transcribeOgg } from './transcribe/local-onnx.js'
 
 interface ContentPart {
@@ -97,6 +100,20 @@ export async function transcribeAudioBytes(bytes: Buffer): Promise<Error | strin
 
 let server: http.Server | null = null
 
+// Text inbox: lets a local operator (owner or test harness) talk to Wendy in
+// text through the exact owner-turn path voice uses. Loopback only, and gated
+// by a 0600 token file so other local users cannot drive her.
+type TextInbox = (text: string) => Promise<{ queued: boolean; reply: string; ms: number }>
+let textInbox: TextInbox | null = null
+export function setTextInbox(fn: TextInbox): void { textInbox = fn; inboxToken() }
+export function inboxToken(): string {
+  const file = path.join(configDir(), 'inbox.token')
+  if (fs.existsSync(file)) return fs.readFileSync(file, 'utf8').trim()
+  const token = crypto.randomBytes(24).toString('hex')
+  fs.writeFileSync(file, token, { mode: 0o600 })
+  return token
+}
+
 export function isServerRunning(): boolean {
   return server !== null
 }
@@ -113,6 +130,21 @@ export function startServer(): number {
 
     if (req.url === '/health') return send(200, { ok: true, source: loadConfig().backendUrl ?? loadConfig().model ?? 'unconfigured' })
     if (req.url?.endsWith('/models')) return send(200, { object: 'list', data: [{ id: 'kimaki-whisper', object: 'model', owned_by: 'local' }] })
+    if (req.url === '/wendy/turn' && req.method === 'POST') {
+      const auth = req.headers['x-wendy-token']
+      if (!textInbox) return send(503, { error: 'wendy not live on this node' })
+      if (typeof auth !== 'string' || auth.length === 0 || auth !== inboxToken()) return send(401, { error: 'bad token' })
+      const parts: Buffer[] = []
+      req.on('data', (c: Buffer) => parts.push(c))
+      req.on('end', () => {
+        void (async () => {
+          const text = (() => { try { return String((JSON.parse(Buffer.concat(parts).toString()) as { text?: unknown }).text ?? '').trim() } catch { return '' } })()
+          if (!text || text.startsWith('[')) return send(400, { error: 'text required (must not start with "[")' })
+          send(200, await textInbox!(text))
+        })().catch((e: unknown) => send(500, { error: String(e) }))
+      })
+      return
+    }
     if (!req.url?.endsWith('/chat/completions') || req.method !== 'POST') return send(404, { error: { message: 'not found' } })
 
     const chunks: Buffer[] = []

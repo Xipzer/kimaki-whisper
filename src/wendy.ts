@@ -38,6 +38,7 @@ import { ModelPins, currentModel } from './senses/modelPins.js'
 import { SYSTEM_PROMPT } from './prompt.js'
 import { TOOLS } from './tools/specs.js'
 import { executeTelegramTool } from './tools/telegram.js'
+import { setTextInbox } from './server.js'
 import { isDispatchTool, isThreadDispatchTool, dispatchSucceeded, claimsSend, sendClaimAck, isTrailingFragment, isAffirmative, isSelfDirective, soundsLikePromise, dispatchKey, collapsePriorityTags, isUrgentUpdate, queueDedupeMarkers, repairHistory, SESSION_ID, isSessionId, stripReminderPrefix } from './brain/guards.js'
 import { summaryIsCompliance, mechanicalSummary, samePromise, unsentNote } from './brain/guards.js'
 import { onBrainUp, setConversationActive, preemptBackground, brainUrl, brainRequest, brainFetch, brainText, brainHealth, probeBrain, type BrainOut } from './brain/client.js'
@@ -2441,6 +2442,14 @@ export function initWendy(client: Client): void {
   }
   clientRef = client
   ledger.load()
+  setTextInbox(async (text) => {
+    const t0 = Date.now()
+    const before = lastTurnReply
+    const wasBusy = busy
+    diag('text_inbox', { text: text.slice(0, 400) })
+    await runTurn(text)
+    return { queued: wasBusy, reply: wasBusy ? '' : lastTurnReply === before ? '' : lastTurnReply, ms: Date.now() - t0 }
+  })
   const startActivity = (): void => { void initActivity(client, (loadConfig() as { wendyChannelId?: string }).wendyChannelId) }
   if (client.isReady()) startActivity(); else client.once('clientReady', startActivity)
   // Restarts kill finish-waiter child processes silently - re-arm every
