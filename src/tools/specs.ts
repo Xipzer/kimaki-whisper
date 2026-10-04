@@ -71,10 +71,13 @@ export const TOOLS = [
     type: 'function',
     function: {
       name: 'search_sessions',
-      description: 'Search all past agent sessions by topic/keyword to find the right existing thread.',
+      description: 'Full-text search of agent sessions across ALL projects to find the right existing thread. Slow (often 30-90 s): a search still running after ~25 s finishes in the background and its results arrive as an update.',
       parameters: {
         type: 'object',
-        properties: { query: { type: 'string', description: 'Topic or keywords, e.g. "nutrition", "benchmark"' } },
+        properties: {
+          query: { type: 'string', description: 'Topic or keywords, e.g. "nutrition", "benchmark"' },
+          days: { type: 'number', description: 'Only sessions updated in the last N days (default 14). 0 = all time - much slower, use only when a recent search found nothing.' },
+        },
         required: ['query'],
       },
     },

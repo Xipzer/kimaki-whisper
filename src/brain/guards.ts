@@ -2,6 +2,7 @@
 // says. Everything here is a pure function of its inputs - no I/O, no clocks
 // unless passed in - so it is unit-testable and cannot drift between the
 // conversation loop and the background worker.
+import { lastAssistantReply } from '../kimaki/transcript.js'
 
 /** Tools whose execution has side effects on other people/threads. */
 export const DISPATCH_TOOLS = ['send_to_session', 'ask_thread', 'dispatch_task', 'telegram_send', 'telegram_reply'] as const
@@ -11,7 +12,7 @@ export const isThreadDispatchTool = (name: string): boolean => (THREAD_DISPATCH_
 
 /** A tool result that means "something actually happened". */
 export const dispatchSucceeded = (result: string): boolean =>
-  !/^(ERROR|BLOCKED|DUPLICATE|HELD|STOP)/.test(result)
+  !/^(ERROR|BLOCKED|DUPLICATE|HELD|STOP|FAILED|UNCONFIRMED|SEARCHING)/.test(result)
 
 /** Past-tense claims that a send/relay was completed. Third-party sends
  *  ("he sent me a photo") are excluded by lookbehind. */
@@ -115,8 +116,7 @@ export function summaryIsCompliance(text: string): boolean {
 
 /** Mechanical fallback summary: the agent's last sentence, tagged LOW. */
 export function mechanicalSummary(label: string, transcript: string): string {
-  const parts = transcript.split(/^### (?=👤|🤖)/m).filter((p) => p.startsWith('🤖'))
-  const last = (parts[parts.length - 1] ?? '').replace(/^🤖[^\n]*\n?/, '').replace(/```[\s\S]*?```/g, ' ').replace(/\s+/g, ' ').trim()
+  const last = (lastAssistantReply(transcript)?.text ?? '').replace(/^tool-error: .*$/gm, '').replace(/```[\s\S]*?```/g, ' ').replace(/\s+/g, ' ').trim()
   const sentence = last.split(/(?<=[.!?])\s+/).filter((s) => s.length > 12)[0] ?? last.slice(0, 160)
   return `[LOW] ${label}: ${sentence.slice(0, 200) || 'new activity.'}`
 }

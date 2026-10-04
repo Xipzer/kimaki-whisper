@@ -52,7 +52,7 @@ test('urgency + result classification', () => {
   assert.equal(isUrgentUpdate('[MED] "x" just FINISHED its output'), true)
   assert.equal(isUrgentUpdate('[LOW] New commit'), false)
   assert.equal(dispatchSucceeded('sent to GROUP'), true)
-  for (const r of ['ERROR: x', 'BLOCKED by', 'DUPLICATE BLOCKED', 'HELD - owner', 'STOP: filter']) assert.equal(dispatchSucceeded(r), false, r)
+  for (const r of ['ERROR: x', 'BLOCKED by', 'DUPLICATE BLOCKED', 'HELD - owner', 'STOP: filter', 'FAILED - NOTHING WAS SENT', 'UNCONFIRMED - kimaki did not confirm', 'SEARCHING - still running']) assert.equal(dispatchSucceeded(r), false, r)
   assert.equal(isDispatchTool('telegram_send'), true)
   assert.equal(isDispatchTool('read_session'), false)
 })
@@ -152,3 +152,4 @@ test('guard never repeats a brief and escalates the approach', async () => {
   for (let i = 0; i < b.length; i++) for (let j = i + 1; j < b.length; j++) assert.equal(sameBrief(b[i], b[j]), false, `ladder ${i + 1} vs ${j + 1} must differ`)
   assert.equal(sameBrief(b[0], b[0]), true)
 })
+

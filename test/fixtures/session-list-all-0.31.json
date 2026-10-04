@@ -1,0 +1,41 @@
+[
+  {
+    "id": "ses_0a1b2c3d4ffeAAAAexampleAA1",
+    "title": "Base V7 cutover follow-ups",
+    "directory": "/home/owner/WebstormProjects/BaseStonk",
+    "updated": "2026-10-04T15:21:44.473Z",
+    "source": "kimaki",
+    "threadId": "1500000000000000001",
+    "status": "busy",
+    "model": "claude-opus-5-5",
+    "tokens": 15771471,
+    "startedBy": null,
+    "scheduledTaskId": null
+  },
+  {
+    "id": "ses_0a1b2c3d5ffeBBBBexampleBB2",
+    "title": "BaseStonk graphics orders",
+    "directory": "/home/owner/WebstormProjects/BaseStonk",
+    "updated": "2026-10-04T10:16:58.156Z",
+    "source": "kimaki",
+    "threadId": "1500000000000000002",
+    "status": "showing-question",
+    "model": "claude-opus-5-5",
+    "tokens": 44964334,
+    "startedBy": null,
+    "scheduledTaskId": null
+  },
+  {
+    "id": "ses_0a1b2c3d6ffeCCCCexampleCC3",
+    "title": "Lens 1 voice conversations (@general subagent)",
+    "directory": "/home/owner/WebstormProjects/Local-LLM",
+    "updated": "2026-10-04T15:13:25.365Z",
+    "source": "opencode",
+    "threadId": null,
+    "status": "idle",
+    "model": "claude-opus-5-5",
+    "tokens": 5871063,
+    "startedBy": null,
+    "scheduledTaskId": null
+  }
+]

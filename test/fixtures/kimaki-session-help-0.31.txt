@@ -1,0 +1,16 @@
+kimaki/0.31.0
+
+Available "session" commands:
+
+  session list                     List all OpenCode sessions, marking which were started via Kimaki
+  session editors <file>           List sessions that last edited a file, newest first.
+  session read <sessionId>         Read a session conversation as markdown (pipe to file to grep).
+  session wait <sessionId>         Wait until a session finishes or pauses for a user question, then print its conversation as markdown
+  session search <query>           Search past sessions for text or /regex/flags. Defaults to the last 14 days; use --days 0 for all time. Add --all for every locally registered project.
+  session export-events-jsonl      Export persisted session events from SQLite to JSONL for debugging Kimaki runtime bugs
+  session archive [threadId]       Archive a Discord thread without stopping its mapped OpenCode session
+  session abort <sessionId>        Abort a running session without archiving the thread
+  session title <title>            Update the OpenCode session title. Discord thread name follows automatically.
+  session discord-url <sessionId>  Print the Discord thread URL for a session
+
+Run "kimaki <command> --help" for more information.

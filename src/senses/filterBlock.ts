@@ -7,6 +7,7 @@
 import path from 'node:path'
 import os from 'node:os'
 import fs from 'node:fs'
+import { kimakiLockPort } from '../kimaki/api.js'
 
 export type FilterState = {
   blocked: boolean          // the thread's latest assistant turn was blocked and nothing has answered since
@@ -16,14 +17,14 @@ export type FilterState = {
   totalBlocks: number       // blocks among the last 40 messages
 }
 
-type Db = { prepare(sql: string): { all(...a: unknown[]): Array<Record<string, unknown>> }; close(): void }
-const dbPath = (): string => path.join(os.homedir(), '.local', 'share', 'opencode', 'opencode.db')
+export type Db = { prepare(sql: string): { all(...a: unknown[]): Array<Record<string, unknown>> }; close(): void }
+const dbPath = (): string => process.env.WENDY_OPENCODE_DB ?? path.join(os.homedir(), '.local', 'share', 'opencode', 'opencode.db')
 
-async function open(): Promise<Db | null> {
-  if (!fs.existsSync(dbPath())) return null
+async function open(file = dbPath()): Promise<Db | null> {
+  if (!fs.existsSync(file)) return null
   try {
     const sqlite = (await import('node:sqlite')) as unknown as { DatabaseSync: new (p: string, o?: { readOnly?: boolean }) => Db }
-    return new sqlite.DatabaseSync(dbPath(), { readOnly: true })
+    return new sqlite.DatabaseSync(file, { readOnly: true })
   } catch { return null }
 }
 
@@ -60,18 +61,30 @@ export async function filterState(sessionId: string): Promise<FilterState | null
   } catch { return null } finally { db.close() }
 }
 
-/** Every session whose current state is "blocked", among sessions active in the window. */
-export async function blockedSessions(windowMs = 6 * 3600000): Promise<Array<{ sessionId: string; state: FilterState }>> {
-  const db = await open()
-  if (!db) return []
+// The message table has no time index (only session_id,time_created,id): a
+// time-window query is a full SCAN of a ~93 GB table. Everything below is
+// per-session (SEARCH ... USING INDEX message_session_time_created_id_idx).
+const LAST_MESSAGES = 'SELECT time_created, data FROM message WHERE session_id = ? ORDER BY time_created DESC LIMIT 40'
+export const MAX_BLOCK_CANDIDATES = 60
+
+/** Sessions touched in the window, newest first (session table: ~20k small rows, no message scan). */
+export function recentSessionIdsFrom(db: Db, windowMs: number, limit = 40): string[] {
+  return db.prepare('SELECT id FROM session WHERE time_updated > ? ORDER BY time_updated DESC LIMIT ?').all(Date.now() - windowMs, limit).map((r) => String(r.id))
+}
+/** Blocked sessions among `candidates` plus sessions updated in the window; null when the DB is unavailable. */
+export async function blockedSessions(candidates: string[], windowMs = 3 * 3600000, dbFile?: string): Promise<Array<{ sessionId: string; state: FilterState }> | null> {
+  const db = await open(dbFile)
+  if (!db) return null
   try {
-    const rows = db.prepare('SELECT session_id, time_created, data FROM message WHERE time_created > ? ORDER BY time_created DESC').all(Date.now() - windowMs)
-    const by = new Map<string, Array<Record<string, unknown>>>()
-    for (const r of rows) { const k = String(r.session_id); if (!by.has(k)) by.set(k, []); by.get(k)!.push(r) }
+    let recent: string[] = []
+    try { recent = recentSessionIdsFrom(db, windowMs) } catch {}
+    const ids = [...new Set([...recent, ...candidates])].slice(0, MAX_BLOCK_CANDIDATES)
+    const stmt = db.prepare(LAST_MESSAGES)
     const out: Array<{ sessionId: string; state: FilterState }> = []
-    for (const [sessionId, rs] of by) {
-      if (!rs.some((r) => String(r.data).includes('ContentFilterError'))) continue
-      const state = stateFrom(parse(rs.slice(0, 40)))
+    for (const sessionId of ids) {
+      const rows = stmt.all(sessionId)
+      if (!rows.some((r) => String(r.data).includes('ContentFilterError'))) continue
+      const state = stateFrom(parse(rows))
       if (state.blocked) out.push({ sessionId, state })
     }
     return out
@@ -84,7 +97,7 @@ export function describe(s: FilterState): string {
 }
 
 export type ThreadHealth = {
-  status: 'blocked' | 'errored' | 'working' | 'idle' | 'aborted' | 'unknown'
+  status: 'blocked' | 'errored' | 'working' | 'idle' | 'aborted' | 'question' | 'unknown'
   lastActivityAt: number | null
   model: string | null
   contextTokens: number | null
@@ -122,6 +135,7 @@ export function describeHealth(h: ThreadHealth): string {
     : h.status === 'errored' ? `ERRORED: its last turn failed (${h.lastError}). It is not working until someone re-prompts it.`
     : h.status === 'aborted' ? 'ABORTED: its last turn was cancelled; it is idle.'
     : h.status === 'working' ? 'WORKING: a reply is being generated right now.'
+    : h.status === 'question' ? 'WAITING ON A QUESTION: it asked something in Discord and is paused until it is answered.'
     : h.awaitingReply ? 'WAITING: a prompt was sent and has no reply yet.'
     : 'IDLE: finished its last turn.'
   return `${head} Last activity ${ago}. Model ${h.model ?? '?'}${h.contextTokens ? `, context ~${Math.round(h.contextTokens / 1000)}k tokens` : ''}.`
@@ -131,21 +145,37 @@ export function describeHealth(h: ThreadHealth): string {
 import { execFileSync } from 'node:child_process'
 export type ApiMsg = { info: { id: string; role: string; error?: { name?: string }; modelID?: string; providerID?: string; time?: { created?: number; completed?: number } }; parts: Array<{ type: string; text?: string; tool?: string; state?: { status?: string; input?: { filePath?: string } } }> }
 const baseBySession = new Map<string, string>()
-async function servers(): Promise<string[]> {
+/** Kimaki's own discovery endpoint on the hrana lock port (hrana-server.ts `/kimaki/opencode-port`). */
+export async function kimakiOpencodeServer(fetchImpl: typeof fetch = fetch, port = kimakiLockPort()): Promise<string | null> {
+  const r = await fetchImpl(`http://127.0.0.1:${port}/kimaki/opencode-port`, { signal: AbortSignal.timeout(2000) }).catch(() => null)
+  if (!r?.ok) return null
+  const j = (await r.json().catch(() => null)) as { port?: unknown } | null
+  return typeof j?.port === 'number' ? `http://127.0.0.1:${j.port}` : null
+}
+/** Fallback when the bot is down or predates the endpoint: every listening opencode process. */
+function scannedServers(): string[] {
   let out = ''
   try { out = execFileSync('ss', ['-ltnpH'], { encoding: 'utf-8' }) } catch { return [] }
   return [...out.matchAll(/127\.0\.0\.1:(\d+)\s.*"opencode"/g)].map((m) => `http://127.0.0.1:${m[1]}`)
 }
 const ok = async (url: string): Promise<boolean> => fetch(url, { signal: AbortSignal.timeout(2500) }).then((r) => r.ok).catch(() => false)
-/** The opencode server that serves this session (several can be live); cached per session. */
+/** The opencode server that serves this session: cached, then Kimaki's, then a port scan; cached per session. */
 export async function opencodeBase(sessionId?: string): Promise<string | null> {
   const dir = sessionId ? await sessionDir(sessionId) : null
   const probe = (b: string): string => sessionId ? `${b}/session/${sessionId}${dir ? `?directory=${encodeURIComponent(dir)}` : ''}` : `${b}/doc`
-  const cached = sessionId ? baseBySession.get(sessionId) : undefined
-  if (cached && (await ok(probe(cached)))) return cached
-  for (const b of await servers()) {
-    if (await ok(probe(b))) { if (sessionId) baseBySession.set(sessionId, b); return b }
+  const tried = new Set<string>()
+  const hit = async (b: string | null | undefined): Promise<boolean> => {
+    if (!b || tried.has(b)) return false
+    tried.add(b)
+    if (!(await ok(probe(b)))) return false
+    if (sessionId) baseBySession.set(sessionId, b)
+    return true
   }
+  const cached = sessionId ? baseBySession.get(sessionId) : undefined
+  if (await hit(cached)) return cached!
+  const kimaki = await kimakiOpencodeServer()
+  if (await hit(kimaki)) return kimaki
+  for (const b of scannedServers()) if (await hit(b)) return b
   return null
 }
 export async function sessionDir(sessionId: string): Promise<string | null> {

@@ -22,9 +22,13 @@ import type { Client, VoiceState, VoiceBasedChannel } from 'discord.js'
 import { Client as DClient, GatewayIntentBits } from 'discord.js'
 import { VoiceLoop } from './voice/loop.js'
 import { initActivity } from './activity.js'
-import { filterState, blockedSessions, describe as describeFilter, threadHealth, describeHealth } from './senses/filterBlock.js'
+import { filterState, blockedSessions, describe as describeFilter, threadHealth, describeHealth, sessionDir, type FilterState } from './senses/filterBlock.js'
+import { createStatusAdapter, filterFromReport } from './senses/sessionStatus.js'
+import { runKimaki, runKimakiDetailed } from './kimaki/run.js'
+import { recentMessages, lastAssistantReply } from './kimaki/transcript.js'
+import { parseAllSessionList, parseProjectSessionList, extractJsonArray, searchArgs, formatSearch, sendOutcome, type IndexEntry, type SendOutcome } from './kimaki/api.js'
 import { Guards, recoverThread } from './senses/guard.js'
-import { execFile, spawn } from 'node:child_process'
+import { execFile } from 'node:child_process'
 import { loadConfig, log } from './config.js'
 import { diag, pruneDiagnostics } from './diag.js'
 import { AttentionQueue } from './attention/queue.js'
@@ -45,7 +49,6 @@ function ownerId(): string | undefined {
 }
 
 import fs from 'node:fs'
-import os from 'node:os'
 import path from 'node:path'
 import { configDir } from './config.js'
 
@@ -105,66 +108,28 @@ function saveRoute(name: string, route: Route): void {
 
 
 
-function runKimaki(args: string[], timeoutMs = 30000, maxChars = 6000, fromEnd = false): Promise<string> {
-  // kimaki CLI truncates piped stdout at ~64KB (exits before the pipe drains),
-  // so route output through a temp file - file sinks flush completely.
-  return new Promise((resolve) => {
-    const tmp = path.join(os.tmpdir(), `wendy-${process.pid}-${Date.now()}-${Math.random().toString(36).slice(2)}.out`)
-    const child = spawn('bash', ['-c', `exec kimaki "$@" > '${tmp}' 2> '${tmp}.err'`, 'kimaki', ...args], { stdio: 'ignore' })
-    const finish = (): void => {
-      try {
-        let src = tmp
-        try { if (!fs.statSync(tmp).size && fs.statSync(tmp + '.err').size) src = tmp + '.err' } catch {}
-        const st = fs.statSync(src)
-        const window = Math.min(st.size, Math.max(maxChars * 3, 400_000))
-        const buf = Buffer.alloc(window)
-        const fd = fs.openSync(src, 'r')
-        fs.readSync(fd, buf, 0, window, fromEnd ? st.size - window : 0)
-        fs.closeSync(fd)
-        const raw = buf.toString()
-        // kimaki's pretty logger writes '│  HH:MM DB  ...' / '■  HH:MM CLI Failed ...'
-        // lines into the same stream - they are noise to the brain, and a
-        // 'Failed to connect' line is a real error that must read as one.
-        const fail = raw.match(/^■\s+\S+\s+CLI\s+(.*)$/m)
-        if (fail && !raw.replace(/^[│■].*$/gm, '').trim()) { resolve(`ERROR: ${fail[1].slice(0, 300)}`); return }
-        const out = raw.replace(/^[│■]\s+\d\d:\d\d\s+\S+\s+.*\n?/gm, '')
-        resolve(fromEnd ? out.slice(-maxChars) : out.slice(0, maxChars))
-      } catch (e) {
-        resolve(`ERROR: ${String((e as Error).message).slice(0, 300)}`)
-      } finally {
-        try { fs.unlinkSync(tmp) } catch {}
-        try { fs.unlinkSync(tmp + '.err') } catch {}
-      }
-    }
-    const timer = setTimeout(() => child.kill('SIGKILL'), timeoutMs)
-    child.on('error', (e) => { clearTimeout(timer); try { fs.unlinkSync(tmp) } catch {}; try { fs.unlinkSync(tmp + '.err') } catch {}; resolve(`ERROR: ${String(e.message).slice(0, 300)}`) })
-    child.on('close', () => { clearTimeout(timer); finish() })
-  })
+// `session read` without --project tries cwd, then walks every project (16 s worst case).
+async function projectDirFor(id: string): Promise<string | null> {
+  const dir = threadIndex.find((x) => x.id === id)?.dir ?? (isSessionId(id) ? await sessionDir(id) : null)
+  return dir && fs.existsSync(dir) ? dir : null
 }
+async function readSession(id: string, timeoutMs = 60000): Promise<string> {
+  const dir = await projectDirFor(id)
+  return runKimaki(['session', 'read', id, ...(dir ? ['--project', dir] : [])], timeoutMs, 500_000, true)
+}
+const statusAdapter = createStatusAdapter({ run: runKimakiDetailed, dbHealth: threadHealth })
 
-// ── structure-aware recency: last N real messages, tool noise stripped ──
-function recentMessages(md: string, n = 4): string {
-  md = md.replace(/\S{400,}/g, '[attachment]')
-  const parts = md.split(/^### (?=👤|🤖)/m).filter((p) => p.trim())
-  const cleaned = parts.map((p) => {
-    const body = p
-      .replace(/^\*\*Started using [^\n]+\n?/gm, '')
-      .replace(/^> 🛠️[^\n]*\n?/gm, '')
-      .replace(/^\*Completed in [^\n]+\n?/gm, '')
-      .trim()
-    // Owner/cron prompts are quoted, never presented as imperatives: a local
-    // summariser will otherwise obey "Read X and follow it" instead of summarising.
-    if (body.startsWith('👤')) {
-      const q = body.replace(/^👤 User\n?/, '').replace(/\s+/g, ' ').trim().slice(0, 300)
-      return `👤 Prompt Xipz gave the agent (quoted, not addressed to you): "${q}"`
-    }
-    return body
-  }).filter((p) => {
-    const afterHeader = p.replace(/^(👤 User|🤖 Assistant[^\n]*)\n?/, '').replace(/\s+/g, '')
-    return afterHeader.length > 5
-  })
-  const recent = cleaned.slice(-n)
-  return recent.length ? recent.map((p) => '### ' + p.slice(0, 2000)).join('\n\n') : md.slice(-3000)
+/** Never let the brain report a send that did not happen. null = delivered. */
+function notSent(o: SendOutcome, target: string): string | null {
+  if (o.status === 'failed') return `FAILED - NOTHING WAS SENT to ${target}: ${o.detail}. Do not tell the owner it was sent. Tell him it failed and why, or fix the cause and retry once.`
+  if (o.status === 'unconfirmed') return `UNCONFIRMED - kimaki did not confirm the send to ${target} (${o.detail}). It may or may not have arrived. Do NOT say it was sent: check with read_session or thread_health first, and do not blindly resend (it could duplicate).`
+  return null
+}
+async function sendToSession(sid: string, prompt: string, model?: string | null, timeoutMs = 60000): Promise<SendOutcome> {
+  const r = await runKimakiDetailed(['send', '--session', sid, ...(model ? ['--model', model] : []), '--prompt', prompt], timeoutMs)
+  const o = sendOutcome(r)
+  if (o.status !== 'delivered') diag('send_not_delivered', { sessionId: sid, status: o.status, detail: o.detail.slice(0, 160) })
+  return o
 }
 
 async function executeTool(name: string, args: Record<string, unknown>): Promise<string> {
@@ -187,21 +152,22 @@ async function executeToolInner(name: string, args: Record<string, unknown>): Pr
   }
   if (name === 'dispatch_task') {
     if (isSessionId(String(args.channel_id ?? ''))) return 'ERROR: dispatch_task creates a NEW thread in a channel and needs a channel_id (from list_projects). You passed a session id - to message an EXISTING thread use send_to_session (fire-and-forget) or ask_thread (wait for reply).'
-    const out = await runKimaki([
+    const o = sendOutcome(await runKimakiDetailed([
       'send',
       '--channel', String(args.channel_id ?? ''),
       '--prompt', String(args.prompt ?? ''),
       ...(ownerId() ? ['--user', ownerId()!] : []),
-    ], 60000)
-    const newId = out.match(/ses_[a-zA-Z0-9]+/)?.[0]
-    if (newId) {
+    ], 60000))
+    const bad = notSent(o, `channel ${String(args.channel_id ?? '')}`)
+    if (bad) return bad
+    setTimeout(() => void refreshThreadIndex(), 60000)
+    if (o.sessionId) {
       const label = String(args.prompt ?? '').slice(0, 50)
-      ledgerAdd(newId, label, String(args.prompt ?? ''))
-      watchSession(newId, label)
-      setTimeout(() => void refreshThreadIndex(), 60000)
-      return `dispatched - new session ${newId} (auto-watched and in your spawn ledger)`
+      ledgerAdd(o.sessionId, label, String(args.prompt ?? ''))
+      watchSession(o.sessionId, label)
+      return `dispatched - new session ${o.sessionId} (auto-watched and in your spawn ledger)`
     }
-    return out || 'dispatched'
+    return `dispatched - thread created${o.url ? ` (${o.url})` : ''}, session id not known yet (the bot starts it; lookup_thread finds it within a few minutes)`
   }
   if (name === 'list_recent_sessions') {
     // She passes names ("wendy", "BaseStonk") - resolve against the thread index.
@@ -249,31 +215,43 @@ async function executeToolInner(name: string, args: Record<string, unknown>): Pr
     return 'watching - I will announce updates'
   }
   if (name === 'search_sessions') {
-    return runKimaki(['session', 'search', String(args.query ?? '')], 45000)
+    // --all: the default scope is Wendy's own cwd project. An all-project search
+    // can take over a minute, so a slow one finishes in the background.
+    const q = String(args.query ?? '')
+    const days = args.days === undefined || args.days === null || args.days === '' ? undefined : Number(args.days)
+    const job = runKimaki(searchArgs(q, days), days === 0 ? 600000 : 240000, 200_000).then((raw) => formatSearch(raw, q))
+    const quick = await Promise.race([job, new Promise<null>((r) => setTimeout(() => r(null), 25000))])
+    if (quick !== null) return quick
+    void job.then((res) => announce(`[MED] Search for "${q}" finished: ${res.slice(0, 1200)}`, 'interrupt'))
+    return `SEARCHING - the all-project search for "${q}" is still running; its results will arrive as a [BACKGROUND UPDATE]. Nothing has been found yet - do not report any result until it lands.`
   }
   if (name === 'ask_thread') {
     // Proxy in and wait for the agent's reply; return only the tail (speech needs a summary, not a transcript).
     const askId = String(args.session_id ?? '')
-    const t0 = Date.now()
     const keepA = modelPins.pinned(askId)?.model ?? currentModel(askId)
-    const out = await runKimaki([
+    const r = await runKimakiDetailed([
       'send', '--session', askId, ...(keepA ? ['--model', keepA] : []),
       '--prompt', String(args.prompt ?? ''), '--wait',
     ], 12000, 500_000, true)
-    if (Date.now() - t0 >= 11000) {
+    const o = sendOutcome(r)
+    const bad = notSent(o, `"${threadIdent(askId)}" (${askId})`)
+    if (bad) {
+      diag('send_not_delivered', { sessionId: askId, status: o.status, detail: o.detail.slice(0, 160), tool: 'ask_thread' })
+      if (o.status === 'unconfirmed') watchSession(askId, String(args.prompt ?? '').slice(0, 40))
+      return bad
+    }
+    if (r.timedOut) {
       watchSession(askId, String(args.prompt ?? '').slice(0, 40))
       return `DELIVERED TO: "${threadIdent(askId)}" (${askId}) - still working, result will arrive as a [BACKGROUND UPDATE]. If that is NOT the thread the owner meant, say so immediately and resend. Tell the owner it is underway; you are free to keep talking or fire off more tasks in parallel.`
     }
-    return `[reply from "${threadIdent(askId)}" - VERIFY this is the thread you meant]\n` + (out.slice(-4000) || 'no reply captured')
+    const reply = lastAssistantReply(r.out, 4000)
+    return `[reply from "${threadIdent(askId)}" - VERIFY this is the thread you meant]\n` + (reply?.text ?? (r.out.slice(-4000) || 'no reply captured'))
   }
   if (name === 'send_to_session') {
-    const keepS = modelPins.pinned(String(args.session_id ?? ''))?.model ?? currentModel(String(args.session_id ?? ''))
-    const out = await runKimaki([
-      'send', '--session', String(args.session_id ?? ''), ...(keepS ? ['--model', keepS] : []),
-      '--prompt', String(args.prompt ?? ''),
-    ], 60000)
-    watchSession(String(args.session_id), String(args.prompt ?? '').slice(0, 40))
-    return `DELIVERED TO: "${threadIdent(String(args.session_id ?? ''))}" (${String(args.session_id ?? '')}). If that is NOT the thread the owner meant, say so immediately and resend to the right one. ` + (out.slice(-300) || 'dispatched')
+    const sid = String(args.session_id ?? '')
+    const o = await sendToSession(sid, String(args.prompt ?? ''), modelPins.pinned(sid)?.model ?? currentModel(sid))
+    if (o.status !== 'failed') watchSession(sid, String(args.prompt ?? '').slice(0, 40))
+    return notSent(o, `"${threadIdent(sid)}" (${sid})`) ?? `DELIVERED TO: "${threadIdent(sid)}" (${sid}). If that is NOT the thread the owner meant, say so immediately and resend to the right one.${o.url ? ` ${o.url}` : ''}`
   }
   if (name === 'read_session') {
     const deep = Number(args.chars) || 0
@@ -283,7 +261,7 @@ async function executeToolInner(name: string, args: Record<string, unknown>): Pr
     // Robinhood thread). Reading is allowed, but the mismatch must be loud.
     const unverified = isSessionId(rid) && !ledger.isVerified(rid)
     if (unverified) diag('unverified_read', { id: rid })
-    const out = await runKimaki(['session', 'read', String(args.session_id ?? '')], 60000, 500_000, true)
+    const out = await readSession(rid)
     if (out.startsWith('ERROR')) return out
     const fs0 = isSessionId(rid) ? await filterState(rid) : null
     const stuck = fs0?.blocked ? `[${describeFilter(fs0)}]\n` : ''
@@ -331,16 +309,11 @@ async function executeToolInner(name: string, args: Record<string, unknown>): Pr
   }
   if (name === 'fetch_reply') {
     const fid = String(args.session_id ?? '')
-    const out = await runKimaki(['session', 'read', fid], 60000, 500_000, true)
+    const out = await readSession(fid)
     if (out.startsWith('ERROR')) return out
-    const clean = out.replace(/\S{400,}/g, '[attachment]')
-    const parts = clean.split(/^### (?=👤|🤖)/m).filter((p) => p.trim())
-    const assistants = parts.filter((p) => p.startsWith('🤖'))
-      .map((p) => p.replace(/^🤖 Assistant[^\n]*\n?/, '').replace(/^\*\*Started using [^\n]+\n?/gm, '').replace(/^> 🛠️[^\n]*\n?/gm, '').replace(/^\*Completed in [^\n]+\n?/gm, '').trim())
-      .filter((p) => p.length > 5)
-    const last = assistants[assistants.length - 1]
+    const last = lastAssistantReply(out, 4500)
     return last
-      ? `[latest reply in "${threadIdent(fid)}"]\n${last.slice(0, 4500)}`
+      ? `[latest reply in "${threadIdent(fid)}"${last.model ? ` from ${last.model}` : ''}]\n${last.text}`
       : `no assistant reply found in "${threadIdent(fid)}"`
   }
   if (name === 'spawn_agent') {
@@ -362,12 +335,14 @@ async function executeToolInner(name: string, args: Record<string, unknown>): Pr
     }
     const mdl = resolveSpawnModel(args.model as string | undefined)
     if (!mdl) return 'ERROR: unknown model - only local, opus, or fable are permitted'
-    const out = await runKimaki([
+    const o = sendOutcome(await runKimakiDetailed([
       'send', '--channel', cfg.wendyChannelId, '--model', mdl.id, '--prompt', goal,
       ...(ownerId() ? ['--user', ownerId()!] : []),
-    ], 60000)
-    const newId = out.match(/ses_[a-zA-Z0-9]+/)?.[0]
-    if (!newId) return `ERROR: spawn failed - ${out.slice(0, 150)}`
+    ], 60000))
+    const bad = notSent(o, 'the wendy channel')
+    if (bad) return bad
+    const newId = o.sessionId
+    if (!newId) { setTimeout(() => void refreshThreadIndex(), 60000); return `spawned "${label}" on ${mdl.alias} - thread created${o.url ? ` (${o.url})` : ''} but kimaki did not report the session id yet, so it is NOT ledgered or watched. Find it with lookup_thread in a few minutes.` }
     ledgerAdd(newId, `${label} (${mdl.alias})`, goal)
     watchSession(newId, label)
     setTimeout(() => void refreshThreadIndex(), 60000)
@@ -431,11 +406,9 @@ async function executeToolInner(name: string, args: Record<string, unknown>): Pr
       diag('model_switch_blocked', { id: sid, to: mdl.alias, current: currentModel(sid) })
       return `BLOCKED: threads stay on their designated model (${currentModel(sid) ?? 'its current model'}) - a different model can drift off the task. Only the owner switches a thread's model, by asking for it himself. To get a blocked or stalled thread moving, use guard_thread.`
     }
-    const out = await runKimaki([
-      'send', '--session', sid, '--model', mdl.id,
-      '--prompt', `(Wendy switched this thread to a different model to balance compute load. Continue exactly where you left off.)`,
-    ], 60000)
-    if (out.startsWith('ERROR')) return out
+    const o = await sendToSession(sid, `(Wendy switched this thread to a different model to balance compute load. Continue exactly where you left off.)`, mdl.id)
+    const bad = notSent(o, `"${threadIdent(sid)}" (${sid}) - the model was NOT switched`)
+    if (bad) return bad
     const sp = spawns.find((x) => x.id === sid)
     if (sp) { sp.label = sp.label.replace(/ \((local|opus|fable)\)$/, '') + ` (${mdl.alias})`; saveSpawns() }
     diag('thread_model_switched', { id: sid, model: mdl.alias })
@@ -468,9 +441,9 @@ async function executeToolInner(name: string, args: Record<string, unknown>): Pr
   if (name === 'thread_health') {
     const sid = String(args.session_id ?? '')
     if (!isSessionId(sid)) return 'ERROR: need a ses_ id (lookup_thread first)'
-    const h = await threadHealth(sid)
-    if (!h) return 'ERROR: cannot read the OpenCode database on this machine'
-    return `${describeHealth(h)}${guards.has(sid) ? ' GUARDED: you auto-unblock it - no action needed from you.' : ''}`
+    const st = await statusAdapter.status(sid)
+    if (!st) return 'ERROR: no kimaki session status and cannot read the OpenCode database on this machine'
+    return `${describeHealth(st.health)}${guards.has(sid) ? ' GUARDED: you auto-unblock it - no action needed from you.' : ''}`
   }
   if (name === 'recover_thread') {
     const sid = String(args.session_id ?? '')
@@ -556,7 +529,7 @@ async function executeToolInner(name: string, args: Record<string, unknown>): Pr
   }
   if (name === 'index_stats') {
     const age = lastIndexRefresh ? Math.round((Date.now() - lastIndexRefresh) / 60000) : -1
-    return `${threadIndex.length} threads across ${indexProjectCount || 'unknown'} projects${age >= 0 ? `, refreshed ${age} min ago` : ' (loaded from disk, refresh pending)'}`
+    return `${threadIndex.length} threads across ${indexProjectCount || new Set(threadIndex.map((e) => e.dir)).size} projects${age >= 0 ? `, refreshed ${age} min ago` : ' (loaded from disk, refresh pending)'}`
   }
   if (name === 'say') {
     await speak(String(args.text ?? ''))
@@ -914,7 +887,7 @@ export async function think(userText: string, onSentence?: (s: string) => void):
 let lastBrainWake = 0
 
 // ── auto-refreshed index of ALL sessions across ALL projects ──────
-type ThreadIndexEntry = { id: string; title: string; dir: string; updated?: number; threadId?: string }
+type ThreadIndexEntry = IndexEntry
 // Real-time change observations (45s pollers, finish watches). The index walk
 // is 10 minutes; this is what "active" actually means.
 const lastChangeSeen = new Map<string, number>()
@@ -936,7 +909,7 @@ const tailCache = new Map<string, { at: number; p: Promise<string> }>()
 async function liveTailFor(id: string): Promise<string> {
   const c = tailCache.get(id)
   if (c && Date.now() - c.at < 45000) return c.p
-  const p = runKimaki(['session', 'read', id], 20000, 500_000, true).then((tail) => tail.startsWith('ERROR') ? '' : recentMessages(tail, 1).replace(/^### /, '').replace(/\s+/g, ' ').slice(0, 320))
+  const p = readSession(id, 20000).then((tail) => tail.startsWith('ERROR') ? '' : recentMessages(tail, 1).replace(/^### /, '').replace(/\s+/g, ' ').slice(0, 320))
   tailCache.set(id, { at: Date.now(), p })
   return p
 }
@@ -994,24 +967,6 @@ function threadIdent(id: string): string {
   const e = threadIndex.find((x) => x.id === id)
   return e ? `${labelFor(id, e.title)} (${path.basename(e.dir)})${threadLocation(e.threadId)}` : id
 }
-function extractJsonArray(raw: string): unknown[] {
-  // kimaki CLI wraps --json output in log lines (which contain brackets);
-  // try each '[' candidate until one parses as an array.
-  const end = raw.lastIndexOf(']')
-  if (end === -1) return []
-  let from = 0
-  for (let i = 0; i < 50; i++) {
-    const start = raw.indexOf('[', from)
-    if (start === -1 || start >= end) return []
-    try {
-      const v = JSON.parse(raw.slice(start, end + 1))
-      if (Array.isArray(v)) return v
-    } catch {}
-    from = start + 1
-  }
-  return []
-}
-
 let refreshing = false
 async function refreshThreadIndex(): Promise<void> {
   if (refreshing) return
@@ -1020,21 +975,23 @@ async function refreshThreadIndex(): Promise<void> {
 }
 async function refreshThreadIndexInner(): Promise<void> {
   log('wendy: thread index refresh starting')
+  const t0 = Date.now()
   const projRaw = await runKimaki(['project', 'list', '--json'], 45000, 2_000_000)
   const projects = extractJsonArray(projRaw) as Array<{ directory?: string }>
-  log(`wendy: index walk - ${projects.length} projects (raw ${projRaw.length}b${projRaw.startsWith('ERROR') ? ', ' + projRaw.slice(0, 80) : ''})`)
-  const next: ThreadIndexEntry[] = []
-  for (const p of projects) {
-    if (!p.directory) continue
-    const raw = await runKimaki(['session', 'list', '--project', p.directory, '--json'], 45000, 2_000_000)
-    if (raw.startsWith('ERROR')) log(`wendy: index walk ${p.directory.split('/').pop()}: ${raw.slice(0, 90)}`)
-    for (const sess of extractJsonArray(raw) as Array<{ id?: string; title?: string; updated?: string | number; time?: { updated?: number }; threadId?: string }>) {
-      if (!sess.id || !sess.title) continue
-      const upd = Number(sess.time?.updated ?? (typeof sess.updated === 'string' ? Date.parse(sess.updated) : sess.updated)) || 0
-      next.push({ id: sess.id, title: sess.title, dir: p.directory, updated: upd, threadId: sess.threadId && sess.threadId !== 'None' ? String(sess.threadId) : undefined })
+  // One call returns every project's sessions with status/model/tokens/threadId.
+  let next: ThreadIndexEntry[] | null = parseAllSessionList(await runKimaki(['session', 'list', '--all', '--json'], 120000, 8_000_000))
+  if (next?.length === 0 && projects.length) next = null
+  if (!next) {
+    log(`wendy: session list --all unusable - per-project walk over ${projects.length} projects`)
+    next = []
+    for (const p of projects) {
+      if (!p.directory) continue
+      const raw = await runKimaki(['session', 'list', '--project', p.directory, '--json'], 45000, 2_000_000)
+      if (raw.startsWith('ERROR')) log(`wendy: index walk ${p.directory.split('/').pop()}: ${raw.slice(0, 90)}`)
+      next.push(...parseProjectSessionList(raw, p.directory))
     }
   }
-  log(`wendy: index walk done - ${next.length} sessions`)
+  log(`wendy: index refresh done - ${next.length} sessions in ${Date.now() - t0}ms`)
   lastIndexRefresh = Date.now(); indexProjectCount = projects.length
   if (next.length && threadIndex.length) {
     const prev = new Map(threadIndex.map((e) => [e.id, e.updated ?? 0]))
@@ -1044,7 +1001,7 @@ async function refreshThreadIndexInner(): Promise<void> {
       const prevA = lastAnnounced.get(e.id)
       if (prevA && Date.now() - prevA.at < 10 * 60 * 1000) continue
       const label = labelFor(e.id, e.title)
-      const tail = await runKimaki(['session', 'read', e.id], 45000, 500_000, true)
+      const tail = await readSession(e.id, 45000)
       if (tail.startsWith('ERROR')) { announce(`[LOW] ${label} had activity.`, tierFor(e.id), e.id); continue }
       if (!shouldAnnounce(e.id, tail)) continue
       const brief = await summarizeForVoice(label, recentMessages(tail, 3))
@@ -1139,7 +1096,7 @@ setInterval(() => {
       log(`wendy: scheduled ${d.kind} due - ${d.note}`)
       diag('schedule_fire', { kind: d.kind, note: d.note })
       if (d.kind === 'check' && d.sessionId) {
-        const out = await runKimaki(['session', 'read', d.sessionId], 60000, 500_000, true)
+        const out = await readSession(d.sessionId, 60000)
         const summary = out.startsWith('ERROR')
           ? `I couldn't read that thread just now.`
           : shouldAnnounce(d.sessionId, out)
@@ -1602,7 +1559,7 @@ const triggersPath = (): string => path.join(workspaceDir(), 'triggers.json')
 try { triggers = JSON.parse(fs.readFileSync(triggersPath(), 'utf-8')) } catch {}
 function saveTriggers(): void { try { fs.writeFileSync(triggersPath(), JSON.stringify(triggers)) } catch {} }
 async function evaluateTriggers(sessionId: string, tail: string): Promise<void> {
-  const fresh = recentMessages(tail, 2)
+  const fresh = recentMessages(tail, 2, false) // agent text only: tool step summaries must not fire content triggers
   for (const tr of triggers.filter((x) => x.sessionId === sessionId)) {
     let re: RegExp
     try { re = new RegExp(tr.pattern, 'i') } catch { continue }
@@ -1612,11 +1569,13 @@ async function evaluateTriggers(sessionId: string, tail: string): Promise<void> 
     if (tr.lastMatch === key) continue
     tr.lastMatch = key; tr.fired++; saveTriggers()
     diag('trigger_fired', { id: tr.id, sessionId, pattern: tr.pattern, action: tr.action, fired: tr.fired })
+    let sendNote = ''
     if (tr.action === 'send' || tr.action === 'both') {
-      const mdl = modelPins.pinned(sessionId)?.model ?? currentModel(sessionId)
-      await runKimaki(['send', '--session', sessionId, ...(mdl ? ['--model', mdl] : []), '--prompt', tr.prompt ?? ''], 60000)
+      const o = await sendToSession(sessionId, tr.prompt ?? '', modelPins.pinned(sessionId)?.model ?? currentModel(sessionId))
+      sendNote = o.status === 'delivered' ? ' - counter-message sent' : ` - counter-message NOT sent (${o.status}: ${o.detail.slice(0, 80)})`
+      if (tr.action === 'send' && o.status !== 'delivered') announce(`[HIGH] Trigger "${tr.label}" fired on "${threadIdent(sessionId)}" but its counter-message was NOT sent (${o.status}: ${o.detail.slice(0, 80)}).`, 'interrupt', sessionId)
     }
-    if (tr.action === 'ping' || tr.action === 'both') announce(`[HIGH] Trigger "${tr.label}" fired on "${threadIdent(sessionId)}": matched "${m[0].slice(0, 80)}"${tr.action === 'both' ? ' - counter-message sent' : ''}.`, 'interrupt', sessionId)
+    if (tr.action === 'ping' || tr.action === 'both') announce(`[HIGH] Trigger "${tr.label}" fired on "${threadIdent(sessionId)}": matched "${m[0].slice(0, 80)}"${sendNote}.`, 'interrupt', sessionId)
     if (tr.once) { triggers = triggers.filter((x) => x.id !== tr.id); saveTriggers() }
   }
 }
@@ -1666,7 +1625,7 @@ function watchSession(id: string, label: string): void {
   log(`wendy: watching ${label} (${id})`)
   // Baseline NOW - replies landing after this instant are deltas. Baselining on
   // the first poll (~45s later) silently swallowed fast replies.
-  void runKimaki(['session', 'read', id], 45000, 500_000, true).then((tail) => {
+  void readSession(id, 45000).then((tail) => {
     if (!tail.startsWith('ERROR')) w.fp = fingerprint(tail)
     w.baselined = true
   })
@@ -1679,7 +1638,7 @@ async function pollWatchlist(): Promise<void> {
       else { watchlist.splice(i, 1); continue }
     }
     if (!w.baselined) continue
-    const tail = await runKimaki(['session', 'read', w.id], 45000, 500_000, true)
+    const tail = await readSession(w.id, 45000)
     if (tail.startsWith('ERROR')) continue
     const nfp = fingerprint(tail)
     if (nfp !== w.fp) {
@@ -2089,9 +2048,10 @@ async function fireCommitment(c: Commitment): Promise<void> {
   } else if (again?.status === 'done') diag('commitment_done', { what: c.what, attempts: c.attempts })
   else if (again && again.attempts >= 10) { again.status = 'expired'; saveCommitments(); awayLog.push({ at: Date.now(), kind: 'gave up', trigger: c.what, reply: 'still not resolved after 10 attempts - needs you' }); saveAway() }
 }
-function sendKeepModel(sid: string, prompt: string): Promise<string> {
-  const keep = modelPins.pinned(sid)?.model ?? currentModel(sid)
-  return runKimaki(['send', '--session', sid, ...(keep ? ['--model', keep] : []), '--prompt', prompt], 60000)
+/** Guards treat any 'ERROR' prefix as "brief not delivered". */
+async function sendKeepModel(sid: string, prompt: string): Promise<string> {
+  const o = await sendToSession(sid, prompt, modelPins.pinned(sid)?.model ?? currentModel(sid))
+  return o.status === 'delivered' ? `delivered${o.url ? ` ${o.url}` : ''}` : `ERROR: send ${o.status} - ${o.detail}`
 }
 const guards = new Guards({
   dir: workspaceDir(),
@@ -2115,8 +2075,30 @@ setInterval(() => {
   void guards.tick().catch(() => {})
 }, 20000).unref()
 const filterAnnounced = new Map<string, number>()
+const BLOCK_WINDOW_MS = 3 * 3600000
+/** Sessions known to be recently active: index status/updated, live pollers, watches, own spawns. */
+function activeSessionIds(windowMs = BLOCK_WINDOW_MS): string[] {
+  const now = Date.now()
+  const ids = new Set<string>()
+  for (const e of threadIndex) if (e.status === 'busy' || e.status === 'showing-question' || (e.updated && now - e.updated < windowMs)) ids.add(e.id)
+  for (const [id, at] of lastChangeSeen) if (now - at < windowMs) ids.add(id)
+  for (const w of watchlist) ids.add(w.id)
+  for (const sp of runningSpawns()) ids.add(sp.id)
+  return [...ids]
+}
+/** No local OpenCode DB (e.g. a remote node): ask kimaki per session, only if it has `session status`. */
+async function blockedViaKimaki(ids: string[]): Promise<Array<{ sessionId: string; state: FilterState }>> {
+  if (!(await statusAdapter.isSupported())) return []
+  const out: Array<{ sessionId: string; state: FilterState }> = []
+  for (const sessionId of ids.slice(0, 10)) {
+    const st = await statusAdapter.status(sessionId)
+    if (st?.report?.state === 'blocked') out.push({ sessionId, state: filterFromReport(st.report, st.health.filter) })
+  }
+  return out
+}
 setInterval(() => {
-  void blockedSessions(3 * 3600000).then((list) => {
+  const ids = activeSessionIds()
+  void blockedSessions(ids, BLOCK_WINDOW_MS).then((list) => list ?? blockedViaKimaki(ids)).then((list) => {
     for (const { sessionId, state } of list) {
       if (filterAnnounced.get(sessionId) === state.lastBlockAt || guards.has(sessionId)) continue
       filterAnnounced.set(sessionId, state.lastBlockAt ?? 0)
