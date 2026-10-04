@@ -355,6 +355,11 @@ async function executeToolInner(name: string, args: Record<string, unknown>): Pr
     if (goal.length < 10) return 'ERROR: goal too vague'
     const label = String(args.label ?? goal.slice(0, 40))
     if (String(args.model ?? '').toLowerCase() === 'local' && !localAgentsAllowed()) { diag('local_agent_refused', { tool: 'spawn_agent' }); return LOCAL_REFUSED }
+    if (String(args.model ?? '').toLowerCase() === 'local') {
+      // second brain is on-demand: make sure it is up before the agent's first turn
+      const wake = (loadConfig() as { localAgentWake?: string }).localAgentWake
+      if (wake) await new Promise((r) => execFile('bash', ['-c', wake], { timeout: 30000 }, () => r(null)))
+    }
     const mdl = resolveSpawnModel(args.model as string | undefined)
     if (!mdl) return 'ERROR: unknown model - only local, opus, or fable are permitted'
     const out = await runKimaki([

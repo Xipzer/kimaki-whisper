@@ -209,7 +209,7 @@ export const TOOLS = [
         properties: {
           goal: { type: 'string', description: 'Complete self-contained task for the agent' },
           label: { type: 'string', description: 'Short spoken name for this agent, e.g. "repo scanner"' },
-          model: { type: 'string', enum: ['opus', 'fable'], description: 'opus = strongest (default, the model the owner keeps his threads on), fable = quick cheap tasks. Local (your own brain) is not available for agents.' },
+          model: { type: 'string', enum: ['opus', 'fable', 'local'], description: 'opus = strongest (default, the model the owner keeps his threads on), fable = quick cheap tasks, local = M4 Max second brain (free, uncensored, slower; good for long background work).' },
         },
         required: ['goal'],
       },
